@@ -16,6 +16,7 @@ the tools of the servers it is given (ADR 0007).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -28,6 +29,8 @@ from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.pricing import Usage
 
 MAX_TOKENS = 16_000
+
+log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -60,15 +63,21 @@ class McpTools:
 
         An error from work (FilmBudgetReached, AgentFailed) is raised as itself once the
         clients are closed, not wrapped in the ExceptionGroup of the MCP clients' task group,
-        so callers can catch it by type.
+        so callers can catch it by type. If closing the clients also fails, that error is
+        logged and the work's error still wins: it is what decides how the Run ends.
         """
         failure: Exception | None = None
-        async with AsyncExitStack() as stack:
-            tools = await cls.connect(stack, servers)
-            try:
-                return await work(tools)
-            except Exception as err:
-                failure = err
+        try:
+            async with AsyncExitStack() as stack:
+                tools = await cls.connect(stack, servers)
+                try:
+                    return await work(tools)
+                except Exception as err:
+                    failure = err
+        except Exception:
+            if failure is None:
+                raise
+            log.warning("closing the MCP clients failed after %r", failure, exc_info=True)
         assert failure is not None
         raise failure
 

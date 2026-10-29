@@ -225,7 +225,7 @@ async def test_the_watcher_returns_grounded_key_moments(films: Path, tmp_path: P
     moments, fake = await run.watch([look, see_every_frame, submit()])
 
     assert 5 <= len(moments) <= 10
-    assert moments[0].quote is not None and moments[0].quote.text == "The river remembers."  # as heard, not as submitted
+    assert moments[0].quote is not None and moments[0].quote.text == "The river remembers."  # as heard
     assert moments[0].characters == ["Agent 327"]
     assert [m.start for m in moments] == sorted(m.start for m in moments)
 

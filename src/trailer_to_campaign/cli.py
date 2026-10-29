@@ -1,16 +1,20 @@
 """The t2c command line.
 
     t2c dummy-run --film sample --budget 0.001
+    t2c run --film agent-327 [--source trailer.mp4]
     t2c watch --film agent-327 [--source trailer.mp4]
     t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
 
+run is one Run for a Film: the Watcher, the Approval of its Key Moments, the
+Copywriter and the Checker, then the Approval of the Social Posts, in this
+terminal, under one Film Budget and one Run Log.
 dummy-run sends fake model calls through the Film Budget meter, so the hard
 stop and the run log can be checked without an API key or any spend.
 watch runs the Watcher on a Film's trailer (the catalog's link unless --source
 names one) and writes its Key Moments next to the Run Log. write runs the
-Copywriter on those Key Moments and writes the Social Posts the same way; until
-T7 joins them, each command is a Run of its own. write always runs the Checker
-after the Copywriter: no post leaves it unchecked.
+Copywriter and the Checker on those Key Moments and writes the Social Posts the
+same way: no post leaves it unchecked. watch and write are single stages, each a
+Run of its own, for trying one agent; run is the Run a marketer uses.
 """
 
 from __future__ import annotations
@@ -30,10 +34,7 @@ from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
 from trailer_to_campaign.config import MissingApiKey, Settings, load_settings, parse_film_budget
 from trailer_to_campaign.pricing import Usage
-from trailer_to_campaign.run_log import RunLog, check_film_slug
-
-EXIT_AGENT_FAILED = 1
-EXIT_FILM_BUDGET_REACHED = 3
+from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
 DUMMY_MODEL = "claude-opus-5-5"
 DUMMY_INPUT_TOKENS = 2_000
@@ -75,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     dummy.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     dummy.add_argument("--calls", type=int, default=5, help="how many fake model calls to make")
     dummy.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    run = commands.add_parser("run", help="one Run for a Film: watch, approve, write and check, approve")
+    run.add_argument("--film", type=_film_arg, required=True)
+    run.add_argument("--source", help="a file in films/<film>/source/ or a trailer link (default: the catalog's)")
+    run.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
+    run.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
 
     watch = commands.add_parser("watch", help="run the Watcher on a Film's trailer and write its Key Moments")
     watch.add_argument("--film", type=_film_arg, required=True)
@@ -177,22 +184,54 @@ def run_agent(
     return code, results
 
 
-def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
-    from trailer_to_campaign.agents import watcher
-
+def _key_and_trailer(film: str, source: str | None, settings: Settings) -> tuple[str, str] | None:
+    """The API key and the trailer to watch, checked before any Run starts; None after saying what's wrong."""
     try:
         api_key = settings.require_api_key()
         source = source or load_film(settings.films_dir, film).catalog.trailer
     except (MissingApiKey, ValueError) as err:  # ValueError: a bad or missing film.toml
         print(err, file=sys.stderr)
-        return 2
+        return None
     if not source:
         print(f"{film} has no trailer link in its film.toml; name one with --source", file=sys.stderr)
+        return None
+    return api_key, source
+
+
+def _at_a_terminal() -> bool:
+    """Approval must be typed by a person: `yes a | t2c run` would approve every draft unseen."""
+    return sys.stdin.isatty()
+
+
+def run(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    from trailer_to_campaign import pipeline
+    from trailer_to_campaign.approval import TerminalApprover
+
+    if not _at_a_terminal():
+        print("t2c run needs a person at a terminal: only typed Approval counts, never piped input", file=sys.stderr)
         return 2
+    checked = _key_and_trailer(film, source, settings)
+    if checked is None:
+        return 2
+    api_key, source = checked
+    stages = pipeline.real_stages(film, source, settings, lambda: make_client(api_key))
+    return pipeline.run_film(film, budget, runs_dir, stages, TerminalApprover())
+
+
+def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    from trailer_to_campaign.agents import watcher
+
+    checked = _key_and_trailer(film, source, settings)
+    if checked is None:
+        return 2
+    api_key, source = checked
 
     async def start(meter: FilmMeter) -> list[Any]:
-        servers, client = watcher.watcher_servers(settings), make_client(api_key)
-        return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
+        from trailer_to_campaign.pipeline import stage_client
+
+        async with stage_client(lambda: make_client(api_key)) as client:
+            servers = watcher.watcher_servers(settings)
+            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
 
     code, moments = run_agent(film, budget, runs_dir, "watcher", start, "key_moments.json", "Key Moments")
     for m in moments:
@@ -223,8 +262,11 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
 
     async def start(meter: FilmMeter) -> list[Any]:
         # The whole loop, never the Copywriter alone: no post leaves this command unchecked.
-        agents = review.agents_for(film, settings, make_client(api_key), meter)
-        return await review.write_and_check(key_moments, agents, meter)
+        from trailer_to_campaign.pipeline import stage_client
+
+        async with stage_client(lambda: make_client(api_key)) as client:
+            agents = review.agents_for(film, settings, client, meter)
+            return await review.write_and_check(key_moments, agents, meter)
 
     code, checked = run_agent(film, budget, runs_dir, "copywriter+checker", start, "social_posts.json", "Social Posts")
     for c in checked:
@@ -279,8 +321,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             calls=args.calls,
             runs_dir=args.runs_dir or settings.runs_dir,
         )
-    if args.command == "watch":
-        return watch(
+    if args.command in ("run", "watch"):
+        command = run if args.command == "run" else watch
+        return command(
             film=args.film,
             source=args.source,
             budget=args.budget or settings.film_budget_usd,

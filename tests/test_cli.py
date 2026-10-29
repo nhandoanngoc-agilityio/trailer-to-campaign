@@ -152,6 +152,13 @@ def test_servers_refuse_to_start_without_a_films_folder(
     assert "T2C_FILMS_DIR" in capsys.readouterr().err
 
 
+class ClosableClient(str):
+    """A stand-in client that compares as its name and can be closed, like the real one."""
+
+    async def close(self) -> None:
+        pass
+
+
 # t2c watch: the wiring around the Watcher (the Watcher itself is tested in test_watcher.py).
 
 FILMS = Path(__file__).resolve().parent.parent / "films"
@@ -175,7 +182,7 @@ class FakeWatcher:
         self.outcome = outcome
         monkeypatch.setattr(watcher, "watch_trailer", self)
         monkeypatch.setattr(watcher, "watcher_servers", lambda settings: ["footage", "catalog"])
-        monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
+        monkeypatch.setattr(cli, "make_client", lambda api_key: ClosableClient(f"client for {api_key}"))
 
     async def __call__(self, film: str, source: str, *, servers: Any, client: Any, meter: Any) -> Any:
         self.calls.append({"film": film, "source": source, "servers": servers, "client": client})
@@ -319,7 +326,7 @@ class FakeCopywriter:
         self.spend, self.flag = spend, flag
         monkeypatch.setattr(review, "write_and_check", self)
         monkeypatch.setattr(review, "agents_for", lambda film, settings, client, meter: ("agents", film, client))
-        monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
+        monkeypatch.setattr(cli, "make_client", lambda api_key: ClosableClient(f"client for {api_key}"))
 
     async def __call__(self, key_moments: Any, agents: Any, meter: Any, first_draft: Any = None) -> Any:
         from trailer_to_campaign.agents.review import CheckedPost
@@ -463,3 +470,77 @@ def test_write_keeps_the_passed_posts_when_the_film_budget_runs_out_mid_review(
     [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
     assert [p["status"] for p in json.loads(saved.read_text())] == ["passed", "flagged"]
     assert watch_log(tmp_path / "runs")[-1]["stop_reason"] == "film_budget_reached"
+
+
+# t2c run: one Run for a Film (the pipeline itself is tested in test_pipeline.py).
+
+
+class FakePipeline:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, terminal: bool = True) -> None:
+        from trailer_to_campaign import cli, pipeline
+
+        self.calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(cli, "_at_a_terminal", lambda: terminal)
+        monkeypatch.setattr(pipeline, "run_film", self)
+        monkeypatch.setattr(
+            pipeline, "real_stages", lambda film, source, settings, make: ("stages", film, source, make())
+        )
+        monkeypatch.setattr(cli, "make_client", lambda api_key: ClosableClient(f"client for {api_key}"))
+
+    def __call__(self, film: str, budget: Any, runs_dir: Path, stages: Any, approver: Any) -> int:
+        self.calls.append(
+            {"film": film, "budget": budget, "runs_dir": runs_dir, "stages": stages, "approver": approver}
+        )
+        return 0
+
+
+def test_run_needs_an_api_key_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakePipeline(monkeypatch)
+    argv = ["run", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={"T2C_FILMS_DIR": str(FILMS)}) == 2
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def test_run_wires_one_run_with_a_terminal_approver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from decimal import Decimal
+
+    from trailer_to_campaign.approval import TerminalApprover
+
+    fake = FakePipeline(monkeypatch)
+    argv = ["run", "--film", "agent-327", "--budget", "1.50", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env=KEY_ENV) == 0
+    [call] = fake.calls
+    assert call["film"] == "agent-327" and call["budget"] == Decimal("1.50") and call["runs_dir"] == tmp_path / "runs"
+    assert call["stages"] == (
+        "stages",
+        "agent-327",
+        "https://www.youtube.com/watch?v=mN0zPOpADL4",
+        "client for sk-test",
+    )
+    assert isinstance(call["approver"], TerminalApprover)  # a person decides; there is no other approver to choose
+
+
+def test_run_needs_a_film_that_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline(monkeypatch)
+    assert main(["run", "--film", "agent-237", "--runs-dir", str(tmp_path / "runs")], env=KEY_ENV) == 2
+    assert fake.calls == []
+
+
+def test_run_refuses_approvals_that_are_not_typed_at_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`yes a | t2c run` must not approve every draft with no person at the keyboard."""
+    fake = FakePipeline(monkeypatch, terminal=False)
+    assert main(["run", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")], env=KEY_ENV) == 2
+    assert "terminal" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+def test_every_command_shares_one_set_of_exit_codes() -> None:
+    from trailer_to_campaign import cli, pipeline, run_log
+
+    assert cli.EXIT_FILM_BUDGET_REACHED is pipeline.EXIT_FILM_BUDGET_REACHED is run_log.EXIT_FILM_BUDGET_REACHED
+    assert cli.EXIT_AGENT_FAILED is pipeline.EXIT_AGENT_FAILED is run_log.EXIT_AGENT_FAILED

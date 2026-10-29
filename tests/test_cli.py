@@ -475,7 +475,7 @@ class FakePipeline:
         self.calls: list[dict[str, Any]] = []
         monkeypatch.setattr(pipeline, "run_film", self)
         monkeypatch.setattr(
-            pipeline, "real_stages", lambda film, source, settings, client: ("stages", film, source, client)
+            pipeline, "real_stages", lambda film, source, settings, make: ("stages", film, source, make())
         )
         monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
 

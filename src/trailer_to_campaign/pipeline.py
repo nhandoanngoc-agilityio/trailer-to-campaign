@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from pathlib import Path
@@ -43,17 +44,22 @@ class Stages:
     recheck: Callable[[SocialPost, list[KeyMoment], FilmMeter], Awaitable[Recheck]]
 
 
-def real_stages(film: str, source: str, settings: Settings, client: Any) -> Stages:
+def real_stages(film: str, source: str, settings: Settings, make_client: Callable[[], Any]) -> Stages:
+    """The real agents. Each stage runs in its own event loop (anyio.run), and an async client is bound
+    to the loop it first ran in, so every stage makes its own client and closes it."""
     from trailer_to_campaign.agents import checker, review, watcher
     from trailer_to_campaign.agents.social_posts import NotTraced, trace
     from trailer_to_campaign.catalog import load_film
 
     async def watch(meter: FilmMeter) -> list[KeyMoment]:
-        servers = watcher.watcher_servers(settings)
-        return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
+        async with _client(make_client) as client:
+            servers = watcher.watcher_servers(settings)
+            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
 
     async def write_and_check(key_moments: list[KeyMoment], meter: FilmMeter) -> list[CheckedPost]:
-        return await review.write_and_check(key_moments, review.agents_for(film, settings, client, meter), meter)
+        async with _client(make_client) as client:
+            agents = review.agents_for(film, settings, client, meter)
+            return await review.write_and_check(key_moments, agents, meter)
 
     async def recheck(post: SocialPost, key_moments: list[KeyMoment], meter: FilmMeter) -> Recheck:
         """A marketer's edit, traced and checked once: shown to them, never a gate on their decision."""
@@ -63,11 +69,22 @@ def real_stages(film: str, source: str, settings: Settings, client: Any) -> Stag
             problems = []
         except NotTraced as err:
             problems = err.problems
-        servers = checker.checker_servers(settings)
-        [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
+        async with _client(make_client) as client:
+            servers = checker.checker_servers(settings)
+            [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
         return Recheck(problems, verdict)
 
     return Stages(watch=watch, write_and_check=write_and_check, recheck=recheck)
+
+
+@asynccontextmanager
+async def _client(make_client: Callable[[], Any]) -> AsyncIterator[Any]:
+    """A client for one stage, in that stage's event loop, closed when the stage ends."""
+    client = make_client()
+    try:
+        yield client
+    finally:
+        await client.close()
 
 
 def run_film(

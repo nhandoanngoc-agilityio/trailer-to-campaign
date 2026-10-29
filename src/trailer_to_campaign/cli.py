@@ -209,7 +209,7 @@ def run(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings
     if checked is None:
         return 2
     api_key, source = checked
-    stages = pipeline.real_stages(film, source, settings, make_client(api_key))
+    stages = pipeline.real_stages(film, source, settings, lambda: make_client(api_key))
     return pipeline.run_film(film, budget, runs_dir, stages, TerminalApprover())
 
 

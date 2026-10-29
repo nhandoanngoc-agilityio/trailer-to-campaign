@@ -42,6 +42,9 @@ class FakeClient:
     def __init__(self, steps: list[Step]) -> None:
         self.messages = FakeMessages(steps)
 
+    async def close(self) -> None:
+        pass
+
 
 def reply(*content: dict[str, Any], stop: str = "tool_use") -> Message:
     return Message.model_validate(
@@ -74,3 +77,33 @@ def result_json(params: dict[str, Any], tool_use_id: str) -> Any:
     [block] = [b for b in results(params) if b["tool_use_id"] == tool_use_id]
     assert not block["is_error"], block["content"]
     return json.loads(block["content"][0]["text"])
+
+
+class LoopBoundClient(FakeClient):
+    """Like the real async client: bound to the event loop it first ran in, broken in any other."""
+
+    def __init__(self, steps: list[Step]) -> None:
+        super().__init__(steps)
+        self.closed = False
+        bound: list[object] = []
+        messages = self.messages
+
+        def check_loop() -> None:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            if bound and bound[0] is not loop:
+                raise RuntimeError("Event loop is closed")
+            bound.append(loop)
+
+        for name in ("count_tokens", "create"):
+            method = getattr(messages, name)
+
+            async def bound_method(*args: Any, _method: Any = method, **kwargs: Any) -> Any:
+                check_loop()
+                return await _method(*args, **kwargs)
+
+            setattr(messages, name, bound_method)
+
+    async def close(self) -> None:
+        self.closed = True

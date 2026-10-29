@@ -72,6 +72,14 @@ _Avoid_: Minor change, tweak
 The maximum model spend allowed for producing one Campaign; the run stops when it is reached.
 _Avoid_: Cost limit, quota
 
+**Run**:
+One pass of the agent team over one Film, from its trailer to Approval; it ends completed, at the Film Budget, or in an error.
+_Avoid_: Job, execution, session
+
+**Run Log**:
+The record a Run leaves of every model call, what each cost, and how the Run ended.
+_Avoid_: Trace, audit log, history
+
 **Eval Set**:
 A fixed group of past Films, with the posts the team actually published and planted Traps, that every change to the agents is tested against.
 _Avoid_: Test data, benchmark

@@ -297,7 +297,7 @@ async def test_the_real_recheck_traces_the_edit_and_asks_the_checker(tmp_path: P
     assert "A spy walks in." in task  # the Checker judged the marketer's edit
 
 
-def test_each_stage_gets_a_client_of_its_own_event_loop(tmp_path: Path) -> None:
+def test_each_stage_gets_a_client_of_its_own_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression: one async client shared across stages failed in the second with 'Event loop is closed'."""
     import anyio
     from fake_claude import LoopBoundClient, reply, use
@@ -328,9 +328,57 @@ def test_each_stage_gets_a_client_of_its_own_event_loop(tmp_path: Path) -> None:
         )
         return made[-1]
 
+    from trailer_to_campaign import catalog
+
+    reads: list[str] = []
+    real_load = catalog.load_film
+    monkeypatch.setattr(catalog, "load_film", lambda films_dir, f: reads.append(f) or real_load(films_dir, f))
     stages = real_stages("sample", "trailer.mp4", Settings(films_dir=tmp_path / "films"), make_client)
     meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
     edit = SocialPost("tiktok", "en", "A spy walks in. Stream it now.", [])
     for _ in range(2):  # two stages, two event loops, as in t2c run
-        assert anyio.run(stages.recheck, edit, [moment(1)], meter).verdict == Verdict(True, [])
+        result = anyio.run(stages.recheck, edit, [moment(1)], meter)
+        assert result.verdict == Verdict(True, [])
     assert len(made) == 2 and all(c.closed for c in made)
+    assert reads == ["sample"]  # the catalog is read once per Run, not per re-check
+    assert "aren't traced" in (result.note or "")  # a person's new facts can't be traced by code: say so
+
+
+# From /code-review: a re-check never ends the Run, and what was decided survives an early stop.
+
+
+@pytest.mark.parametrize("failure", [OSError("the checker server did not start"), ValueError("film.toml changed")])
+def test_any_recheck_failure_is_shown_and_never_ends_the_run(tmp_path: Path, failure: Exception) -> None:
+    stages, approver = FakeStages(), marketer()
+    stages.recheck_raises = failure
+    code, lines, _ = run(tmp_path, stages, approver)
+    assert code == 0 and lines[-1]["stop_reason"] == "completed"
+    assert "not re-checked" in (approver.last_recheck.note or "")
+    assert len(events(lines, "approval")) == 11
+
+
+def test_an_early_stop_keeps_the_decided_key_moments_and_posts(tmp_path: Path) -> None:
+    class LeavesAtPost3(ScriptedApprover):
+        def social_post(self, i: int, n: int, checked: CheckedPost, recheck: Any) -> PostDecision:
+            if i == 3:
+                raise ApprovalAborted("the terminal closed")
+            return super().social_post(i, n, checked, recheck)
+
+    m = marketer()
+    approver = LeavesAtPost3(m.moments, m.posts)
+    code, lines, run_dir = run(tmp_path, FakeStages(), approver)
+    assert code == 1 and lines[-1]["stop_reason"] == "error"
+    campaign = json.loads((run_dir / "campaign.json").read_text())
+    assert campaign["stop_reason"] == "error"
+    assert campaign["key_moments"][1]["key_moment"]["what_happens"] == "Moment 2, as the marketer says it."
+    assert [p["decision"] for p in campaign["social_posts"]] == ["edit", "reject"]
+
+
+def test_the_film_budget_mid_review_keeps_the_key_moment_decisions(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.write_raises = FilmBudgetReachedMidReview(
+        FilmBudgetReached(Decimal("1.9"), Decimal("2"), Decimal("0.3")), []
+    )
+    _, _, run_dir = run(tmp_path, stages, marketer())
+    campaign = json.loads((run_dir / "campaign.json").read_text())
+    assert campaign["stop_reason"] == "film_budget_reached" and len(campaign["key_moments"]) == 5

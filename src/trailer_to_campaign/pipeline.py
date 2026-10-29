@@ -13,6 +13,7 @@ tested without a model; real_stages() wires the real agents.
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -33,6 +34,12 @@ from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.config import Settings
 from trailer_to_campaign.run_log import RunLog
 
+# Code traces the Copywriter's claims because it lists them; a person's edit lists none.
+UNTRACED_EDIT = (
+    "Facts you added aren't traced: code checked the quotes, title, limits and brand rules, "
+    "and the Checker judged spoilers and invented details. Check new facts yourself."
+)
+
 EXIT_AGENT_FAILED = 1
 EXIT_FILM_BUDGET_REACHED = 3
 
@@ -51,6 +58,10 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
     from trailer_to_campaign.agents.social_posts import NotTraced, trace
     from trailer_to_campaign.catalog import load_film
 
+    @functools.cache
+    def catalog() -> dict[str, Any]:  # read once per Run: it can't change mid-Run
+        return asdict(load_film(settings.films_dir, film).catalog)
+
     async def watch(meter: FilmMeter) -> list[KeyMoment]:
         async with _client(make_client) as client:
             servers = watcher.watcher_servers(settings)
@@ -63,16 +74,15 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
 
     async def recheck(post: SocialPost, key_moments: list[KeyMoment], meter: FilmMeter) -> Recheck:
         """A marketer's edit, traced and checked once: shown to them, never a gate on their decision."""
-        catalog = asdict(load_film(settings.films_dir, film).catalog)
         try:
-            trace([asdict(post)], key_moments, catalog, required={(post.platform, post.language)})
+            trace([asdict(post)], key_moments, catalog(), required={(post.platform, post.language)})
             problems = []
         except NotTraced as err:
             problems = err.problems
         async with _client(make_client) as client:
             servers = checker.checker_servers(settings)
             [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
-        return Recheck(problems, verdict)
+        return Recheck(problems, verdict, note=UNTRACED_EDIT)
 
     return Stages(watch=watch, write_and_check=write_and_check, recheck=recheck)
 
@@ -103,7 +113,8 @@ def run_film(
     except (AgentFailed, ApprovalAborted) as err:
         return run.end("error", EXIT_AGENT_FAILED, str(err))
     except BaseException:
-        run_log.finish(meter.spent, "error")  # Ctrl-C or a crash still leaves the total
+        run.save_campaign("error")  # what the marketer decided survives Ctrl-C or a crash
+        run_log.finish(meter.spent, "error")  # and the log still has the total
         raise
     return run.end("completed", 0)
 
@@ -112,6 +123,8 @@ class _Run:
     def __init__(self, film: str, run_log: RunLog, meter: FilmMeter, out: TextIO) -> None:
         self.film, self.run_log, self.meter, self.out = film, run_log, meter, out
         self.decisions: dict[str, list[bool]] = {"key_moments": [], "social_posts": []}  # approved light or unedited?
+        self.km_record: list[dict[str, Any]] = []  # what the marketer decided, kept however the Run ends
+        self.posts_record: list[dict[str, Any]] = []
 
     def say(self, text: str) -> None:
         print(text, file=self.out, flush=True)
@@ -131,18 +144,17 @@ class _Run:
         self.save("key_moments.json", [asdict(m) for m in moments])
 
         self.say(f"\nApproval of {len(moments)} Key Moments")
-        approved, km_record = [], []
+        approved = []
         for i, moment in enumerate(moments, start=1):
             decision = approver.key_moment(i, len(moments), moment)
             self._record("key_moments", decision.decision, decision.light, item=i, **_km_fields(decision))
             kept = _apply(moment, decision)
-            km_record.append(
+            self.km_record.append(
                 {"key_moment": asdict(kept or moment), "decision": decision.decision, "light": decision.light}
             )
             if kept:
                 approved.append(kept)
 
-        posts_record: list[dict[str, Any]] = []
         if approved:
             self.say(f"\nThe Copywriter and the Checker are working from {len(approved)} Key Moments...")
             checked = anyio.run(stages.write_and_check, approved, self.meter)
@@ -159,10 +171,14 @@ class _Run:
                     status=c.status,
                     text=decision.text,
                 )
-                posts_record.append({**asdict(c), **_post_fields(c, decision)})
+                self.posts_record.append({**asdict(c), **_post_fields(c, decision)})
         else:
             self.say("\nNo Key Moment was approved, so no Social Posts are written.")
-        self.save("campaign.json", {"film": self.film, "key_moments": km_record, "social_posts": posts_record})
+
+    def save_campaign(self, stop: str) -> None:
+        if self.km_record:  # nothing was decided before the Key Moments
+            campaign = {"film": self.film, "stop_reason": stop, "key_moments": self.km_record}
+            self.save("campaign.json", {**campaign, "social_posts": self.posts_record})
 
     def _rechecker(self, stages: Stages, c: CheckedPost, approved: list[KeyMoment]) -> Callable[[str], Recheck]:
         def recheck(text: str) -> Recheck:
@@ -172,6 +188,8 @@ class _Run:
                 return Recheck([], None, note="not re-checked: the Film Budget was reached")
             except AgentFailed as err:
                 return Recheck([], None, note=f"not re-checked: {err}")
+            except Exception as err:  # a re-check informs the marketer; it never ends their Run
+                return Recheck([], None, note=f"not re-checked: {type(err).__name__}: {err}")
 
         return recheck
 
@@ -182,6 +200,7 @@ class _Run:
     def end(self, stop: str, code: int, message: str | None = None) -> int:
         if message:
             self.say(message)
+        self.save_campaign(stop)
         rates = {stage: _rate(d) for stage, d in self.decisions.items()}
         rates["overall"] = _rate([x for d in self.decisions.values() for x in d])
         if any(self.decisions.values()):

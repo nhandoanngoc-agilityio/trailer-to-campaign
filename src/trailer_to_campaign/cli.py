@@ -106,9 +106,10 @@ def serve_footage(settings: Settings) -> int:
 
 
 def serve_film(settings: Settings, spoilers: bool) -> int:
-    from trailer_to_campaign.tools import film
+    from trailer_to_campaign.tools import catalog
+    from trailer_to_campaign.tools import spoilers as spoiler_tool
 
-    create = film.create_spoiler_server if spoilers else film.create_catalog_server
+    create = spoiler_tool.create_spoiler_server if spoilers else catalog.create_catalog_server
     create(settings.films_dir.resolve()).run()  # absolute: an MCP host may start this in / or $HOME
     return 0
 
@@ -131,6 +132,13 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             calls=args.calls,
             runs_dir=args.runs_dir or settings.runs_dir,
         )
+    if args.command.startswith("serve-") and not settings.films_dir.is_dir():
+        # An MCP host may start the server in / or $HOME, where there is no films/ folder.
+        print(
+            f"no films folder at {settings.films_dir.resolve()}; set T2C_FILMS_DIR to the project's films/ folder",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "serve-footage":
         return serve_footage(settings)
     if args.command in ("serve-catalog", "serve-spoilers"):

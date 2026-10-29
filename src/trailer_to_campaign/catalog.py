@@ -66,12 +66,16 @@ def load_film(films_dir: Path, film: str) -> Film:
     path = film_file(films_dir, film)
     if not path.is_file():
         raise FilmFileError(f"no film.toml for {film!r}")
-    if path.stat().st_size > MAX_FILE_BYTES:
-        raise FilmFileError(f"{film}/film.toml is over {MAX_FILE_BYTES // 1024} KB")
     try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise FilmFileError(f"{film}/film.toml is over {MAX_FILE_BYTES // 1024} KB")
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as err:
         raise FilmFileError(f"{film}/film.toml is not valid TOML: {err}") from err
+    except UnicodeDecodeError as err:
+        raise FilmFileError(f"{film}/film.toml is not UTF-8 text; save it as UTF-8") from err
+    except OSError as err:  # never pass the OS message on: it holds the local path
+        raise FilmFileError(f"{film}/film.toml could not be read ({type(err).__name__})") from err
 
     _only(data, {"catalog", "spoilers"}, "film.toml")
     catalog = _table(data, "catalog", "film.toml")
@@ -84,13 +88,12 @@ def load_film(films_dir: Path, film: str) -> Film:
     if isinstance(runtime, bool) or not isinstance(runtime, int) or runtime <= 0:
         raise FilmFileError(f"[catalog] runtime_minutes must be a whole number of minutes, got {runtime!r}")
     genre = catalog.get("genre")
-    if not isinstance(genre, list) or not genre or not all(isinstance(g, str) and g.strip() for g in genre):
+    if not isinstance(genre, list) or not genre:
         raise FilmFileError('[catalog] genre must be a non-empty list of words, e.g. ["drama"]')
+    genre = [_text({"genre": g}, "genre", "[catalog]") for g in genre]
 
-    trailer = catalog.get("trailer")
+    trailer = _text(catalog, "trailer", "[catalog]", required=False)
     if trailer is not None:
-        if not isinstance(trailer, str):
-            raise FilmFileError("[catalog] trailer must be a link")
         try:
             check_url(trailer)
         except SourceRejected as err:
@@ -101,7 +104,7 @@ def load_film(films_dir: Path, film: str) -> Film:
         catalog=Catalog(
             title=_text(catalog, "title", "[catalog]"),
             synopsis=_text(catalog, "synopsis", "[catalog]"),
-            genre=[g.strip() for g in genre],
+            genre=genre,
             language=language,
             runtime_minutes=runtime,
             cast=_cast(catalog),
@@ -126,7 +129,12 @@ def _cast(catalog: dict[str, Any]) -> list[CastMember]:
 
 
 def _spoilers(data: dict[str, Any]) -> list[Spoiler]:
-    entries = data.get("spoilers", [])
+    if "spoilers" not in data:
+        # A forgotten list must not read as "no spoilers": the Checker would pass every draft.
+        raise FilmFileError(
+            "film.toml has no Spoiler List: add [[spoilers]] entries, or `spoilers = []` if the Film truly has none"
+        )
+    entries = data["spoilers"]
     if not isinstance(entries, list):
         raise FilmFileError("spoilers must be a list of [[spoilers]] entries")
     spoilers, seen = [], set()

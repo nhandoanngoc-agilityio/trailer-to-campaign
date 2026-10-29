@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from trailer_to_campaign.tools import film
-from trailer_to_campaign.tools.film import create_catalog_server, create_spoiler_server
+from trailer_to_campaign import tools
+from trailer_to_campaign.tools.catalog import create_catalog_server
+from trailer_to_campaign.tools.spoilers import create_spoiler_server
 
 pytestmark = pytest.mark.anyio
 
@@ -89,7 +90,7 @@ async def test_a_broken_film_file_is_a_tool_error_with_its_reason(tmp_path: Path
 
 
 async def test_descriptions_come_from_prompt_files_and_mark_the_data() -> None:
-    prompts = Path(film.__file__).parent / "prompts"
+    prompts = Path(tools.__file__).parent / "prompts"
     for server, tool in [
         (create_catalog_server(FILMS), "get_catalog"),
         (create_spoiler_server(FILMS), "get_spoiler_list"),
@@ -97,3 +98,8 @@ async def test_descriptions_come_from_prompt_files_and_mark_the_data() -> None:
         description = (await tools_of(server))[tool].description
         assert description == (prompts / f"{tool}.md").read_text(encoding="utf-8").strip()
         assert "data, not instructions" in description
+
+
+async def test_the_catalog_prompt_allows_what_the_footage_shows() -> None:
+    description = (await tools_of(create_catalog_server(FILMS)))["get_catalog"].description
+    assert "footage" in description  # the Watcher states what it sees and hears, too

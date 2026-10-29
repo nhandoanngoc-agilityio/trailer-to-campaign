@@ -107,9 +107,15 @@ def test_spoiler_ids_are_unique(tmp_path: Path) -> None:
         load_film(write(tmp_path, twice), "the-quiet-river")
 
 
-def test_a_film_may_have_no_spoilers(tmp_path: Path) -> None:
-    body = GOOD.split("[[spoilers]]")[0]
+def test_a_film_with_no_spoilers_must_say_so(tmp_path: Path) -> None:
+    body = "spoilers = []\n" + GOOD.split("[[spoilers]]")[0]
     assert load_film(write(tmp_path, body), "the-quiet-river").spoilers == []
+
+
+def test_a_missing_spoiler_list_is_refused(tmp_path: Path) -> None:
+    # A forgotten list must not look like "no spoilers": the Checker would pass everything.
+    with pytest.raises(FilmFileError, match="spoilers"):
+        load_film(write(tmp_path, GOOD.split("[[spoilers]]")[0]), "the-quiet-river")
 
 
 def test_long_text_is_refused(tmp_path: Path) -> None:
@@ -146,3 +152,35 @@ def test_errors_do_not_reveal_the_local_path(tmp_path: Path) -> None:
     with pytest.raises(FilmFileError) as err:
         load_film(write(tmp_path, "[catalog\n"), "the-quiet-river")
     assert str(tmp_path) not in str(err.value)
+
+
+def test_an_unreadable_file_is_a_film_file_error_without_the_path(tmp_path: Path) -> None:
+    path = write(tmp_path, GOOD) / "the-quiet-river" / "film.toml"
+    path.chmod(0)
+    try:
+        with pytest.raises(FilmFileError) as err:
+            load_film(tmp_path, "the-quiet-river")
+    finally:
+        path.chmod(0o644)
+    assert str(tmp_path) not in str(err.value)
+
+
+def test_a_file_that_is_not_utf8_is_a_film_file_error(tmp_path: Path) -> None:
+    folder = tmp_path / "the-quiet-river"
+    folder.mkdir()
+    (folder / "film.toml").write_bytes(GOOD.replace("Mai", "M\u00e0i").encode("cp1258") + b"\xff")
+    with pytest.raises(FilmFileError, match="UTF-8"):
+        load_film(tmp_path, "the-quiet-river")
+
+
+def test_the_trailer_link_is_trimmed_and_capped(tmp_path: Path) -> None:
+    spaced = GOOD.replace('"https://vimeo.com/123456"', '" https://vimeo.com/123456 "')
+    assert load_film(write(tmp_path, spaced), "the-quiet-river").catalog.trailer == "https://vimeo.com/123456"
+    padded = GOOD.replace('"https://vimeo.com/123456"', '"https://vimeo.com/123456?x=' + "a" * 2000 + '"')
+    with pytest.raises(FilmFileError, match="2000"):
+        load_film(write(tmp_path, padded), "the-quiet-river")
+
+
+def test_a_genre_word_is_capped(tmp_path: Path) -> None:
+    with pytest.raises(FilmFileError, match="2000"):
+        load_film(write(tmp_path, GOOD.replace('["drama"]', '["' + "d" * 2001 + '"]')), "the-quiet-river")

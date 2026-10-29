@@ -65,13 +65,13 @@ def film_file(films_dir: Path, film: str) -> Path:
 def load_film(films_dir: Path, film: str) -> Film:
     path = film_file(films_dir, film)
     if not path.is_file():
-        raise FilmFileError(f"no film.toml for {film!r} in {films_dir}")
+        raise FilmFileError(f"no film.toml for {film!r}")
     if path.stat().st_size > MAX_FILE_BYTES:
-        raise FilmFileError(f"{path} is over {MAX_FILE_BYTES // 1024} KB")
+        raise FilmFileError(f"{film}/film.toml is over {MAX_FILE_BYTES // 1024} KB")
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as err:
-        raise FilmFileError(f"{path} is not valid TOML: {err}") from err
+        raise FilmFileError(f"{film}/film.toml is not valid TOML: {err}") from err
 
     _only(data, {"catalog", "spoilers"}, "film.toml")
     catalog = _table(data, "catalog", "film.toml")

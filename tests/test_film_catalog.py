@@ -137,3 +137,12 @@ def test_malformed_toml_is_refused(tmp_path: Path) -> None:
 def test_film_must_be_a_slug(film: str) -> None:
     with pytest.raises(ValueError, match="film"):
         load_film(FILMS, film)
+
+
+def test_errors_do_not_reveal_the_local_path(tmp_path: Path) -> None:
+    with pytest.raises(FilmFileError) as err:
+        load_film(tmp_path, "the-quiet-river")
+    assert str(tmp_path) not in str(err.value)
+    with pytest.raises(FilmFileError) as err:
+        load_film(write(tmp_path, "[catalog\n"), "the-quiet-river")
+    assert str(tmp_path) not in str(err.value)

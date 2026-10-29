@@ -15,6 +15,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+# How a Run's command exits when the Run doesn't complete, the same for every command.
+EXIT_AGENT_FAILED = 1
+EXIT_FILM_BUDGET_REACHED = 3
+
 # A film slug becomes a directory name, so it must not be able to leave runs/.
 FILM_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 

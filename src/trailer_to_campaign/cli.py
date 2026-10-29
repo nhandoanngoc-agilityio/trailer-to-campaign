@@ -12,9 +12,9 @@ dummy-run sends fake model calls through the Film Budget meter, so the hard
 stop and the run log can be checked without an API key or any spend.
 watch runs the Watcher on a Film's trailer (the catalog's link unless --source
 names one) and writes its Key Moments next to the Run Log. write runs the
-Copywriter on those Key Moments and writes the Social Posts the same way; until
-T7 joins them, each command is a Run of its own. write always runs the Checker
-after the Copywriter: no post leaves it unchecked.
+Copywriter and the Checker on those Key Moments and writes the Social Posts the
+same way: no post leaves it unchecked. watch and write are single stages, each a
+Run of its own, for trying one agent; run is the Run a marketer uses.
 """
 
 from __future__ import annotations
@@ -34,10 +34,7 @@ from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
 from trailer_to_campaign.config import MissingApiKey, Settings, load_settings, parse_film_budget
 from trailer_to_campaign.pricing import Usage
-from trailer_to_campaign.run_log import RunLog, check_film_slug
-
-EXIT_AGENT_FAILED = 1
-EXIT_FILM_BUDGET_REACHED = 3
+from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
 DUMMY_MODEL = "claude-opus-5-5"
 DUMMY_INPUT_TOKENS = 2_000
@@ -201,10 +198,18 @@ def _key_and_trailer(film: str, source: str | None, settings: Settings) -> tuple
     return api_key, source
 
 
+def _at_a_terminal() -> bool:
+    """Approval must be typed by a person: `yes a | t2c run` would approve every draft unseen."""
+    return sys.stdin.isatty()
+
+
 def run(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     from trailer_to_campaign import pipeline
     from trailer_to_campaign.approval import TerminalApprover
 
+    if not _at_a_terminal():
+        print("t2c run needs a person at a terminal: only typed Approval counts, never piped input", file=sys.stderr)
+        return 2
     checked = _key_and_trailer(film, source, settings)
     if checked is None:
         return 2
@@ -222,8 +227,11 @@ def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settin
     api_key, source = checked
 
     async def start(meter: FilmMeter) -> list[Any]:
-        servers, client = watcher.watcher_servers(settings), make_client(api_key)
-        return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
+        from trailer_to_campaign.pipeline import stage_client
+
+        async with stage_client(lambda: make_client(api_key)) as client:
+            servers = watcher.watcher_servers(settings)
+            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
 
     code, moments = run_agent(film, budget, runs_dir, "watcher", start, "key_moments.json", "Key Moments")
     for m in moments:
@@ -254,8 +262,11 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
 
     async def start(meter: FilmMeter) -> list[Any]:
         # The whole loop, never the Copywriter alone: no post leaves this command unchecked.
-        agents = review.agents_for(film, settings, make_client(api_key), meter)
-        return await review.write_and_check(key_moments, agents, meter)
+        from trailer_to_campaign.pipeline import stage_client
+
+        async with stage_client(lambda: make_client(api_key)) as client:
+            agents = review.agents_for(film, settings, client, meter)
+            return await review.write_and_check(key_moments, agents, meter)
 
     code, checked = run_agent(film, budget, runs_dir, "copywriter+checker", start, "social_posts.json", "Social Posts")
     for c in checked:

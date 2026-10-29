@@ -32,16 +32,13 @@ from trailer_to_campaign.agents.social_posts import SocialPost
 from trailer_to_campaign.approval import ApprovalAborted, Approver, KeyMomentDecision, PostDecision, Recheck
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.config import Settings
-from trailer_to_campaign.run_log import RunLog
+from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog
 
 # Code traces the Copywriter's claims because it lists them; a person's edit lists none.
 UNTRACED_EDIT = (
     "Facts you added aren't traced: code checked the quotes, title, limits and brand rules, "
     "and the Checker judged spoilers and invented details. Check new facts yourself."
 )
-
-EXIT_AGENT_FAILED = 1
-EXIT_FILM_BUDGET_REACHED = 3
 
 
 @dataclass(frozen=True)
@@ -63,12 +60,12 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
         return asdict(load_film(settings.films_dir, film).catalog)
 
     async def watch(meter: FilmMeter) -> list[KeyMoment]:
-        async with _client(make_client) as client:
+        async with stage_client(make_client) as client:
             servers = watcher.watcher_servers(settings)
             return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
 
     async def write_and_check(key_moments: list[KeyMoment], meter: FilmMeter) -> list[CheckedPost]:
-        async with _client(make_client) as client:
+        async with stage_client(make_client) as client:
             agents = review.agents_for(film, settings, client, meter)
             return await review.write_and_check(key_moments, agents, meter)
 
@@ -79,7 +76,7 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
             problems = []
         except NotTraced as err:
             problems = err.problems
-        async with _client(make_client) as client:
+        async with stage_client(make_client) as client:
             servers = checker.checker_servers(settings)
             [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
         return Recheck(problems, verdict, note=UNTRACED_EDIT)
@@ -88,7 +85,7 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
 
 
 @asynccontextmanager
-async def _client(make_client: Callable[[], Any]) -> AsyncIterator[Any]:
+async def stage_client(make_client: Callable[[], Any]) -> AsyncIterator[Any]:
     """A client for one stage, in that stage's event loop, closed when the stage ends."""
     client = make_client()
     try:

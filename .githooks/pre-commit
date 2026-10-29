@@ -1,0 +1,8 @@
+#!/bin/sh
+# Reject commits on main from any terminal; everything goes through a PR (CLAUDE.md "Never do").
+# Enable once per clone: git config core.hooksPath .githooks
+branch=$(git symbolic-ref --short -q HEAD)
+if [ "$branch" = "main" ]; then
+    echo "pre-commit: committing directly on main is not allowed; create a branch first (t<n>-<slug>)." >&2
+    exit 1
+fi

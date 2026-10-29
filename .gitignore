@@ -3,3 +3,6 @@ __pycache__/
 .env
 films/*/frames/
 runs/
+.env
+.env.*
+!.env.example

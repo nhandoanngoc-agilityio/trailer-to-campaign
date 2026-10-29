@@ -1,0 +1,20 @@
+[project]
+name = "trailer-to-campaign"
+version = "0.1.0"
+description = "Multimodal agent team that turns an indie film trailer into a launch campaign, with human Approval"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

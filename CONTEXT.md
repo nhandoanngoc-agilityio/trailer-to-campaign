@@ -50,6 +50,10 @@ _Avoid_: Reviewer, validator
 A timestamped scene from the Source Footage with its mood and any quotable line; the factual base every other Campaign Draft is built on.
 _Avoid_: Highlight, scene, clip
 
+**Grounded**:
+Said of a Key Moment that the code has checked against what the Watcher was actually shown: frames it looked at, words heard in the Transcript (never unheard lines), and cast from Catalog Metadata. Only grounded Key Moments go on to the Copywriter.
+_Avoid_: Verified, validated, fact-checked
+
 **Social Post**:
 A ready-to-publish caption for one social platform, written in English or Vietnamese.
 _Avoid_: Caption, copy, content

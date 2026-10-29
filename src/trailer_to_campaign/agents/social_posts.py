@@ -1,0 +1,150 @@
+"""Social Posts, and the check that every fact in them traces back to its source.
+
+The Copywriter submits Social Posts as tool input; trace() turns them into
+SocialPost records or refuses the whole set with every problem it found. Traced means:
+
+- one post per platform and language: Facebook, Instagram, TikTok, each in en and vi
+- each within its platform's limits, naming the Film exactly as the catalog does
+- a vi post is written in Vietnamese
+- every claim cites a Key Moment (key_moment:N) or a Catalog Metadata field (catalog:title)
+- every quoted line is a Key Moment's quote, word for word and cited to that moment;
+  in a vi post too, where the English line stays as heard and a gloss may follow unquoted
+
+Code can check that sources exist and quotes are exact; whether a claim says only what
+its source says is for the Checker and the marketer's Approval.
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+from typing import Any
+
+from trailer_to_campaign.agents.key_moments import KeyMoment
+
+PLATFORM_LIMITS = {"facebook": 500, "instagram": 2200, "tiktok": 150}  # characters
+MAX_HASHTAGS = {"instagram": 5}
+LANGUAGES = ("en", "vi")
+CATALOG_FIELDS = ("title", "synopsis", "genre", "language", "runtime_minutes", "cast")
+
+QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”')
+HASHTAG = re.compile(r"#\w+")
+OUTER_PUNCTUATION = " \t\n.,!?;:…"
+# Marks found in Vietnamese and almost nowhere else: breve (ă), horn (ơ ư), hook above (ả), dot below (ạ).
+VIETNAMESE_MARKS = {"̆", "̛", "̉", "̣"}
+
+
+class NotTraced(ValueError):
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = problems
+        super().__init__("Social Posts not traced:\n" + "\n".join(f"- {p}" for p in problems))
+
+
+@dataclass(frozen=True)
+class Claim:
+    text: str
+    source: str  # key_moment:N (1-based) or catalog:<field>
+
+
+@dataclass(frozen=True)
+class SocialPost:
+    platform: str
+    language: str
+    text: str
+    claims: list[Claim]
+
+
+def trace(submitted: list[Any], key_moments: list[KeyMoment], catalog: dict[str, Any]) -> list[SocialPost]:
+    """Return the posts in platform and language order, or raise NotTraced listing every problem."""
+    problems: list[str] = []
+    posts: list[SocialPost] = []
+    for i, raw in enumerate(submitted, start=1):
+        try:
+            post, found = _post(raw, key_moments, catalog)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            problems.append(f"post {i}: needs platform, language, text and claims (each claim a text and a source)")
+            continue
+        problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in found]
+        posts.append(post)
+
+    for platform in PLATFORM_LIMITS:
+        for language in LANGUAGES:
+            n = sum(p.platform == platform and p.language == language for p in posts)
+            if n == 0:
+                problems.append(f"no {platform} post in {language}; write one")
+            elif n > 1:
+                problems.append(f"the {platform} post in {language} is written {'twice' if n == 2 else f'{n} times'}")
+    if problems:
+        raise NotTraced(problems)
+    order = {(p, lang): i for i, (p, lang) in enumerate((p, lang) for p in PLATFORM_LIMITS for lang in LANGUAGES)}
+    return sorted(posts, key=lambda p: order[(p.platform, p.language)])
+
+
+def _post(raw: dict[str, Any], key_moments: list[KeyMoment], catalog: dict[str, Any]) -> tuple[SocialPost, list[str]]:
+    platform, language, text = str(raw["platform"]), str(raw["language"]), str(raw["text"]).strip()
+    claims = [Claim(str(c["text"]).strip(), str(c["source"]).strip()) for c in raw["claims"]]
+    post = SocialPost(platform, language, text, claims)
+
+    problems = []
+    if platform not in PLATFORM_LIMITS:
+        problems.append(f"platform {platform!r} is not one of {', '.join(PLATFORM_LIMITS)}")
+    if language not in LANGUAGES:
+        problems.append(f"language {language!r} is not one of {', '.join(LANGUAGES)}")
+    if problems:
+        return post, problems
+
+    limit = PLATFORM_LIMITS[platform]
+    if len(text) > limit:
+        problems.append(f"{platform} posts are at most {limit} characters; this one is {len(text)}")
+    hashtags = len(HASHTAG.findall(text))
+    if platform in MAX_HASHTAGS and hashtags > MAX_HASHTAGS[platform]:
+        problems.append(f"{platform} posts have at most {MAX_HASHTAGS[platform]} hashtags; this one has {hashtags}")
+    title = str(catalog["title"])
+    if title not in text:
+        problems.append(f"name the Film exactly as the catalog does: {title!r}")
+    if language == "vi" and not _vietnamese(text):
+        problems.append("a vi post must be written in Vietnamese")
+
+    if not claims:
+        problems.append("list every factual claim in the post, each with its source")
+    for claim in claims:
+        if not _source_exists(claim.source, len(key_moments)):
+            problems.append(
+                f"claim {claim.text!r} cites {claim.source!r}; cite key_moment:1 to key_moment:{len(key_moments)}, "
+                f"or catalog: and one of {', '.join(CATALOG_FIELDS)}"
+            )
+    problems += _quote_problems(text, title, claims, key_moments)
+    return post, problems
+
+
+def _source_exists(source: str, moments: int) -> bool:
+    kind, _, ref = source.partition(":")
+    if kind == "key_moment":
+        return ref.isdigit() and 1 <= int(ref) <= moments
+    return kind == "catalog" and ref in CATALOG_FIELDS
+
+
+def _quote_problems(text: str, title: str, claims: list[Claim], key_moments: list[KeyMoment]) -> list[str]:
+    cited = {c.source for c in claims}
+    problems = []
+    for straight, curly in QUOTED.findall(text):
+        span = (straight or curly).strip(OUTER_PUNCTUATION)
+        if not span or span == title:
+            continue
+        word_for_word = re.compile(rf"(?<!\w){re.escape(span)}(?!\w)")
+        sources = [
+            f"key_moment:{i}" for i, m in enumerate(key_moments, 1) if m.quote and word_for_word.search(m.quote.text)
+        ]
+        if not sources:
+            problems.append(
+                f"quote {span!r} is not a Key Moment's line word for word; quote it exactly, or don't quote"
+            )
+        elif not cited.intersection(sources):
+            problems.append(f"quote {span!r} is from {' or '.join(sources)}; cite it in the claims")
+    return problems
+
+
+def _vietnamese(text: str) -> bool:
+    decomposed = unicodedata.normalize("NFD", text)
+    return "đ" in text.casefold() or any(ch in VIETNAMESE_MARKS for ch in decomposed)

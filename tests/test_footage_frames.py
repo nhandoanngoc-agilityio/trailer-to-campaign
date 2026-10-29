@@ -107,3 +107,32 @@ def test_ffmpeg_never_runs_through_a_shell(clip: Path, tmp_path: Path, spy_run: 
         for arg in args:
             if arg.endswith((".mp4", ".jpg")):
                 assert Path(arg).is_absolute()  # so a file name can never be read as an option
+
+
+def test_probe_uses_the_picture_length_when_sound_runs_on(tmp_path: Path) -> None:
+    clip = make_clip(tmp_path / "tail.mp4", seconds=8.0, audio_seconds=10.0)
+    info = probe(clip)
+    assert info.duration == pytest.approx(8.0, abs=0.1)
+    times = sample_times(info.duration, scene_times(clip))
+    extract_frames(clip, times, tmp_path / "frames")  # no frame asked for past the picture
+
+
+def test_probe_says_whether_there_is_sound(clip: Path, tmp_path: Path) -> None:
+    assert probe(clip).has_audio
+    assert not probe(make_clip(tmp_path / "silent.mp4", seconds=4.0, audio=False)).has_audio
+
+
+def test_a_burst_of_scene_changes_is_one_moment_and_coverage_stays_even() -> None:
+    burst = [50.0 + i * 0.04 for i in range(100)]  # a strobe: 100 "cuts" in 4 s
+    times = sample_times(duration=150.0, scenes=burst, cap=120)
+    scene = [t for t, reason in times if reason == "scene"]
+    assert len(scene) <= 9  # at most one per MIN_GAP_S across the 4 s burst
+    gaps = [b - a for (a, _), (b, _) in zip(times, times[1:], strict=False)]
+    assert max(gaps) <= settings.INTERVAL_S + settings.MIN_GAP_S
+
+
+def test_small_sources_are_not_upscaled(tmp_path: Path) -> None:
+    small = make_clip(tmp_path / "small.mp4", seconds=2.0, size="640x360")
+    [frame] = extract_frames(small, [(0.5, "interval")], tmp_path / "frames")
+    info = probe(frame.path, max_duration=None)
+    assert (info.width, info.height) == (640, 360)

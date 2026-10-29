@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +23,14 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from trailer_to_campaign.footage.frames import FootageError, extract_frames, probe, sample_times, scene_times, sha12
 from trailer_to_campaign.footage.sources import Downloader, SourceRejected, resolve_source
-from trailer_to_campaign.footage.transcript import Transcriber
+from trailer_to_campaign.footage.transcript import Transcriber, Transcript
 from trailer_to_campaign.run_log import check_film_slug
 
 FOOTAGE_ID = re.compile(r"[0-9a-f]{12}")
 MANIFEST = "footage.json"
 # Bump when sampling or transcription would produce different output, so footage
 # watched by an older version is processed again instead of reused.
-FOOTAGE_VERSION = 2
+FOOTAGE_VERSION = 3
 
 WATCH_FOOTAGE = """Sample an official trailer into frames and a timestamped transcript.
 
@@ -62,11 +63,14 @@ def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downlo
         if cached.get("version") == FOOTAGE_VERSION:
             return cached
 
+    # Build in a staging folder and swap it in whole, so frames from another
+    # version are never served under this manifest, and none are left behind.
+    staging = out.with_name(f".{footage_id}.building")
+    shutil.rmtree(staging, ignore_errors=True)
     times = sample_times(info.duration, scene_times(path))
-    frames = extract_frames(path, times, out)
-    transcript = transcriber(path)
-    transcript.save(out / "transcript.json")
-    film_dir = films_dir / film
+    frames = extract_frames(path, times, staging)
+    transcript = transcriber(path) if info.has_audio else Transcript(None, [])
+    transcript.save(staging / "transcript.json")
     footage: dict[str, Any] = {
         "version": FOOTAGE_VERSION,
         "film": film,
@@ -75,15 +79,18 @@ def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downlo
         "duration": round(info.duration, 3),
         "language": transcript.language,
         "frames": [
-            {"index": f.index, "t": round(f.t, 3), "reason": f.reason, "file": str(f.path.relative_to(film_dir))}
+            {"index": f.index, "t": round(f.t, 3), "reason": f.reason, "file": f"frames/{footage_id}/{f.path.name}"}
             for f in frames
         ],
         "transcript": [{"start": s.start, "end": s.end, "text": s.text} for s in transcript.segments],
     }
-    # Written last and renamed into place, so a half-finished watch is never reused.
-    partial = out / (MANIFEST + ".partial")
-    partial.write_text(json.dumps(footage, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(partial, manifest)
+    (staging / MANIFEST).write_text(json.dumps(footage, ensure_ascii=False, indent=2), encoding="utf-8")
+    old = out.with_name(f".{footage_id}.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if out.exists():
+        os.replace(out, old)
+    os.replace(staging, out)
+    shutil.rmtree(old, ignore_errors=True)
     return footage
 
 
@@ -94,7 +101,10 @@ def frame_file(film: str, footage_id: str, index: int, films_dir: Path) -> Path:
     manifest = frames_dir(films_dir, film, footage_id) / MANIFEST
     if not manifest.is_file():
         raise ValueError(f"no watched trailer {footage_id} for {film}; call watch_footage first")
-    frames = json.loads(manifest.read_text(encoding="utf-8"))["frames"]
+    footage = json.loads(manifest.read_text(encoding="utf-8"))
+    if footage.get("version") != FOOTAGE_VERSION:
+        raise ValueError(f"trailer {footage_id} was watched by an older footage tool; call watch_footage again")
+    frames = footage["frames"]
     if not 0 <= index < len(frames):
         raise ValueError(f"index must be 0 to {len(frames) - 1}, got {index}")
     return films_dir / film / frames[index]["file"]

@@ -173,8 +173,9 @@ class FakeYDL:
     def __exit__(self, *exc: object) -> None:
         pass
 
-    def extract_info(self, url: str, download: bool = True) -> dict[str, Any]:
+    def extract_info(self, url: str, download: bool = True, process: bool = True) -> dict[str, Any]:
         assert download is False, "metadata must be checked before anything is downloaded"
+        assert process is False, "playlists and formats must not be resolved before the checks"
         return dict(FakeYDL.info)
 
     def process_ie_result(self, info: dict[str, Any], download: bool = True) -> dict[str, Any]:
@@ -222,3 +223,22 @@ def test_an_oversized_file_is_refused(films: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(settings, "MAX_BYTES", 4)
     with pytest.raises(SourceRejected, match="MB"):
         resolve(films, "trailer.mp4")
+
+
+def test_a_symlink_inside_source_cannot_hide_a_screener(films: Path) -> None:
+    source = films / "sample" / "source"
+    (source / "press-screener.mp4").write_bytes(b"video")
+    (source / "innocent.mp4").symlink_to(source / "press-screener.mp4")
+    with pytest.raises(NotATrailer):
+        resolve(films, "innocent.mp4")
+
+
+def test_yt_dlp_errors_become_a_clear_refusal(tmp_path: Path, fake_ydl: type[FakeYDL]) -> None:
+    from yt_dlp.utils import DownloadError
+
+    def private(self: FakeYDL, url: str, download: bool = True, process: bool = True) -> dict[str, Any]:
+        raise DownloadError("ERROR: [youtube] abc123: Private video")
+
+    fake_ydl.extract_info = private  # type: ignore[method-assign]
+    with pytest.raises(SourceRejected, match="Private video"):
+        YtDlpDownloader(ydl_factory=fake_ydl)("https://youtu.be/abc123", tmp_path)

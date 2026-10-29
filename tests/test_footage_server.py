@@ -174,3 +174,40 @@ async def test_footage_from_an_older_tool_version_is_processed_again(films: Path
     again = body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
     assert again["version"] == footage["version"]
     assert spies.transcriber.calls == 2
+
+
+async def test_a_silent_teaser_has_an_empty_transcript(films: Path, spies: Spies, tmp_path: Path) -> None:
+    make_clip(films / "sample" / "source" / "silent.mp4", seconds=4.0, audio=False)
+    footage = body(await call(films, spies, "watch_footage", film="sample", source="silent.mp4", kind="trailer"))
+    assert footage["transcript"] == [] and footage["language"] is None
+    assert spies.transcriber.calls == 0
+    assert footage["frames"]
+
+
+async def test_reprocessing_replaces_the_old_frames_whole(films: Path, spies: Spies) -> None:
+    footage = body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
+    folder = films / "sample" / "frames" / footage["footage_id"]
+    leftover = folder / "frame_0999.jpg"
+    leftover.write_bytes(b"old")
+    stale = json.loads((folder / "footage.json").read_text())
+    stale["version"] = footage["version"] - 1
+    (folder / "footage.json").write_text(json.dumps(stale))
+    stale_frame = await call(films, spies, "get_frame", film="sample", footage_id=footage["footage_id"], index=0)
+    assert stale_frame.is_error  # never serve frames under a manifest from another version
+    body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
+    assert not leftover.exists()
+    assert sorted(p.name for p in folder.parent.iterdir()) == [footage["footage_id"]]
+
+
+async def test_a_download_failure_is_a_tool_error_with_its_reason(films: Path, spies: Spies) -> None:
+    from trailer_to_campaign.footage.sources import SourceRejected
+
+    def private(url: str, dest: Path) -> Path:
+        raise SourceRejected("yt-dlp could not fetch it: Private video")
+
+    server = create_server(films_dir=films, downloader=private, transcriber=spies.transcriber)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "watch_footage", {"film": "sample", "source": "https://youtu.be/abc", "kind": "trailer"}
+        )
+    assert result.is_error and "Private video" in result.content[0].text

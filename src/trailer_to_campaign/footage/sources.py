@@ -79,6 +79,7 @@ def resolve_source(film: str, source: str, kind: str | None, films_dir: Path, do
         check_name(path.name)
     else:
         path = _local(dest, source)
+        check_name(path.name)  # a symlink in source/ must not hide a screener's real name
     check_size(path)
     return path
 
@@ -116,10 +117,17 @@ class YtDlpDownloader:
             "no_warnings": True,
             "noprogress": True,
         }
-        with self.ydl_factory(params) as ydl:
-            info = ydl.extract_info(url, download=False)
-            _check_info(info)
-            result = ydl.process_ie_result(info, download=True)
+        try:
+            with self.ydl_factory(params) as ydl:
+                # process=False: read the metadata only, so a playlist is refused before
+                # any of its entries are followed and before formats are chosen.
+                info = ydl.extract_info(url, download=False, process=False)
+                _check_info(info)
+                result = ydl.process_ie_result(info, download=True)
+        except SourceRejected:
+            raise
+        except Exception as err:  # yt-dlp's DownloadError and friends: private, deleted, unsupported
+            raise SourceRejected(f"could not fetch {url}: {err}") from err
         [download] = result.get("requested_downloads") or [{}]
         path = Path(download.get("filepath") or "")
         if not path.is_file() or not path.resolve().is_relative_to(dest.resolve()):

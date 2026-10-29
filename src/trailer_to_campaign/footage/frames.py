@@ -29,9 +29,10 @@ class FootageError(RuntimeError):
 
 @dataclass(frozen=True)
 class Probe:
-    duration: float
+    duration: float  # of the picture: sound can run on past the last frame
     width: int
     height: int
+    has_audio: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,30 +66,41 @@ _USE_SETTINGS = -1.0
 
 
 def probe(path: Path, max_duration: float | None = _USE_SETTINGS) -> Probe:
-    """Read a video's length and size. max_duration=None skips the trailer length check."""
+    """Read a video's picture length, size and whether it has sound.
+
+    max_duration=None skips the trailer length check.
+    """
     try:
         result = run(
             [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height:format=duration", "-of", "json", _abs(path),
+                "ffprobe", "-v", "error",
+                "-show_entries", "stream=codec_type,width,height,duration:format=duration", "-of", "json", _abs(path),
             ]
         )  # fmt: skip
         data = json.loads(result.stdout)
-        [stream] = data["streams"]
-        width, height = int(stream["width"]), int(stream["height"])
-    except (FootageError, ValueError, KeyError) as err:
+        streams = data.get("streams", [])
+        video = next(s for s in streams if s.get("codec_type") == "video")
+        width, height = int(video["width"]), int(video["height"])
+    except (FootageError, ValueError, KeyError, StopIteration) as err:
         raise FootageError(f"{path.name} is not a video") from err
-    try:
-        duration = float(data.get("format", {}).get("duration"))
-    except (TypeError, ValueError):
-        duration = 0.0
+    lengths = [_seconds(video.get("duration")), _seconds(data.get("format", {}).get("duration"))]
+    known = [d for d in lengths if d > 0]
+    duration = min(known) if known else 0.0
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
     limit = settings.MAX_DURATION_S if max_duration == _USE_SETTINGS else max_duration
     if limit is not None:
         if duration <= 0:
             raise FootageError(f"{path.name} has no readable length")
         if duration > limit:
             raise FootageError(f"{path.name} is {duration:.0f} s, over the {limit:.0f} s trailer limit")
-    return Probe(duration, width, height)
+    return Probe(duration, width, height, has_audio)
+
+
+def _seconds(value: object) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def scene_times(path: Path, threshold: float | None = None) -> list[float]:
@@ -121,17 +133,26 @@ def sample_times(
     cap: int | None = None,
     min_gap: float | None = None,
 ) -> list[tuple[float, Reason]]:
-    """Which moments to take a frame at. Scene changes win over interval frames when capping."""
+    """Which moments to take a frame at. Scene changes win over interval frames when capping.
+
+    Scene changes closer than min_gap are one moment (a strobe or a fast montage
+    must not use up the cap), and an interval frame is dropped only when a kept
+    scene frame sits next to it, so coverage stays even.
+    """
     interval = settings.INTERVAL_S if interval is None else interval
     cap = settings.MAX_FRAMES if cap is None else cap
     min_gap = settings.MIN_GAP_S if min_gap is None else min_gap
+    last = duration - settings.END_MARGIN_S  # seeking to the very end can find no picture
 
-    scene = sorted(t for t in scenes if 0 <= t < duration)
-    steps = int(duration // interval) + 1
-    regular = [i * interval for i in range(steps) if i * interval < duration]
-    regular = [t for t in regular if all(abs(t - s) >= min_gap for s in scene)]
-
+    scene: list[float] = []
+    for t in sorted(t for t in scenes if 0 <= t < last):
+        if not scene or t - scene[-1] >= min_gap:
+            scene.append(t)
     chosen_scene = _thin(scene, cap)
+
+    steps = int(duration // interval) + 1
+    regular = [i * interval for i in range(steps) if i * interval < last]
+    regular = [t for t in regular if all(abs(t - s) >= min_gap for s in chosen_scene)]
     chosen_regular = _thin(regular, cap - len(chosen_scene))
     merged: list[tuple[float, Reason]] = [(t, "scene") for t in chosen_scene]
     merged += [(t, "interval") for t in chosen_regular]
@@ -143,7 +164,8 @@ def extract_frames(
 ) -> list[Frame]:
     long_edge = settings.LONG_EDGE_PX if long_edge is None else long_edge
     out_dir.mkdir(parents=True, exist_ok=True)
-    scale = f"scale=w='if(gte(iw,ih),{long_edge},-2)':h='if(gte(iw,ih),-2,{long_edge})'"
+    # Shrink to fit a long_edge box, never enlarge: an upscaled frame costs more image tokens and adds nothing.
+    scale = f"scale=w='min({long_edge},iw)':h='min({long_edge},ih)':force_original_aspect_ratio=decrease"
     result = []
     for index, (t, reason) in enumerate(times):
         out = out_dir / f"frame_{index:04d}.jpg"

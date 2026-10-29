@@ -13,12 +13,12 @@ ever reaching the Copywriter (review.py builds those requests).
 from __future__ import annotations
 
 import json
-import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed, load_prompt
 from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
+from trailer_to_campaign.agents.post_text import nfc
 from trailer_to_campaign.agents.social_posts import SocialPost
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
@@ -122,13 +122,13 @@ def judge(submitted: list[Any], posts: list[SocialPost], spoiler_ids: set[str]) 
             problems.append(f"{where}: a reject needs at least one problem")
         elif verdict == "pass" and found:
             problems.append(f"{where}: a pass has no problems; reject it if it has one")
-        text = _nfc(posts[number - 1].text)
+        text = nfc(posts[number - 1].text)
         for p in found:
             if p.kind == "spoiler" and p.spoiler_id not in spoiler_ids:
                 problems.append(f"{where}: spoiler_id {p.spoiler_id!r} is not on the Spoiler List")
             if p.kind == "brand" and p.rule not in BRAND_RULES:
                 problems.append(f"{where}: a brand problem needs a rule ({', '.join(BRAND_RULES)})")
-            if not p.offending_text or _nfc(p.offending_text) not in text:
+            if not p.offending_text or nfc(p.offending_text) not in text:
                 problems.append(f"{where}: offending_text must be copied exactly from the post: {p.offending_text!r}")
             if not p.reason:
                 problems.append(f"{where}: give a reason for each problem")
@@ -150,10 +150,6 @@ def _problem(raw: dict[str, Any]) -> Problem:
         spoiler_id=raw["spoiler_id"] if kind == "spoiler" else None,
         rule=raw["rule"] if kind == "brand" else None,
     )
-
-
-def _nfc(text: str) -> str:
-    return unicodedata.normalize("NFC", text)
 
 
 def posts_data(posts: list[SocialPost]) -> str:

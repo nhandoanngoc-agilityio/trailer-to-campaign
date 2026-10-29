@@ -16,7 +16,6 @@ its source says is for the Checker and the marketer's Approval.
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -25,6 +24,7 @@ from typing import Any
 from trailer_to_campaign.agents import ChecksFailed
 from trailer_to_campaign.agents.brand import brand_problems
 from trailer_to_campaign.agents.key_moments import KeyMoment
+from trailer_to_campaign.agents.post_text import HASHTAG, QUOTED, nfc, own_words, whole_words
 
 PLATFORM_LIMITS = {"facebook": 500, "instagram": 2200, "tiktok": 150}  # characters
 MAX_HASHTAGS = {"instagram": 5}
@@ -32,11 +32,6 @@ LANGUAGES = ("en", "vi")
 CATALOG_FIELDS = ("title", "synopsis", "genre", "language", "runtime_minutes", "cast")
 ALL_PAIRS = tuple((platform, language) for platform in PLATFORM_LIMITS for language in LANGUAGES)
 
-# Quoted lines in any quotation marks a post may use. A closing ’ must end a word,
-# so an apostrophe inside ‘I’m going in’ doesn't close the quote.
-QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”|«([^»]+)»|‘(.+?)’(?!\w)|„([^“]+)“|「([^」]+)」')
-GLOSS = re.compile(r"\(\s*tạm dịch:[^)]*\)", re.IGNORECASE)
-HASHTAG = re.compile(r"#\w+")
 OUTER_PUNCTUATION = " \t\n.,!?;:…"
 # Marks found in Vietnamese and almost nowhere else: breve (ă), horn (ơ ư), hook above (ả), dot below (ạ).
 VIETNAMESE_MARKS = {"̆", "̛", "̉", "̣"}
@@ -73,7 +68,7 @@ def trace(
     only the rejected ones for a rewrite.
     """
     wanted = set(required)
-    title = _nfc(str(catalog["title"]))
+    title = nfc(str(catalog["title"]))
     problems: list[str] = []
     posts: list[SocialPost] = []
     for i, raw in enumerate(submitted, start=1):
@@ -105,17 +100,9 @@ def _parse(raw: dict[str, Any]) -> SocialPost:
     return SocialPost(str(raw["platform"]), str(raw["language"]), str(raw["text"]).strip(), claims)
 
 
-def _nfc(text: str) -> str:
-    return unicodedata.normalize("NFC", text)
-
-
-def _words(text: str) -> re.Pattern[str]:
-    return re.compile(rf"(?<!\w){re.escape(text)}(?!\w)")
-
-
 def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> list[str]:
     platform, language, claims = post.platform, post.language, post.claims
-    text = _nfc(post.text)  # the same letters can be one code point or two; compare them one way
+    text = nfc(post.text)  # the same letters can be one code point or two; compare them one way
     problems = []
     if platform not in PLATFORM_LIMITS:
         problems.append(f"platform {platform!r} is not one of {', '.join(PLATFORM_LIMITS)}")
@@ -130,9 +117,9 @@ def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> lis
     hashtags = len(HASHTAG.findall(text))
     if platform in MAX_HASHTAGS and hashtags > MAX_HASHTAGS[platform]:
         problems.append(f"{platform} posts have at most {MAX_HASHTAGS[platform]} hashtags; this one has {hashtags}")
-    if not _words(title).search(text):
+    if not whole_words(title).search(text):
         problems.append(f"name the Film exactly as the catalog does: {title!r}")
-    if language == "vi" and not _vietnamese(_own_words(text, title)):
+    if language == "vi" and not _vietnamese(own_words(text, title)):
         problems.append("a vi post must be written in Vietnamese, not only its title, quotes or gloss")
     problems += brand_problems(text, language, title)
 
@@ -162,11 +149,11 @@ def _quote_problems(text: str, title: str, claims: list[Claim], key_moments: lis
         span = next(g for g in groups if g).strip(OUTER_PUNCTUATION)
         if not span or span == title:
             continue
-        word_for_word = _words(span)
+        word_for_word = whole_words(span)
         sources = [
             f"key_moment:{i}"
             for i, m in enumerate(key_moments, 1)
-            if m.quote and word_for_word.search(_nfc(m.quote.text))
+            if m.quote and word_for_word.search(nfc(m.quote.text))
         ]
         if not sources:
             problems.append(
@@ -175,13 +162,6 @@ def _quote_problems(text: str, title: str, claims: list[Claim], key_moments: lis
         elif not cited.intersection(sources):
             problems.append(f"quote {span!r} is from {' or '.join(sources)}; cite it in the claims")
     return problems
-
-
-def _own_words(text: str, title: str) -> str:
-    """The post without its title, quotes, glosses and hashtags: the words the Copywriter wrote itself."""
-    for pattern in (_words(title), QUOTED, GLOSS, HASHTAG):
-        text = pattern.sub(" ", text)
-    return text
 
 
 def _vietnamese(text: str) -> bool:

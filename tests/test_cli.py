@@ -309,29 +309,35 @@ def test_a_failure_setting_up_the_watcher_still_ends_the_run(tmp_path: Path, mon
 
 
 class FakeCopywriter:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, spend: bool = False) -> None:
+    """Stands in for the Copywriter -> Checker loop: t2c write must run the whole loop, never the writer alone."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, spend: bool = False, flag: bool = False) -> None:
         from trailer_to_campaign import cli
-        from trailer_to_campaign.agents import copywriter
+        from trailer_to_campaign.agents import review
 
         self.calls: list[dict[str, Any]] = []
-        self.spend = spend
-        monkeypatch.setattr(copywriter, "write_posts", self)
-        monkeypatch.setattr(copywriter, "copywriter_servers", lambda settings: ["catalog"])
+        self.spend, self.flag = spend, flag
+        monkeypatch.setattr(review, "write_and_check", self)
+        monkeypatch.setattr(review, "agents_for", lambda film, settings, client, meter: ("agents", film, client))
         monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
 
-    async def __call__(self, film: str, key_moments: Any, *, servers: Any, client: Any, meter: Any) -> Any:
+    async def __call__(self, key_moments: Any, agents: Any, meter: Any, first_draft: Any = None) -> Any:
+        from trailer_to_campaign.agents.review import CheckedPost
         from trailer_to_campaign.agents.social_posts import Claim, SocialPost
 
-        self.calls.append({"film": film, "key_moments": key_moments, "servers": servers, "client": client})
+        self.calls.append({"key_moments": key_moments, "agents": agents, "first_draft": first_draft})
         if self.spend:
             with meter.call("claude-opus-5-5", 50_000, 16_000, agent="copywriter") as call:
                 call.record(Usage(input=50_000, output=1_000))
         claims = [Claim("The title", "catalog:title")]
-        return [
-            SocialPost(p, lang, f"{p} {lang}", claims)
+        checked = [
+            CheckedPost(SocialPost(p, lang, f"{p} {lang}", claims), "passed", [], 0)
             for p in ("facebook", "instagram", "tiktok")
             for lang in ("en", "vi")
         ]
+        if self.flag:
+            checked[0] = CheckedPost(checked[0].post, "flagged", ["spoiler ending-capture: reveals the ending"], 2)
+        return checked
 
 
 @pytest.fixture
@@ -381,11 +387,12 @@ def test_write_saves_social_posts_next_to_the_run_log(
     fake = FakeCopywriter(monkeypatch, spend=True)
     assert main(write_argv(key_moments_file, tmp_path / "runs"), env=KEY_ENV) == 0
     [call] = fake.calls
-    assert call["film"] == "agent-327" and len(call["key_moments"]) == 5
-    assert call["servers"] == ["catalog"] and call["client"] == "client for sk-test"
+    assert len(call["key_moments"]) == 5 and call["first_draft"] is None  # the CLI never plants a draft
+    assert call["agents"] == ("agents", "agent-327", "client for sk-test")
     [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
     posts = json.loads(saved.read_text())
-    assert len(posts) == 6 and posts[0]["claims"] == [{"text": "The title", "source": "catalog:title"}]
+    assert len(posts) == 6 and {p["status"] for p in posts} == {"passed"}
+    assert posts[0]["post"]["claims"] == [{"text": "The title", "source": "catalog:title"}]
     lines = watch_log(tmp_path / "runs")
     assert lines[-1]["stop_reason"] == "completed"
     assert any(line["event"] == "social_posts" and line["count"] == 6 for line in lines)
@@ -417,3 +424,14 @@ def test_write_refuses_key_moments_watched_for_another_film(
     assert main(write_argv(watched(tmp_path, "the-quiet-river"), tmp_path / "runs"), env=KEY_ENV) == 2
     assert "the-quiet-river" in capsys.readouterr().err
     assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+def test_write_completes_with_flagged_posts_and_shows_their_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_moments_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    FakeCopywriter(monkeypatch, flag=True)
+    assert main(write_argv(key_moments_file, tmp_path / "runs"), env=KEY_ENV) == 0  # flagged posts go to a person
+    out = capsys.readouterr().out
+    assert "flagged" in out and "reveals the ending" in out and "5 passed, 1 flagged" in out
+    [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
+    assert json.loads(saved.read_text())[0]["status"] == "flagged"

@@ -9,7 +9,8 @@ stop and the run log can be checked without an API key or any spend.
 watch runs the Watcher on a Film's trailer (the catalog's link unless --source
 names one) and writes its Key Moments next to the Run Log. write runs the
 Copywriter on those Key Moments and writes the Social Posts the same way; until
-T7 joins them, each command is a Run of its own.
+T7 joins them, each command is a Run of its own. write always runs the Checker
+after the Copywriter: no post leaves it unchecked.
 """
 
 from __future__ import annotations
@@ -196,7 +197,7 @@ def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settin
 
 
 def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
-    from trailer_to_campaign.agents import copywriter
+    from trailer_to_campaign.agents import review
     from trailer_to_campaign.agents.key_moments import load_key_moments
 
     try:
@@ -216,12 +217,18 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
         return 2
 
     async def start(meter: FilmMeter) -> list[Any]:
-        servers, client = copywriter.copywriter_servers(settings), make_client(api_key)
-        return await copywriter.write_posts(film, key_moments, servers=servers, client=client, meter=meter)
+        # The whole loop, never the Copywriter alone: no post leaves this command unchecked.
+        agents = review.agents_for(film, settings, make_client(api_key), meter)
+        return await review.write_and_check(key_moments, agents, meter)
 
-    code, posts = run_agent(film, budget, runs_dir, "copywriter", start, "social_posts.json", "Social Posts")
-    for post in posts:
-        print(f"  {post.platform:9} {post.language}: {post.text}")
+    code, checked = run_agent(film, budget, runs_dir, "copywriter+checker", start, "social_posts.json", "Social Posts")
+    for c in checked:
+        print(f"  {c.status:7} {c.post.platform:9} {c.post.language}: {c.post.text}")
+        for problem in c.problems:
+            print(f"          ! {problem}")
+    if checked:
+        flagged = sum(c.status == "flagged" for c in checked)
+        print(f"{len(checked) - flagged} passed, {flagged} flagged for a person")
     return code
 
 

@@ -28,7 +28,10 @@ MAX_HASHTAGS = {"instagram": 5}
 LANGUAGES = ("en", "vi")
 CATALOG_FIELDS = ("title", "synopsis", "genre", "language", "runtime_minutes", "cast")
 
-QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”')
+# Quoted lines in any quotation marks a post may use. A closing ’ must end a word,
+# so an apostrophe inside ‘I’m going in’ doesn't close the quote.
+QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”|«([^»]+)»|‘(.+?)’(?!\w)|„([^“]+)“|「([^」]+)」')
+GLOSS = re.compile(r"\(\s*tạm dịch:[^)]*\)", re.IGNORECASE)
 HASHTAG = re.compile(r"#\w+")
 OUTER_PUNCTUATION = " \t\n.,!?;:…"
 # Marks found in Vietnamese and almost nowhere else: breve (ă), horn (ơ ư), hook above (ả), dot below (ạ).
@@ -57,15 +60,16 @@ class SocialPost:
 
 def trace(submitted: list[Any], key_moments: list[KeyMoment], catalog: dict[str, Any]) -> list[SocialPost]:
     """Return the posts in platform and language order, or raise NotTraced listing every problem."""
+    title = _nfc(str(catalog["title"]))
     problems: list[str] = []
     posts: list[SocialPost] = []
     for i, raw in enumerate(submitted, start=1):
         try:
-            post, found = _post(raw, key_moments, catalog)
-        except (KeyError, TypeError, ValueError, AttributeError):
+            post = _parse(raw)
+        except (KeyError, TypeError, AttributeError):
             problems.append(f"post {i}: needs platform, language, text and claims (each claim a text and a source)")
             continue
-        problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in found]
+        problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in _problems(post, title, key_moments)]
         posts.append(post)
 
     for platform in PLATFORM_LIMITS:
@@ -81,18 +85,29 @@ def trace(submitted: list[Any], key_moments: list[KeyMoment], catalog: dict[str,
     return sorted(posts, key=lambda p: order[(p.platform, p.language)])
 
 
-def _post(raw: dict[str, Any], key_moments: list[KeyMoment], catalog: dict[str, Any]) -> tuple[SocialPost, list[str]]:
-    platform, language, text = str(raw["platform"]), str(raw["language"]), str(raw["text"]).strip()
+def _parse(raw: dict[str, Any]) -> SocialPost:
     claims = [Claim(str(c["text"]).strip(), str(c["source"]).strip()) for c in raw["claims"]]
-    post = SocialPost(platform, language, text, claims)
+    return SocialPost(str(raw["platform"]), str(raw["language"]), str(raw["text"]).strip(), claims)
 
+
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
+def _words(text: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<!\w){re.escape(text)}(?!\w)")
+
+
+def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> list[str]:
+    platform, language, claims = post.platform, post.language, post.claims
+    text = _nfc(post.text)  # the same letters can be one code point or two; compare them one way
     problems = []
     if platform not in PLATFORM_LIMITS:
         problems.append(f"platform {platform!r} is not one of {', '.join(PLATFORM_LIMITS)}")
     if language not in LANGUAGES:
         problems.append(f"language {language!r} is not one of {', '.join(LANGUAGES)}")
     if problems:
-        return post, problems
+        return problems
 
     limit = PLATFORM_LIMITS[platform]
     if len(text) > limit:
@@ -100,11 +115,10 @@ def _post(raw: dict[str, Any], key_moments: list[KeyMoment], catalog: dict[str, 
     hashtags = len(HASHTAG.findall(text))
     if platform in MAX_HASHTAGS and hashtags > MAX_HASHTAGS[platform]:
         problems.append(f"{platform} posts have at most {MAX_HASHTAGS[platform]} hashtags; this one has {hashtags}")
-    title = str(catalog["title"])
-    if title not in text:
+    if not _words(title).search(text):
         problems.append(f"name the Film exactly as the catalog does: {title!r}")
-    if language == "vi" and not _vietnamese(text):
-        problems.append("a vi post must be written in Vietnamese")
+    if language == "vi" and not _vietnamese(_own_words(text, title)):
+        problems.append("a vi post must be written in Vietnamese, not only its title, quotes or gloss")
 
     if not claims:
         problems.append("list every factual claim in the post, each with its source")
@@ -115,26 +129,28 @@ def _post(raw: dict[str, Any], key_moments: list[KeyMoment], catalog: dict[str, 
                 f"or catalog: and one of {', '.join(CATALOG_FIELDS)}"
             )
     problems += _quote_problems(text, title, claims, key_moments)
-    return post, problems
+    return problems
 
 
 def _source_exists(source: str, moments: int) -> bool:
     kind, _, ref = source.partition(":")
     if kind == "key_moment":
-        return ref.isdigit() and 1 <= int(ref) <= moments
+        return ref.isdecimal() and 1 <= int(ref) <= moments
     return kind == "catalog" and ref in CATALOG_FIELDS
 
 
 def _quote_problems(text: str, title: str, claims: list[Claim], key_moments: list[KeyMoment]) -> list[str]:
     cited = {c.source for c in claims}
     problems = []
-    for straight, curly in QUOTED.findall(text):
-        span = (straight or curly).strip(OUTER_PUNCTUATION)
+    for groups in QUOTED.findall(text):
+        span = next(g for g in groups if g).strip(OUTER_PUNCTUATION)
         if not span or span == title:
             continue
-        word_for_word = re.compile(rf"(?<!\w){re.escape(span)}(?!\w)")
+        word_for_word = _words(span)
         sources = [
-            f"key_moment:{i}" for i, m in enumerate(key_moments, 1) if m.quote and word_for_word.search(m.quote.text)
+            f"key_moment:{i}"
+            for i, m in enumerate(key_moments, 1)
+            if m.quote and word_for_word.search(_nfc(m.quote.text))
         ]
         if not sources:
             problems.append(
@@ -143,6 +159,13 @@ def _quote_problems(text: str, title: str, claims: list[Claim], key_moments: lis
         elif not cited.intersection(sources):
             problems.append(f"quote {span!r} is from {' or '.join(sources)}; cite it in the claims")
     return problems
+
+
+def _own_words(text: str, title: str) -> str:
+    """The post without its title, quotes, glosses and hashtags: the words the Copywriter wrote itself."""
+    for pattern in (_words(title), QUOTED, GLOSS, HASHTAG):
+        text = pattern.sub(" ", text)
+    return text
 
 
 def _vietnamese(text: str) -> bool:

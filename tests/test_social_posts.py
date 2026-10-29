@@ -169,3 +169,60 @@ def test_a_broken_key_moments_file_is_refused_without_its_path(tmp_path: Path, c
     with pytest.raises(ValueError) as caught:
         load_key_moments(path)
     assert "secret-dir" not in str(caught.value)
+
+
+# From /code-review: the checks must not be fooled by the title, the gloss, other quote marks or short titles.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'{TITLE}: a spy walks into a barbershop. "Just a trim, please." (tạm dịch: Chỉ tỉa thôi.) Stream it now.',
+        f"{TITLE}: “Chỉ tỉa thôi” is not a Key Moment line. Stream it now.",
+    ],
+)
+def test_a_vi_post_whose_only_vietnamese_is_a_gloss_or_quote_is_refused(text: str) -> None:
+    posts = six()
+    posts[1] = post("facebook", "vi", text=text)
+    assert any("Vietnamese" in p for p in problems(posts))
+
+
+def test_a_vietnamese_title_does_not_make_an_english_post_vietnamese() -> None:
+    catalog = {**CATALOG, "title": "Bố Già"}
+    posts = [{**p, "text": p["text"].replace(TITLE, "Bố Già")} for p in six()]
+    posts[1] = {**posts[1], "text": 'Bố Già: one family, one secret. "Just a trim, please." Stream it now.'}
+    with pytest.raises(NotTraced, match="Vietnamese"):
+        trace(posts, MOMENTS, catalog)
+
+
+@pytest.mark.parametrize("quoted", ["«Nobody leaves this barbershop»", "‘Nobody leaves’", "„Nobody leaves“"])
+def test_quotes_in_other_quotation_marks_are_checked_too(quoted: str) -> None:
+    [problem] = problems(six(text=f"{TITLE}. {quoted} Watch it now."))
+    assert "Nobody leaves" in problem
+
+
+def test_a_verbatim_quote_in_guillemets_is_accepted() -> None:
+    trace(six(text=f"{TITLE}. «Just a trim, please.» Watch it now."), MOMENTS, CATALOG)
+
+
+def test_a_short_title_must_be_a_whole_word() -> None:
+    catalog = {**CATALOG, "title": "Her"}
+    posts = [{**p, "text": p["text"].replace(TITLE, "Her")} for p in six()]
+    posts[0] = {**posts[0], "text": 'Here is a spy. "Just a trim, please." Watch it now.'}
+    with pytest.raises(NotTraced, match="exactly") as caught:
+        trace(posts, MOMENTS, catalog)
+    assert len(caught.value.problems) == 1
+
+
+def test_a_title_written_in_another_unicode_form_still_counts() -> None:
+    import unicodedata
+
+    catalog = {**CATALOG, "title": unicodedata.normalize("NFC", "Bố Già")}
+    nfd = unicodedata.normalize("NFD", "Bố Già")
+    posts = [{**p, "text": p["text"].replace(TITLE, nfd)} for p in six()]
+    trace(posts, MOMENTS, catalog)
+
+
+def test_a_source_with_a_non_decimal_digit_is_reported_as_a_bad_source() -> None:
+    [problem] = problems(six(claims=[*CLAIMS, {"text": "x", "source": "key_moment:²"}]))
+    assert "key_moment:²" in problem

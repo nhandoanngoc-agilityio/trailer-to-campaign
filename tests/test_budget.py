@@ -144,3 +144,58 @@ def test_message_says_film_budget_reached_with_amounts(log: RunLog) -> None:
 def test_limit_must_be_positive_and_finite(log: RunLog, limit: str) -> None:
     with pytest.raises(ValueError):
         FilmMeter(Decimal(limit), log)
+
+
+def test_recorded_usage_is_charged_even_if_the_block_raises_later(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    usage = Usage(input=1_000, output=100)
+    with pytest.raises(ValueError):
+        with meter.call(OPUS, input_tokens=1_000, max_tokens=1_000) as call:
+            call.record(usage)
+            raise ValueError("parsing the response failed")
+    assert meter.spent == cost_usd(OPUS, usage)
+    [line] = events(log, "model_call")
+    assert line["charged"] == "actual"
+    assert line["error"] == "ValueError"
+
+
+def test_haiku_reservation_covers_a_prompt_that_crosses_the_long_tier(log: RunLog) -> None:
+    # count_tokens is an estimate: a 99,990-token estimate can bill as a long prompt.
+    meter = FilmMeter(Decimal("2"), log)
+    with meter.call("claude-haiku-5-5", input_tokens=99_990, max_tokens=1_000) as call:
+        call.record(Usage(input=99_990, cache_write_1h=20, output=1_000))  # 100,010 tokens
+    [line] = events(log, "model_call")
+    assert Decimal(line["cost_usd"]) <= Decimal(line["reserved_usd"])
+    assert events(log, "reservation_exceeded") == []
+
+
+def test_a_call_that_costs_more_than_reserved_is_logged(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    with meter.call(OPUS, input_tokens=100, max_tokens=100) as call:
+        call.record(Usage(input=50_000, output=100))
+    assert meter.spent == cost_usd(OPUS, Usage(input=50_000, output=100))
+    [line] = events(log, "reservation_exceeded")
+    assert line["input_tokens_reserved"] == 100
+    assert line["prompt_tokens_billed"] == 50_000
+
+
+def test_a_metered_call_cannot_be_entered_twice(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    call = meter.call(OPUS, input_tokens=10, max_tokens=10)
+    with call:
+        call.record(Usage(input=10))
+    with pytest.raises(RuntimeError):
+        with call:
+            pass
+    assert len(events(log, "model_call")) == 1
+
+
+def test_usage_cannot_be_recorded_outside_the_call(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    call = meter.call(OPUS, input_tokens=10, max_tokens=10)
+    with pytest.raises(RuntimeError):
+        call.record(Usage(input=10))
+    with call:
+        call.record(Usage(input=10))
+    with pytest.raises(RuntimeError):
+        call.record(Usage(input=10))

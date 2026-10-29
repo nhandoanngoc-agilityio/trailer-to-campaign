@@ -5,10 +5,15 @@
         call.record(Usage(...))
 
 Before the call, the meter reserves the call's worst-case cost and refuses it
-with FilmBudgetReached if that could take spend past the limit, so spend never
-exceeds the Film Budget. After the call it charges the actual cost. If the
-block raises or exits without recording usage, the call may still have been
-billed, so the meter charges the worst case: it fails closed.
+with FilmBudgetReached if that could take spend past the limit. After the call
+it charges the actual cost from the recorded usage. If the block exits without
+recording usage, the call may still have been billed, so the meter charges the
+worst case: it fails closed.
+
+Spend never exceeds the Film Budget as long as input_tokens covers the whole
+prompt and max_tokens is the one sent. A call that costs more than it reserved
+is still charged in full (that money is spent) and logged as
+reservation_exceeded, and the next call is refused once spend is over.
 
 The pipeline is a fixed sequence (ADR 0004), so the meter is not thread-safe.
 Open calls still count against the budget, so nested calls can't overspend.
@@ -66,26 +71,43 @@ class MeteredCall:
         self.input_tokens, self.max_tokens = input_tokens, max_tokens
         self.worst = worst_case_usd(model, input_tokens, max_tokens)  # UnknownModel stops it here
         self.usage: Usage | None = None
+        self._state = "new"  # new -> open -> closed; a call is metered exactly once
 
     def record(self, usage: Usage) -> None:
+        if self._state != "open":
+            raise RuntimeError("usage can only be recorded inside `with meter.call(...)`")
         if self.usage is not None:
             raise RuntimeError("usage was already recorded for this call")
         self.usage = usage
 
     def __enter__(self) -> MeteredCall:
+        if self._state != "new":
+            raise RuntimeError("a metered call can only be used once; ask the meter for a new one")
         self.meter._reserve(self.model, self.worst)
+        self._state = "open"
         return self
 
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        if self.usage is not None and exc_type is None:
+        self._state = "closed"
+        if self.usage is not None:
             charge, charged = cost_usd(self.model, self.usage), "actual"
         else:
             charge, charged = self.worst, "worst_case"
         self.meter._settle(self.worst, charge)
         if charge > self.worst:
             log.warning("%s call cost $%s, more than its reserved $%s", self.model, charge, self.worst)
+            self.meter.run_log.event(
+                "reservation_exceeded",
+                model=self.model,
+                agent=self.agent,
+                input_tokens_reserved=self.input_tokens,
+                max_tokens_reserved=self.max_tokens,
+                prompt_tokens_billed=self.usage.prompt_tokens if self.usage else None,
+                reserved_usd=self.worst,
+                cost_usd=charge,
+            )
         usage = self.usage or Usage()
         self.meter.run_log.event(
             "model_call",

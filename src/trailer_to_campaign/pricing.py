@@ -105,9 +105,11 @@ def worst_case_usd(model: str, input_tokens: int, max_tokens: int) -> Decimal:
     """The most a call with this many prompt tokens and this max_tokens can cost.
 
     Every prompt token is charged at the dearest input-side price (a 1h cache
-    write), and the output at max_tokens.
+    write), and the output at max_tokens. A model with long-prompt prices is
+    always charged at them: input_tokens is an estimate, and a prompt counted
+    just under the threshold can be billed just over it.
     """
     if input_tokens < 0 or max_tokens < 0:
         raise ValueError("token counts can't be negative")
-    p = price_for(model, input_tokens)
+    p = LONG_PROMPT_PRICES[model][1] if model in LONG_PROMPT_PRICES else price_for(model, input_tokens)
     return (input_tokens * p.max_input_side + max_tokens * p.output) / MTOK

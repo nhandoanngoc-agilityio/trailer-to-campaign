@@ -78,6 +78,9 @@ def dummy_run(film: str, budget: Decimal, calls: int, runs_dir: Path) -> int:
         run_log.finish(meter.spent, "film_budget_reached")
         print(err, file=sys.stderr)
         return EXIT_FILM_BUDGET_REACHED
+    except BaseException:
+        run_log.finish(meter.spent, "error")  # Ctrl-C or a crash still leaves the total
+        raise
     run_log.finish(meter.spent, "completed")
     log.info("dummy run completed: spent $%s of $%s", meter.spent, budget)
     return 0
@@ -87,8 +90,11 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
+    env = os.environ if env is None else env
+    if getattr(args, "budget", None) is not None:
+        env = {k: v for k, v in env.items() if k != "FILM_BUDGET_USD"}  # --budget wins
     try:
-        settings = load_settings(os.environ if env is None else env)
+        settings = load_settings(env)
     except ValueError as err:
         parser.error(str(err))
     if args.command == "dummy-run":

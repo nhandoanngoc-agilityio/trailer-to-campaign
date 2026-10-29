@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from trailer_to_campaign.budget import MeteredCall
 from trailer_to_campaign.cli import EXIT_FILM_BUDGET_REACHED, main
+from trailer_to_campaign.pricing import Usage
 
 
 def run_log_lines(runs_dir: Path) -> list[dict]:
@@ -55,6 +57,26 @@ def test_bad_budget_in_environment_is_a_usage_error(tmp_path: Path, capsys: pyte
         main(["dummy-run", "--runs-dir", str(tmp_path)], env={"FILM_BUDGET_USD": "lots"})
     assert err.value.code == 2
     assert "FILM_BUDGET_USD" in capsys.readouterr().err
+
+
+def test_budget_flag_overrides_a_bad_environment_value(tmp_path: Path) -> None:
+    code = main(
+        ["dummy-run", "--budget", "1.00", "--calls", "1", "--runs-dir", str(tmp_path)], env={"FILM_BUDGET_USD": "x"}
+    )
+    assert code == 0
+
+
+def test_an_interrupted_run_still_finishes_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupt(self: MeteredCall, usage: Usage) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(MeteredCall, "record", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        main(["dummy-run", "--runs-dir", str(tmp_path)], env={})
+    last = run_log_lines(tmp_path)[-1]
+    assert last["event"] == "run_finished"
+    assert last["stop_reason"] == "error"
+    assert Decimal(last["total_usd"]) > 0  # the interrupted call was charged its worst case
 
 
 def test_t2c_is_installed_as_a_command(tmp_path: Path) -> None:

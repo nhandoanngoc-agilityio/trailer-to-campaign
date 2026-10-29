@@ -117,3 +117,22 @@ def test_serve_footage_uses_an_absolute_films_folder(monkeypatch: pytest.MonkeyP
     main(["serve-footage"], env={})
     assert seen[0] == tmp_path / "films"
     assert seen[1].is_absolute()
+
+
+@pytest.mark.parametrize(("command", "server"), [("serve-catalog", "catalog"), ("serve-spoilers", "spoilers")])
+def test_film_servers_run_on_stdio_with_an_absolute_films_folder(
+    monkeypatch: pytest.MonkeyPatch, command: str, server: str
+) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    from trailer_to_campaign.tools import film
+
+    served: list[str] = []
+    dirs: list[Path] = []
+    monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: served.append(self.name))
+    for name in ("create_catalog_server", "create_spoiler_server"):
+        real = getattr(film, name)
+        monkeypatch.setattr(film, name, lambda films_dir, _real=real: dirs.append(films_dir) or _real(films_dir))
+    assert main([command], env={}) == 0
+    assert served == [server]
+    assert dirs[0].is_absolute()

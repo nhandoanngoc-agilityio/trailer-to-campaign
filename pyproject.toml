@@ -6,6 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+t2c = "trailer_to_campaign.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
 

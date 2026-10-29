@@ -24,6 +24,8 @@ from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.review import CheckedPost
 
 END_OF_EDIT = "."
+# Each answer is its key or its whole word, nothing else: "abort" must never read as "approve".
+WORDS = {"a": "approve", "e": "edit", "r": "reject", "l": "light", "h": "heavy"}
 
 
 class ApprovalAborted(Exception):
@@ -76,8 +78,9 @@ class TerminalApprover:
     def _choose(self, prompt: str, keys: str) -> str:
         while True:
             answer = self._read(prompt).strip().lower()
-            if answer and answer[0] in keys:
-                return answer[0]
+            for key in keys:
+                if answer in (key, WORDS[key]):
+                    return key
 
     def _light(self) -> bool:
         self._say("Is this a Light Edit? Rewriting the hook is never light.")
@@ -116,6 +119,12 @@ class TerminalApprover:
             return PostDecision("approve")
         while choice == "e":
             text = self._edit()
+            if not text:
+                self._say("That edit is empty, so nothing was re-checked.")
+                choice = self._choose("[a]pprove the post as it was / [e]dit / [r]eject: ", "aer")
+                if choice == "a":
+                    return PostDecision("approve")
+                continue
             self._show(recheck(text))
             choice = self._choose("[a]pprove this edit / [e]dit again / [r]eject: ", "aer")
             if choice == "a":

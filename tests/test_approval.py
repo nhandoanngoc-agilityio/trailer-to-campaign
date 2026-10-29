@@ -129,3 +129,30 @@ def test_a_closed_terminal_never_becomes_an_approval(answers: tuple[str, ...]) -
         terminal.key_moment(1, 5, MOMENT)
     with pytest.raises(ApprovalAborted):
         approver(*answers)[0].social_post(1, 6, POST, lambda t: Recheck([], Verdict(True, [])))
+
+
+# From /code-review: only the exact key or word decides; an empty edit is never a post.
+
+
+@pytest.mark.parametrize("answer", ["abort", "actually reject", "any spoilers?", "ap", "r please"])
+def test_a_word_that_merely_starts_with_a_key_decides_nothing(answer: str) -> None:
+    terminal, keys, _ = approver(answer, "r")
+    assert terminal.key_moment(1, 5, MOMENT).decision == "reject"
+    assert len(keys.prompts) == 2  # asked again
+
+
+@pytest.mark.parametrize(
+    ("answer", "decision"), [("a", "approve"), ("A", "approve"), (" approve ", "approve"), ("reject", "reject")]
+)
+def test_the_key_or_the_whole_word_decides(answer: str, decision: str) -> None:
+    terminal, _, _ = approver(answer)
+    assert terminal.key_moment(1, 5, MOMENT).decision == decision
+
+
+def test_an_empty_edit_is_asked_again_and_never_rechecked() -> None:
+    rechecked: list[str] = []
+    terminal, _, out = approver("e", ".", "e", "Real text. Stream it now.", ".", "a", "l")  # empty: choose again
+    decision = terminal.social_post(1, 6, POST, lambda t: rechecked.append(t) or Recheck([], Verdict(True, [])))
+    assert rechecked == ["Real text. Stream it now."]  # the empty one cost nothing
+    assert decision.text == "Real text. Stream it now."
+    assert "empty" in out.getvalue()

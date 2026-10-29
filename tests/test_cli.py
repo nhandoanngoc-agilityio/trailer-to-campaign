@@ -435,3 +435,31 @@ def test_write_completes_with_flagged_posts_and_shows_their_problems(
     assert "flagged" in out and "reveals the ending" in out and "5 passed, 1 flagged" in out
     [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
     assert json.loads(saved.read_text())[0]["status"] == "flagged"
+
+
+def test_write_keeps_the_passed_posts_when_the_film_budget_runs_out_mid_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_moments_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from decimal import Decimal
+
+    from trailer_to_campaign.agents import review
+    from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview
+    from trailer_to_campaign.agents.social_posts import SocialPost
+    from trailer_to_campaign.budget import FilmBudgetReached
+
+    FakeCopywriter(monkeypatch)
+    checked = [
+        CheckedPost(SocialPost("facebook", "en", "passed post", []), "passed", [], 0),
+        CheckedPost(SocialPost("facebook", "vi", "a rewrite", []), "flagged", ["this rewrite was never reviewed"], 1),
+    ]
+
+    async def runs_out(*args: Any, **kwargs: Any) -> Any:
+        raise FilmBudgetReachedMidReview(FilmBudgetReached(Decimal("1.9"), Decimal("2"), Decimal("0.3")), checked)
+
+    monkeypatch.setattr(review, "write_and_check", runs_out)
+    assert main(write_argv(key_moments_file, tmp_path / "runs"), env=KEY_ENV) == EXIT_FILM_BUDGET_REACHED
+    out, err = capsys.readouterr()
+    assert "Film Budget reached" in err and "1 passed, 1 flagged" in out
+    [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
+    assert [p["status"] for p in json.loads(saved.read_text())] == ["passed", "flagged"]
+    assert watch_log(tmp_path / "runs")[-1]["stop_reason"] == "film_budget_reached"

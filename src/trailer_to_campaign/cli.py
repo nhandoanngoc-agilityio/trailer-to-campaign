@@ -133,8 +133,9 @@ def run_agent(
     """One agent in one Run: its Run Log, the Film Budget, and its result saved next to the log.
 
     The Run always ends in the log: completed, film_budget_reached, or error. A result
-    that can't be saved is printed instead, since it was paid for. Returns the exit
-    code and the result (empty unless the Run completed).
+    that can't be saved is printed instead, since it was paid for. If the Film Budget
+    runs out after some of the work is finished (FilmBudgetReachedMidReview carries it
+    as .checked), that part is saved too. Returns the exit code and the saved result.
     """
     import anyio
 
@@ -143,12 +144,16 @@ def run_agent(
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     log.info("running the %s on %s with a Film Budget of $%s; log at %s", agent, film, budget, run_log.path)
+    stop, code = "completed", 0
     try:
         results = anyio.run(start, meter)  # start builds the servers and client, so a setup failure ends the Run
     except FilmBudgetReached as err:
-        run_log.finish(meter.spent, "film_budget_reached")
         print(err, file=sys.stderr)
-        return EXIT_FILM_BUDGET_REACHED, []
+        stop, code = "film_budget_reached", EXIT_FILM_BUDGET_REACHED
+        results = list(getattr(err, "checked", []))  # paid for and finished before the budget ran out
+        if not results:
+            run_log.finish(meter.spent, stop)
+            return code, []
     except AgentFailed as err:
         run_log.finish(meter.spent, "error")
         print(err, file=sys.stderr)
@@ -167,9 +172,9 @@ def run_agent(
         print(f"could not save the {noun} to {out} ({type(err).__name__}); printed above", file=sys.stderr)
         return EXIT_AGENT_FAILED, []
     meter.event(out.stem, agent=agent, count=len(results), file=out)
-    run_log.finish(meter.spent, "completed")
+    run_log.finish(meter.spent, stop)
     print(f"{len(results)} {noun} for {film}, ${meter.spent:.4f} of ${budget}: {out}")
-    return 0, results
+    return code, results
 
 
 def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:

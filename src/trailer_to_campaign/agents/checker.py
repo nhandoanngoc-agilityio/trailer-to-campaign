@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed, load_prompt
@@ -217,6 +217,8 @@ async def check_posts(
             verdict="pass" if verdict.passed else "reject",
             spoiler_ids=[p.spoiler_id for p in verdict.problems if p.kind == "spoiler"],
             rules=[p.rule for p in verdict.problems if p.kind == "brand"],
+            text=post.text,  # the Run Log is for the team: what was checked, and what was caught in it
+            problems=[asdict(p) for p in verdict.problems],
         )
     return verdicts
 

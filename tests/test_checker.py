@@ -121,6 +121,9 @@ async def test_the_checker_returns_a_verdict_for_each_post(films: Path, tmp_path
         ("facebook", "pass", []),
         ("tiktok", "reject", ["ending-capture"]),
     ]
+    # The Run Log is for the team: it keeps the post as checked and what was caught in it, in full.
+    assert checked[1]["text"] == TRAP.text
+    assert checked[1]["problems"] == [SPOILER]
     task = fake.requests[0]["messages"][0]["content"]
     assert '"post": 2' in task and "carry on with the procedure" in task  # the posts, as numbered data
 

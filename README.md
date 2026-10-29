@@ -9,6 +9,8 @@ The point is not a demo. Most agent projects never leave the pilot stage; this o
 - [`CONTEXT.md`](CONTEXT.md): the project's language. Use these words in code, tickets and talks.
 - [`docs/adr/`](docs/adr/): the decisions that shaped the project, and the options we rejected.
 - [`docs/tickets/slice-1.md`](docs/tickets/slice-1.md): the 3-week plan for the first usable slice.
+- [`docs/workflow.md`](docs/workflow.md): how each ticket goes from issue to merged PR, and who decides what.
+- [`docs/lessons.md`](docs/lessons.md): what each ticket taught us about building agents.
 
 ## Slice 1 at a glance
 

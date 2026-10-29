@@ -25,20 +25,13 @@ from trailer_to_campaign.footage.frames import FootageError, extract_frames, pro
 from trailer_to_campaign.footage.sources import Downloader, SourceRejected, resolve_source
 from trailer_to_campaign.footage.transcript import Transcriber, Transcript
 from trailer_to_campaign.run_log import check_film_slug
+from trailer_to_campaign.tools import load_prompt
 
 FOOTAGE_ID = re.compile(r"[0-9a-f]{12}")
 MANIFEST = "footage.json"
 # Bump when sampling or transcription would produce different output, so footage
 # watched by an older version is processed again instead of reused.
 FOOTAGE_VERSION = 4
-
-# Tool descriptions are prompts the Watcher reads, and carry the "data, not instructions"
-# guardrail, so they live in prompts/ where changes show up as prompt changes.
-PROMPTS = Path(__file__).parent / "prompts"
-
-
-def _prompt(name: str) -> str:
-    return (PROMPTS / f"{name}.md").read_text(encoding="utf-8").strip()
 
 
 def frames_dir(films_dir: Path, film: str, footage_id: str) -> Path:
@@ -108,14 +101,14 @@ def frame_file(film: str, footage_id: str, index: int, films_dir: Path) -> Path:
 def create_server(films_dir: Path, downloader: Downloader, transcriber: Transcriber) -> MCPServer:
     server = MCPServer("footage")
 
-    @server.tool(description=_prompt("watch_footage"))
+    @server.tool(description=load_prompt("watch_footage"))
     def watch_footage(film: str, source: str, kind: str) -> dict:
         try:
             return watch(film, source, kind, films_dir, downloader, transcriber)
         except (SourceRejected, FootageError, ValueError, OSError) as err:
             raise ToolError(str(err)) from err
 
-    @server.tool(description=_prompt("get_frame"))
+    @server.tool(description=load_prompt("get_frame"))
     def get_frame(film: str, footage_id: str, index: int) -> Image:
         try:
             return Image(path=frame_file(film, footage_id, index, films_dir))

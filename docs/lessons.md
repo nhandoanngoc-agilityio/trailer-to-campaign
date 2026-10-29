@@ -5,4 +5,4 @@ One or two lines per ticket: what it taught about building agents for real. Newe
 | Ticket | Lesson |
 |---|---|
 | Setup | Writing the glossary and ADRs before any code made every later decision faster: most debates were already settled in writing. |
-| Setup | Instructions guide an agent; hooks enforce. The rules that matter most (PRs only, no secrets, an Eval Set answer key nobody can edit to pass) became tested hooks and settings, not just lines in CLAUDE.md. |
+| Setup | Instructions guide an agent; hooks enforce. The rules that matter most (PRs only, no secrets, an Answer Key nobody can edit to pass) became tested hooks and settings, not just lines in CLAUDE.md. |

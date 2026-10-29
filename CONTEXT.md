@@ -80,6 +80,10 @@ _Avoid_: Test data, benchmark
 A deliberate error planted in an Eval Set Film (a Spoiler List item, a wrong cast name) that the Checker must catch.
 _Avoid_: Test case, gotcha
 
+**Answer Key**:
+The human-owned record, for each Eval Set Film, of the posts the team actually published and the Traps the Checker must catch. Agents read it and never change it.
+_Avoid_: Expected output, fixtures, golden files
+
 **Time Saved**:
 The difference between campaign preparation time before and after the agent team, measured per Film.
 _Avoid_: Efficiency, productivity

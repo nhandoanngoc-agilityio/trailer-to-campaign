@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,3 +57,26 @@ def test_negative_tokens_are_rejected() -> None:
         Usage(input=-1)
     with pytest.raises(ValueError):
         worst_case_usd("claude-opus-5-5", input_tokens=-1, max_tokens=1)
+
+
+def test_usage_from_api_treats_missing_cache_fields_as_zero() -> None:
+    api = SimpleNamespace(
+        input_tokens=1_200, output_tokens=300, cache_read_input_tokens=None, cache_creation_input_tokens=None
+    )
+    assert Usage.from_api(api) == Usage(input=1_200, output=300)
+
+
+def test_usage_from_api_reads_the_cache_write_split() -> None:
+    api = SimpleNamespace(
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_input_tokens=30,
+        cache_creation_input_tokens=70,
+        cache_creation=SimpleNamespace(ephemeral_5m_input_tokens=40, ephemeral_1h_input_tokens=30),
+    )
+    assert Usage.from_api(api) == Usage(input=10, output=20, cache_read=30, cache_write_5m=40, cache_write_1h=30)
+
+
+def test_usage_from_api_charges_an_unsplit_cache_write_at_the_1h_price() -> None:
+    api = SimpleNamespace(input_tokens=0, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=50)
+    assert Usage.from_api(api) == Usage(cache_write_1h=50)

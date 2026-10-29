@@ -199,3 +199,22 @@ def test_usage_cannot_be_recorded_outside_the_call(log: RunLog) -> None:
         call.record(Usage(input=10))
     with pytest.raises(RuntimeError):
         call.record(Usage(input=10))
+
+
+def test_a_failed_log_write_keeps_the_paid_for_call(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    usage = Usage(input=1_000, output=100)
+    log.path = log.path.parent / "gone" / "run.jsonl"  # the log can no longer be appended
+    with meter.call(OPUS, input_tokens=1_000, max_tokens=1_000) as call:
+        call.record(usage)
+    assert meter.spent == cost_usd(OPUS, usage)
+    assert meter.run_log_failed
+
+
+def test_a_failed_log_write_does_not_hide_the_original_error(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    log.path = log.path.parent / "gone" / "run.jsonl"
+    with pytest.raises(TimeoutError):
+        with meter.call(OPUS, input_tokens=1_000, max_tokens=1_000):
+            raise TimeoutError
+    assert meter.spent == worst_case_usd(OPUS, input_tokens=1_000, max_tokens=1_000)

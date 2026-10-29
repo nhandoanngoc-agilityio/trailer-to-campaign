@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from decimal import Decimal
+from typing import Any
 
 MTOK = 1_000_000
 
@@ -72,6 +73,27 @@ class Usage:
         for f in fields(self):
             if getattr(self, f.name) < 0:
                 raise ValueError(f"{f.name} tokens can't be negative")
+
+    @classmethod
+    def from_api(cls, usage: Any) -> Usage:
+        """Map a Messages API `usage` object onto Usage, the same way for every agent.
+
+        The cache fields are nullable. When the 5m/1h split of cache writes is
+        missing, the writes are charged at the dearer 1h price.
+        """
+        split = getattr(usage, "cache_creation", None)
+        if split is not None:
+            write_5m = getattr(split, "ephemeral_5m_input_tokens", None) or 0
+            write_1h = getattr(split, "ephemeral_1h_input_tokens", None) or 0
+        else:
+            write_5m, write_1h = 0, getattr(usage, "cache_creation_input_tokens", None) or 0
+        return cls(
+            input=usage.input_tokens or 0,
+            output=usage.output_tokens or 0,
+            cache_read=getattr(usage, "cache_read_input_tokens", None) or 0,
+            cache_write_5m=write_5m,
+            cache_write_1h=write_1h,
+        )
 
     @property
     def prompt_tokens(self) -> int:

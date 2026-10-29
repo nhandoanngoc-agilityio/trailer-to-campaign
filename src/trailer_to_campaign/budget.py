@@ -47,6 +47,17 @@ class FilmMeter:
         self.run_log = run_log
         self.spent = Decimal(0)
         self._reserved = Decimal(0)
+        self.run_log_failed = False
+
+    def _log(self, kind: str, **fields: object) -> None:
+        # A log write that fails must not throw away a call that was already
+        # paid for, or hide the error the call raised. The meter keeps the true
+        # spend in memory either way.
+        try:
+            self.run_log.event(kind, **fields)
+        except OSError:
+            self.run_log_failed = True
+            log.exception("could not write %s to the run log at %s (spent $%s)", kind, self.run_log.path, self.spent)
 
     def call(self, model: str, input_tokens: int, max_tokens: int, agent: str | None = None) -> MeteredCall:
         """Meter one model call. input_tokens is the whole prompt, as counted before sending."""
@@ -54,7 +65,7 @@ class FilmMeter:
 
     def _reserve(self, model: str, worst: Decimal) -> None:
         if self.spent + self._reserved + worst > self.limit:
-            self.run_log.event(
+            self._log(
                 "film_budget_reached", model=model, spent_usd=self.spent, limit_usd=self.limit, next_call_usd=worst
             )
             raise FilmBudgetReached(self.spent, self.limit, worst)
@@ -98,7 +109,7 @@ class MeteredCall:
         self.meter._settle(self.worst, charge)
         if charge > self.worst:
             log.warning("%s call cost $%s, more than its reserved $%s", self.model, charge, self.worst)
-            self.meter.run_log.event(
+            self.meter._log(
                 "reservation_exceeded",
                 model=self.model,
                 agent=self.agent,
@@ -109,7 +120,7 @@ class MeteredCall:
                 cost_usd=charge,
             )
         usage = self.usage or Usage()
-        self.meter.run_log.event(
+        self.meter._log(
             "model_call",
             model=self.model,
             agent=self.agent,

@@ -59,6 +59,10 @@ class FilmMeter:
             self.run_log_failed = True
             log.exception("could not write %s to the run log at %s (spent $%s)", kind, self.run_log.path, self.spent)
 
+    def event(self, kind: str, **fields: object) -> None:
+        """Write an agent's event to this Run's log; like the meter's own events, a failed write never raises."""
+        self._log(kind, **fields)
+
     def call(self, model: str, input_tokens: int, max_tokens: int, agent: str | None = None) -> MeteredCall:
         """Meter one model call. input_tokens is the whole prompt, as counted before sending."""
         return MeteredCall(self, model, input_tokens, max_tokens, agent)

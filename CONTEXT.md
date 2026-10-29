@@ -73,7 +73,7 @@ The maximum model spend allowed for one Run; the Run stops when it is reached.
 _Avoid_: Cost limit, quota
 
 **Run**:
-One pass of the agent team over one Film, from its trailer to Approval. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
+One pass of the agent team over one Film, from its trailer to the Approval of its Social Posts; the Approval of Key Moments is a pause inside the Run, however long it takes. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
 _Avoid_: Job, execution, session
 
 **Run Log**:

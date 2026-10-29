@@ -30,3 +30,11 @@ Closes #
 - [ ] `CONTEXT.md` updated, or no new terms
 - [ ] ADR added, or no decision met the bar
 - [ ] Lesson added to `docs/lessons.md`
+- [ ] Ticket record `docs/tickets/T<n>.md` finished
+
+## Human review
+
+<!-- Claude drafts every artifact; a person reviews it and edits where needed. Filled in by the human, never by Claude. -->
+
+- Reviewed by:
+- Edited: yes / no. What changed (spec, tests, code, record):

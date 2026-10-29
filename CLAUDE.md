@@ -15,6 +15,7 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 ## Layout
 
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
+- `docs/tickets/T<n>.md`: one record per ticket (spec, plan, tests, review, evidence, close), from `docs/tickets/TEMPLATE.md`.
 - `.claude/hooks/`: guardrails wired in `.claude/settings.json`, tested in `tests/test_hooks.py`. A hook block or approval prompt is team policy: change the approach (branch, PR, specific files) rather than reaching the same result another way.
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.
 - `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
@@ -24,7 +25,10 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 
 Every ticket runs this loop. The human gates are marked 🧑; stop at each one and wait.
 
+**Every artifact of work (spec, tests, PRs, notes, the ticket record) is Claude-assisted and human-reviewed, edited where needed.** Claude drafts; the human reviews and edits. Claude never fills in a provenance block or a PR's Human review section on the human's behalf.
+
 1. **Analyze.** Read the issue (`gh issue view <n>`), its blockers, the code it touches and any ADR it bears on. Restate each **Done when** line as a concrete check you can run, and list open questions.
+   Start `docs/tickets/T<n>.md` from the template with the Spec section.
    _Done when:_ every Done-when line has a runnable check, and every open question is either answered from the repo or put to the human.
 2. **Plan** 🧑. In plan mode, write: the failing tests you will add first, the files you will change, which check each step proves, and any effect on cost or prompts. Wait for approval.
    _Done when:_ the human approves the plan.
@@ -40,8 +44,8 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
    _Done when:_ the PR is open, CI is green, and every template section is filled.
 6. **Review** 🧑. Run `/code-review` against `main` and fix what it finds; the Claude review in CI then comments on the PR, and its findings get fixed or answered. The human reviews last and merges. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
    _Done when:_ the human merges.
-7. **Close the loop.** Update `CONTEXT.md` for any term the ticket settled. Offer an ADR only for a decision that is hard to reverse, surprising, and a real trade-off. Add one **lesson** to `docs/lessons.md`: what the ticket taught about building agents, in a line or two.
-   _Done when:_ the glossary, ADRs and lessons reflect the ticket, and the issue is closed.
+7. **Close the loop.** Finish `docs/tickets/T<n>.md` (plan, tests, review outcomes, evidence, close) in the ticket's PR, leaving its provenance block for the human. Update `CONTEXT.md` for any term the ticket settled. Offer an ADR only for a decision that is hard to reverse, surprising, and a real trade-off. Add one **lesson** to `docs/lessons.md`: what the ticket taught about building agents, in a line or two.
+   _Done when:_ the ticket record, glossary, ADRs and lessons reflect the ticket, the human has reviewed the record, and the issue is closed.
 
 ## Code standards
 

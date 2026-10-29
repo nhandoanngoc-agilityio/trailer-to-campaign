@@ -10,13 +10,17 @@ Analyze → Plan 🧑 → Build → Verify → Ship → Review 🧑 → Close th
 
 | Step | Claude does | You do |
 |---|---|---|
-| Analyze | Reads the issue, blockers, code and ADRs; turns each **Done when** into a runnable check | Answer any open questions |
+| Analyze | Reads the issue, blockers, code and ADRs; turns each **Done when** into a runnable check; starts the ticket record | Answer any open questions |
 | Plan 🧑 | Proposes the tests, files and checks in plan mode | Approve, or push back |
 | Build | Works test-first on branch `t<n>-<slug>` | Watch the diff pane; comment to steer |
 | Verify | Runs tests, lint, and (when an agent changed) the Eval Set and a real trailer | Look at the evidence |
 | Ship | Opens the PR with evidence; watches CI | Nothing, unless CI fails |
 | Review 🧑 | Runs `/code-review` first and fixes findings; Claude's CI review then comments on the PR | Review last and merge; ask for an ultrareview on risky PRs |
-| Close the loop | Updates the glossary, offers ADRs, writes one lesson | Accept or reject the ADR |
+| Close the loop | Finishes the ticket record, updates the glossary, offers ADRs, writes one lesson | Review the record and edit where needed; fill in its provenance and the PR's Human review; accept or reject the ADR |
+
+## Claude drafts, people review
+
+Every artifact of work (the spec, tests, PRs, notes, and the ticket record in `docs/tickets/T<n>.md`) is Claude-assisted and human-reviewed, edited where needed. Claude does the drafting; a person reads it and changes what's wrong. That review is recorded where only the person fills it in: the provenance line at the end of each ticket record, and the **Human review** section of each PR. A PR isn't ready to merge until that section is filled in.
 
 ## Guardrails: rules the tools enforce
 

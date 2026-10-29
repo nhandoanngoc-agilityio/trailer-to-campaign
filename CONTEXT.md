@@ -54,6 +54,10 @@ _Avoid_: Highlight, scene, clip
 Said of a Key Moment that the code has checked against what the Watcher was actually shown: frames it looked at, words heard in the Transcript (never unheard lines), and cast from Catalog Metadata. Only grounded Key Moments go on to the Copywriter.
 _Avoid_: Verified, validated, fact-checked
 
+**Traced**:
+Said of a Social Post whose every factual claim cites its source, a Key Moment or a Catalog Metadata field, and whose every quoted line is a Key Moment's quote word for word, as checked by code. Only traced posts go on to the Checker.
+_Avoid_: Sourced, fact-checked, verified
+
 **Social Post**:
 A ready-to-publish caption for one social platform, written in English or Vietnamese.
 _Avoid_: Caption, copy, content

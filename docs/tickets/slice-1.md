@@ -1,6 +1,6 @@
 # Slice 1 tickets
 
-Three weeks to a slice the marketing team uses on one real Film. Each ticket is a thin, testable piece; "Blocked by" lists the tickets that must be done first. Terms follow [`CONTEXT.md`](../../CONTEXT.md).
+Three weeks to a slice the marketing team uses on one real Film. Each ticket is a thin, testable piece; "Blocked by" lists the tickets that must be done first. Terms follow [`CONTEXT.md`](../../CONTEXT.md). Each ticket Tn is GitHub issue #n; the issues are the live version, with blocking links and `week-N` labels.
 
 **Week 1:** T1–T7, a working pipeline from the command line.
 **Week 2:** T8–T11, evals, Slack and Approval, Agent SDK.

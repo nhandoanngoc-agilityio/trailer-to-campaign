@@ -303,3 +303,117 @@ def test_a_failure_setting_up_the_watcher_still_ends_the_run(tmp_path: Path, mon
     with pytest.raises(RuntimeError, match="no ffmpeg"):
         main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV)
     assert watch_log(tmp_path)[-1]["stop_reason"] == "error"
+
+
+# t2c write: the wiring around the Copywriter (the Copywriter itself is tested in test_copywriter.py).
+
+
+class FakeCopywriter:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, spend: bool = False) -> None:
+        from trailer_to_campaign import cli
+        from trailer_to_campaign.agents import copywriter
+
+        self.calls: list[dict[str, Any]] = []
+        self.spend = spend
+        monkeypatch.setattr(copywriter, "write_posts", self)
+        monkeypatch.setattr(copywriter, "copywriter_servers", lambda settings: ["catalog"])
+        monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
+
+    async def __call__(self, film: str, key_moments: Any, *, servers: Any, client: Any, meter: Any) -> Any:
+        from trailer_to_campaign.agents.social_posts import Claim, SocialPost
+
+        self.calls.append({"film": film, "key_moments": key_moments, "servers": servers, "client": client})
+        if self.spend:
+            with meter.call("claude-opus-5-5", 50_000, 16_000, agent="copywriter") as call:
+                call.record(Usage(input=50_000, output=1_000))
+        claims = [Claim("The title", "catalog:title")]
+        return [
+            SocialPost(p, lang, f"{p} {lang}", claims)
+            for p in ("facebook", "instagram", "tiktok")
+            for lang in ("en", "vi")
+        ]
+
+
+@pytest.fixture
+def key_moments_file(tmp_path: Path) -> Path:
+    return watched(tmp_path, "agent-327")
+
+
+def watched(tmp_path: Path, film: str) -> Path:
+    """A key_moments.json where t2c watch writes it: <runs>/<film>/<time>/."""
+    from dataclasses import asdict
+
+    path = tmp_path / "watched" / film / "20261029T145957Z" / "key_moments.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([asdict(a_moment(t)) for t in (0.0, 10.0, 20.0, 30.0, 40.0)]), encoding="utf-8")
+    return path
+
+
+def write_argv(key_moments: Path, runs_dir: Path, *extra: str) -> list[str]:
+    return ["write", "--film", "agent-327", "--key-moments", str(key_moments), "--runs-dir", str(runs_dir), *extra]
+
+
+def test_write_needs_an_api_key_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_moments_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    assert main(write_argv(key_moments_file, tmp_path / "runs"), env={"T2C_FILMS_DIR": str(FILMS)}) == 2
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("content", [None, "not json"])
+def test_write_needs_readable_key_moments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], content: str | None
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    path = tmp_path / "key_moments.json"
+    if content is not None:
+        path.write_text(content)
+    assert main(write_argv(path, tmp_path / "runs"), env=KEY_ENV) == 2
+    assert "key_moments.json" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+def test_write_saves_social_posts_next_to_the_run_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_moments_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch, spend=True)
+    assert main(write_argv(key_moments_file, tmp_path / "runs"), env=KEY_ENV) == 0
+    [call] = fake.calls
+    assert call["film"] == "agent-327" and len(call["key_moments"]) == 5
+    assert call["servers"] == ["catalog"] and call["client"] == "client for sk-test"
+    [saved] = (tmp_path / "runs").glob("agent-327/*/social_posts.json")
+    posts = json.loads(saved.read_text())
+    assert len(posts) == 6 and posts[0]["claims"] == [{"text": "The title", "source": "catalog:title"}]
+    lines = watch_log(tmp_path / "runs")
+    assert lines[-1]["stop_reason"] == "completed"
+    assert any(line["event"] == "social_posts" and line["count"] == 6 for line in lines)
+    assert "6 Social Posts" in capsys.readouterr().out
+
+
+def test_write_stops_at_the_film_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_moments_file: Path
+) -> None:
+    FakeCopywriter(monkeypatch, spend=True)
+    assert main(write_argv(key_moments_file, tmp_path / "runs", "--budget", "0.05"), env=KEY_ENV) == 3
+    assert watch_log(tmp_path / "runs")[-1]["stop_reason"] == "film_budget_reached"
+
+
+def test_write_refuses_a_film_that_does_not_exist_before_any_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    argv = ["write", "--film", "agent-237", "--key-moments", str(watched(tmp_path, "agent-237"))]
+    assert main([*argv, "--runs-dir", str(tmp_path / "runs")], env=KEY_ENV) == 2
+    assert "agent-237" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+def test_write_refuses_key_moments_watched_for_another_film(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    assert main(write_argv(watched(tmp_path, "the-quiet-river"), tmp_path / "runs"), env=KEY_ENV) == 2
+    assert "the-quiet-river" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()

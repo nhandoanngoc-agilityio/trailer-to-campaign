@@ -17,11 +17,14 @@ Every later Campaign Draft is built on these, so an invented line or name stops 
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from trailer_to_campaign.agents import ChecksFailed
 from trailer_to_campaign.catalog import CastMember
 from trailer_to_campaign.footage import settings
 
@@ -31,10 +34,9 @@ MAX_MOMENTS = 10
 TOLERANCE_S = settings.INTERVAL_S / 2
 
 
-class NotGrounded(ValueError):
+class NotGrounded(ChecksFailed):
     def __init__(self, problems: list[str]) -> None:
-        self.problems = problems
-        super().__init__("Key Moments not grounded:\n" + "\n".join(f"- {p}" for p in problems))
+        super().__init__("Key Moments not grounded", problems)
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,33 @@ class KeyMoment:
     quote: Quote | None
     characters: list[str]
     frames: list[int]
+
+
+def load_key_moments(path: Path) -> list[KeyMoment]:
+    """Read back the Key Moments `t2c watch` wrote. Errors name the file, never its local path."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        moments = [
+            KeyMoment(
+                start=float(m["start"]),
+                end=float(m["end"]),
+                what_happens=str(m["what_happens"]),
+                mood=str(m["mood"]),
+                quote=Quote(str(q["text"]), float(q["start"]), float(q["end"])) if (q := m["quote"]) else None,
+                characters=[str(c) for c in m["characters"]],
+                frames=[int(f) for f in m["frames"]],
+            )
+            for m in raw
+        ]
+    except OSError as err:
+        raise ValueError(f"{path.name} could not be read ({type(err).__name__})") from err
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        raise ValueError(f"{path.name} is not JSON") from err
+    except (KeyError, TypeError, ValueError, AttributeError) as err:
+        raise ValueError(f"{path.name} is not a list of Key Moments as t2c watch writes them") from err
+    if not moments:
+        raise ValueError(f"{path.name} has no Key Moments")
+    return moments
 
 
 def ground(

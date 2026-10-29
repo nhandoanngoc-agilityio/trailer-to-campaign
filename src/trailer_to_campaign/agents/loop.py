@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 from mcp import Client
 from mcp.types import ImageContent, TextContent
 
+from trailer_to_campaign.agents import ChecksFailed
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.pricing import Usage
 
@@ -52,6 +53,41 @@ class ToolResult:
     @classmethod
     def error(cls, message: str) -> ToolResult:
         return cls.text(message, is_error=True)
+
+
+@dataclass
+class Submissions:
+    """The gate between an agent and the next stage of the Run.
+
+    Each submission is checked in code (check raises ChecksFailed). A failed one is
+    logged and sent back with every problem, at most `limit` times; then the agent
+    has failed. Only an accepted submission moves on.
+    """
+
+    meter: FilmMeter
+    agent: str  # "watcher"
+    noun: str  # what it submits: "Key Moments"
+    failure: str  # how a failed check reads: "were not grounded"
+    rejected_prompt: str  # what the agent is told, with {left} and {problems}
+    limit: int
+    count: int = 0
+    accepted: list[Any] | None = None
+
+    def submit(self, check: Callable[[], list[Any]]) -> ToolResult:
+        self.count += 1
+        try:
+            result = check()
+        except ChecksFailed as err:
+            event = f"{self.noun.lower().replace(' ', '_')}_rejected"
+            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems)
+            if self.count >= self.limit:
+                raise AgentFailed(
+                    f"the {self.agent.capitalize()}'s {self.noun} {self.failure} after {self.limit} tries"
+                ) from err
+            problems = "\n".join(f"- {p}" for p in err.problems)
+            return ToolResult.error(self.rejected_prompt.format(left=self.limit - self.count, problems=problems))
+        self.accepted = result
+        return ToolResult.text(f"Accepted {len(result)} {self.noun}.")
 
 
 class McpTools:

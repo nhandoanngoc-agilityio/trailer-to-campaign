@@ -129,7 +129,7 @@ async def watch_trailer(
             max_turns=MAX_TURNS,
             nudge=_prompt("watcher_nudge"),
         )
-        task = f"Film: {film}\nTrailer: {source} (kind: trailer)"
+        task = _prompt("watcher_task").format(film=film, source=source)
         await loop.run([{"role": "user", "content": task}], call_tool, lambda: watching.moments is not None)
         assert watching.moments is not None
         return watching.moments
@@ -176,8 +176,6 @@ def _submit(watching: _Watching, arguments: dict[str, Any], meter: FilmMeter) ->
             raise AgentFailed(f"the Watcher's Key Moments were not grounded after {MAX_SUBMISSIONS} tries") from err
         left = MAX_SUBMISSIONS - watching.submissions
         problems = "\n".join(f"- {p}" for p in err.problems)
-        return ToolResult.error(
-            f"Not accepted. Fix these and submit all the Key Moments again ({left} left):\n{problems}"
-        )
+        return ToolResult.error(_prompt("watcher_rejected").format(left=left, problems=problems))
     watching.moments = moments
-    return ToolResult([{"type": "text", "text": f"Accepted {len(moments)} Key Moments."}])
+    return ToolResult.text(f"Accepted {len(moments)} Key Moments.")

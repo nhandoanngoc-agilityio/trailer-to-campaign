@@ -46,8 +46,12 @@ class ToolResult:
     data: Any = field(default=None, repr=False)  # the MCP result, for the agent's own bookkeeping
 
     @classmethod
+    def text(cls, text: str, is_error: bool = False) -> ToolResult:
+        return cls([_text(text)], is_error=is_error)
+
+    @classmethod
     def error(cls, message: str) -> ToolResult:
-        return cls([{"type": "text", "text": message}], is_error=True)
+        return cls.text(message, is_error=True)
 
 
 class McpTools:

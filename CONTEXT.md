@@ -69,11 +69,11 @@ A change the approving marketer marks as light; rewriting a Draft's hook is neve
 _Avoid_: Minor change, tweak
 
 **Film Budget**:
-The maximum model spend allowed for producing one Campaign; the run stops when it is reached.
+The maximum model spend allowed for one Run; the Run stops when it is reached.
 _Avoid_: Cost limit, quota
 
 **Run**:
-One pass of the agent team over one Film, from its trailer to Approval; it ends completed, at the Film Budget, or in an error.
+One pass of the agent team over one Film, from its trailer to Approval. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
 _Avoid_: Job, execution, session
 
 **Run Log**:

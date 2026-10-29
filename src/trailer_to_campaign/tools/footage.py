@@ -30,7 +30,7 @@ FOOTAGE_ID = re.compile(r"[0-9a-f]{12}")
 MANIFEST = "footage.json"
 # Bump when sampling or transcription would produce different output, so footage
 # watched by an older version is processed again instead of reused.
-FOOTAGE_VERSION = 3
+FOOTAGE_VERSION = 4
 
 # Tool descriptions are prompts the Watcher reads, and carry the "data, not instructions"
 # guardrail, so they live in prompts/ where changes show up as prompt changes.
@@ -77,6 +77,7 @@ def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downlo
             for f in frames
         ],
         "transcript": [{"start": s.start, "end": s.end, "text": s.text} for s in transcript.segments],
+        "unheard": [{"start": s.start, "end": s.end, "text": s.text} for s in transcript.unheard],
     }
     (staging / MANIFEST).write_text(json.dumps(footage, ensure_ascii=False, indent=2), encoding="utf-8")
     old = out.with_name(f".{footage_id}.old")

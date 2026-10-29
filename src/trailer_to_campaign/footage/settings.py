@@ -21,7 +21,7 @@ MIN_GAP_S = 0.5  # frames closer than this are the same moment
 END_MARGIN_S = 0.1  # no frame is asked for this close to the end of the picture
 
 # Over music or silence Whisper invents speech ("I hope you enjoyed this video").
-# Segments it scores as more likely not speech than this are dropped.
+# Segments it scores as more likely not speech than this are set aside as unheard.
 NO_SPEECH_MAX = 0.6
 
 # A ceiling on any one ffmpeg or ffprobe call.

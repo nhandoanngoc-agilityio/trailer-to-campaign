@@ -99,6 +99,8 @@ def test_segments_whisper_marks_as_probably_not_speech_are_dropped(tmp_path: Pat
 
     transcript = FasterWhisperTranscriber("small", model_factory=lambda name: MusicModel())(tmp_path / "t.mp4")
     assert transcript.segments == [Segment(20.0, 22.0, "We ride at dawn.")]
+    # Set aside, not lost: a shared no-speech score can also catch real dialogue over loud music.
+    assert transcript.unheard == [Segment(6.5, 8.4, "You")]
 
 
 def test_footage_with_no_speech_has_no_language(tmp_path: Path) -> None:
@@ -109,4 +111,13 @@ def test_footage_with_no_speech_has_no_language(tmp_path: Path) -> None:
             )
 
     transcript = FasterWhisperTranscriber("small", model_factory=lambda name: SilentModel())(tmp_path / "t.mp4")
-    assert transcript == Transcript(None, [])
+    assert transcript == Transcript(None, [], unheard=[Segment(6.5, 8.4, "You")])
+
+
+def test_unheard_segments_round_trip_and_old_files_still_load(tmp_path: Path) -> None:
+    transcript = Transcript("en", [Segment(1.0, 2.0, "Hi")], unheard=[Segment(5.0, 6.0, "You")])
+    path = tmp_path / "transcript.json"
+    transcript.save(path)
+    assert Transcript.load(path) == transcript
+    path.write_text('{"language": "en", "segments": []}', encoding="utf-8")  # written before unheard existed
+    assert Transcript.load(path) == Transcript("en", [])

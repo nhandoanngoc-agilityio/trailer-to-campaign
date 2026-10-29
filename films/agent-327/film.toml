@@ -1,0 +1,30 @@
+# Sample Film for slice 1: Blender Studio's open movie "Agent 327: Operation Barbershop" (2017).
+# It stands in for a real Film so T2-T4 can be tested end to end on real footage.
+#
+# Every fact is from a published source, never guessed:
+# - synopsis and characters: Gigazine (2017-05-17) and 3DVF on the short, and Martin Lodewijk's
+#   Agent 327 comics, where Boris Kloris is the recurring villain
+# - runtime: probed from the trailer file by the footage tool (231.5 s with credits)
+# - voice cast: not listed, because no source we found says who voices whom
+#
+# Real Films' film.toml files are gitignored: a Spoiler List is unreleased plot.
+
+[catalog]
+title = "Agent 327: Operation Barbershop"
+synopsis = """Secret agent 327 follows a clue to a barbershop in Amsterdam, \
+unaware that the mercenary Boris Kloris is on his tail."""
+genre = ["animation", "action", "comedy"]
+language = "en"
+runtime_minutes = 4
+trailer = "https://www.youtube.com/watch?v=mN0zPOpADL4"
+
+[[catalog.cast]]
+character = "Agent 327"
+
+[[catalog.cast]]
+character = "Boris Kloris"
+
+[[spoilers]]
+id = "ending-capture"
+text = "The film ends with Agent 327 captured: the villains plan to make him their next recruit after 'the procedure'."
+why = "The ending. Heard in the trailer at 175.9-184.9 s: \"Doctor, carry on with the procedure. We have to make room for Agent 327.\""

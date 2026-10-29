@@ -113,7 +113,39 @@ def test_serve_footage_uses_an_absolute_films_folder(monkeypatch: pytest.MonkeyP
         footage, "create_server", lambda films_dir, **kw: seen.append(films_dir) or real(films_dir, **kw)
     )
     monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: None)
+    (tmp_path / "films").mkdir()
     main(["serve-footage"], env={"T2C_FILMS_DIR": str(tmp_path / "films")})
     main(["serve-footage"], env={})
     assert seen[0] == tmp_path / "films"
     assert seen[1].is_absolute()
+
+
+@pytest.mark.parametrize(("command", "server"), [("serve-catalog", "catalog"), ("serve-spoilers", "spoilers")])
+def test_film_servers_run_on_stdio_with_an_absolute_films_folder(
+    monkeypatch: pytest.MonkeyPatch, command: str, server: str
+) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    from trailer_to_campaign.tools import catalog, spoilers
+
+    served: list[str] = []
+    dirs: list[Path] = []
+    monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: served.append(self.name))
+    for module, name in ((catalog, "create_catalog_server"), (spoilers, "create_spoiler_server")):
+        real = getattr(module, name)
+        monkeypatch.setattr(module, name, lambda films_dir, _real=real: dirs.append(films_dir) or _real(films_dir))
+    assert main([command], env={}) == 0
+    assert served == [server]
+    assert dirs[0].is_absolute()
+
+
+@pytest.mark.parametrize("command", ["serve-footage", "serve-catalog", "serve-spoilers"])
+def test_servers_refuse_to_start_without_a_films_folder(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An MCP host may start the server in $HOME; serving from a folder that isn't there helps no one.
+    from mcp.server.mcpserver import MCPServer
+
+    monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: pytest.fail("must not start"))
+    assert main([command], env={"T2C_FILMS_DIR": str(tmp_path / "missing")}) == 2
+    assert "T2C_FILMS_DIR" in capsys.readouterr().err

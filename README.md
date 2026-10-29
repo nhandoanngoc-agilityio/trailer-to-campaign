@@ -32,6 +32,9 @@ The point is not a demo. Most agent projects never leave the pilot stage; this o
 ```
 export ANTHROPIC_API_KEY=...            # only commands that call a model need it
 uv run t2c watch --film agent-327       # the Watcher on the sample Film's trailer
+uv run t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
 ```
 
 `t2c watch` downloads the trailer from the Film's catalog link (or uses `--source`), samples frames and transcribes it locally, then has the Watcher pick 5–10 Key Moments. Each one is checked against what the Watcher was shown: frames it looked at, words heard in the transcript, cast from the Catalog Metadata. The Key Moments are written to `runs/<film>/<time>/key_moments.json`, next to the Run Log, and the Run stops if the Film Budget (`--budget`, or `FILM_BUDGET_USD`, default $2.00) is reached. `t2c dummy-run` checks the Film Budget meter without an API key.
+
+`t2c write` has the Copywriter turn those Key Moments into six Social Posts: Facebook, Instagram and TikTok, each in English and Vietnamese. Every post must name the Film exactly, fit its platform, quote only Key Moment lines word for word (in English, even in Vietnamese posts), and cite a Key Moment or a catalog field for each fact it states. The posts are written to `social_posts.json` next to that Run's log. Until T7 joins them into one Run, `watch` and `write` each start a Run of their own.

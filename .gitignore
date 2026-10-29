@@ -7,3 +7,5 @@ runs/
 .env
 .env.*
 !.env.example
+films/*/film.toml
+!films/agent-327/film.toml

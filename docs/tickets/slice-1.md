@@ -12,9 +12,9 @@ Critical path: T1 → T2/T3 → T4 → T5 → T6 → T7 → T9 → T10 → T12 �
 
 ## T1 — Project skeleton and Film Budget meter
 
-Set up the Python project (dependency management, config for the Anthropic API key, a `films/` folder layout, logging), a test runner and linter, and CI that runs both on every PR. Add a cost meter that records model spend per run and stops the run when the Film Budget is reached.
+The harness (uv, pytest, ruff, CI, hooks) already exists. Add the application package, config for the Anthropic API key from the environment, a `films/` folder layout, and logging. Add a cost meter that records model spend per run and stops the run when the Film Budget is reached.
 
-- **Done when:** a dummy run with a tiny budget stops with a clear "Film Budget reached" message, spend is written to the run log, and CI runs tests and lint on a PR.
+- **Done when:** a dummy run with a tiny budget stops with a clear "Film Budget reached" message, spend is written to the run log, and CI stays green with the new tests.
 - **Blocked by:** none
 
 ## T2 — Footage tool: frames and transcript

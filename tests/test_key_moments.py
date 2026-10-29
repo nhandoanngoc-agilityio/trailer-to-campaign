@@ -79,7 +79,7 @@ def test_fewer_than_5_or_more_than_10_are_refused(count: int) -> None:
 
 @pytest.mark.parametrize(
     ("start", "end", "frame", "says"),
-    [(-1.0, 2.0, 0, "30.0"), (28.0, 31.0, 9, "30.0"), (8.0, 6.0, 2, "before")],
+    [(-1.0, 2.0, 0, "30.0"), (28.0, 31.0, 9, "30.0"), (8.0, 6.0, 2, "before"), (6.0, 6.0, 2, "before")],
 )
 def test_a_time_outside_the_trailer_or_backwards_is_refused(start: float, end: float, frame: int, says: str) -> None:
     [problem] = problems(five()[:4] + [moment(start, end, frames=[frame])])  # bad times: no frame or quote checks
@@ -127,7 +127,16 @@ def test_a_quote_matches_despite_case_and_punctuation_and_may_span_two_lines() -
     moments = five()
     moments[2] = moment(9.0, 13.0, quote="the BARBER knows... nothing more")
     grounded = ground(moments, FOOTAGE, CAST, ALL_FRAMES)
-    assert grounded[2].quote == Quote("the BARBER knows... nothing more", start=10.0, end=13.0)
+    assert grounded[2].quote == Quote("The barber knows nothing more.", start=10.0, end=13.0)  # as heard
+
+
+@pytest.mark.parametrize(
+    ("submitted", "stored"),
+    [("AGENT 327 YOU'RE LATE!", "Agent 327, you're late."), ("you're late", "you're late.")],
+)
+def test_a_quote_is_stored_in_the_transcripts_words_not_the_watchers(submitted: str, stored: str) -> None:
+    grounded = ground(five(quote=submitted), FOOTAGE, CAST, ALL_FRAMES)
+    assert grounded[0].quote == Quote(stored, start=0.5, end=2.0)
 
 
 def test_a_quote_must_be_whole_words() -> None:
@@ -141,9 +150,32 @@ def test_a_character_not_in_the_catalog_is_refused() -> None:
     assert "Agent 327" in problem and "Boris Kloris" in problem  # the allowed names
 
 
-def test_an_actor_name_from_the_catalog_is_accepted() -> None:
+def test_an_actor_name_from_the_catalog_names_their_character() -> None:
     grounded = ground(five(characters=["jane actor"]), FOOTAGE, CAST, ALL_FRAMES)
-    assert grounded[0].characters == ["Jane Actor"]
+    assert grounded[0].characters == ["Boris Kloris"]
+
+
+def test_a_character_name_wins_over_an_actor_with_the_same_name() -> None:
+    cast = [CastMember("Max"), CastMember("Boris Kloris", name="Max")]
+    grounded = ground(five(characters=["max"]), FOOTAGE, cast, ALL_FRAMES)
+    assert grounded[0].characters == ["Max"]
+
+
+# Over the frame cap, interval frames are thinned (footage.settings.MAX_FRAMES): here one every 6 s.
+SPARSE: dict[str, Any] = {
+    **FOOTAGE,
+    "duration": 60.0,
+    "frames": [{"index": i, "t": 6.0 * i, "reason": "interval", "file": f"f{i}.jpg"} for i in range(10)],
+}
+
+
+def test_thinned_frames_widen_the_window_to_the_nearest_frame() -> None:
+    moments = [moment(2.0, 3.0, frames=[0]), moment(14.0, 15.0, frames=[2])]  # frame 2 is at 12 s
+    moments += [moment(20.0, 21.0, frames=[3]), moment(26.0, 27.0, frames=[4]), moment(38.0, 39.0, frames=[6])]
+    assert len(ground(moments, SPARSE, CAST, ALL_FRAMES)) == 5
+    moments[1] = moment(14.0, 15.0, frames=[5])  # 30 s: still too far
+    with pytest.raises(NotGrounded, match="frame 5"):
+        ground(moments, SPARSE, CAST, ALL_FRAMES)
 
 
 @pytest.mark.parametrize("field", ["what_happens", "mood"])

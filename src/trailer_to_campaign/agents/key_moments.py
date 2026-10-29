@@ -6,8 +6,11 @@ Watcher can fix them in one go. Grounded means:
 
 - 5 to 10 moments, each inside the trailer, start before end
 - each cites at least one frame the Watcher fetched, taken during the moment
-- a quote is words heard in the transcript during the moment, never an unheard line
-- characters are cast from the Catalog Metadata, never a guessed name
+  (or as near it as the sampling allows)
+- a quote is words heard in the transcript during the moment, never an unheard line,
+  and is kept in the transcript's words, not the Watcher's
+- characters are cast from the Catalog Metadata, never a guessed name; an actor's
+  name is kept as the character they play
 
 Every later Campaign Draft is built on these, so an invented line or name stops here.
 """
@@ -24,7 +27,7 @@ from trailer_to_campaign.footage import settings
 
 MIN_MOMENTS = 5
 MAX_MOMENTS = 10
-# Frames are sampled every INTERVAL_S, so the nearest one can be up to half that from the moment.
+# How far a quote's line may be heard from the moment: Whisper's timestamps are approximate.
 TOLERANCE_S = settings.INTERVAL_S / 2
 
 
@@ -60,11 +63,12 @@ def ground(
     if not MIN_MOMENTS <= len(submitted) <= MAX_MOMENTS:
         problems.append(f"submit {MIN_MOMENTS} to {MAX_MOMENTS} Key Moments, not {len(submitted)}")
     names = _cast_names(cast)
+    frames = _Frames(footage["frames"])
     moments = []
     for i, raw in enumerate(submitted, start=1):
         where = f"Key Moment {i}"
         try:
-            moment, found = _moment(raw, footage, names, seen_frames)
+            moment, found = _moment(raw, footage, frames, names, seen_frames)
         except (KeyError, TypeError, ValueError, AttributeError):
             problems.append(f"{where}: needs start, end, what_happens, mood, quote, characters and frames")
             continue
@@ -76,25 +80,39 @@ def ground(
     return sorted(moments, key=lambda m: (m.start, m.end))
 
 
+class _Frames:
+    """Frame times by index, and how far from a moment its nearest frame can be.
+
+    Frames come every INTERVAL_S plus one per scene change, but over MAX_FRAMES the
+    interval frames are thinned, so the window is half the widest gap actually sampled.
+    """
+
+    def __init__(self, frames: list[dict[str, Any]]) -> None:
+        self.times = {f["index"]: float(f["t"]) for f in frames}
+        ordered = sorted(self.times.values())
+        widest = max((b - a for a, b in zip(ordered, ordered[1:], strict=False)), default=0.0)
+        self.tolerance = max(settings.INTERVAL_S, widest) / 2
+
+
 def _moment(
-    raw: dict[str, Any], footage: dict[str, Any], names: dict[str, str], seen_frames: set[int]
+    raw: dict[str, Any], footage: dict[str, Any], frames_of: _Frames, names: dict[str, str], seen_frames: set[int]
 ) -> tuple[KeyMoment | None, list[str]]:
     start, end = float(raw["start"]), float(raw["end"])
     what, mood = str(raw["what_happens"]).strip(), str(raw["mood"]).strip()
     quote_text, characters, frames = raw["quote"], list(raw["characters"]), [int(f) for f in raw["frames"]]
 
     duration = float(footage["duration"])
-    if not 0 <= start <= end <= duration:
-        if start > end:
+    if not 0 <= start < end <= duration:
+        if start >= end:
             return None, [f"start {start} must be before end {end}"]
         return None, [f"{start}-{end} s is outside the trailer, which runs 0-{duration} s"]
 
     problems = [f"{name} must be non-empty text" for name, text in (("what_happens", what), ("mood", mood)) if not text]
-    problems += _frame_problems(frames, footage, start, end, seen_frames)
+    problems += _frame_problems(frames, frames_of, start, end, seen_frames)
 
     quote = None
     if quote_text is not None:
-        quote = _find_quote(str(quote_text).strip(), footage, start, end)
+        quote = _find_quote(str(quote_text), footage, start, end)
         if quote is None:
             problems.append(_quote_problem(str(quote_text), footage, start, end))
 
@@ -113,24 +131,27 @@ def _moment(
 
 
 def _frame_problems(
-    frames: list[int], footage: dict[str, Any], start: float, end: float, seen_frames: set[int]
+    frames: list[int], frames_of: _Frames, start: float, end: float, seen_frames: set[int]
 ) -> list[str]:
     if not frames:
         return ["cite at least one frame you looked at with get_frame"]
-    times = {f["index"]: float(f["t"]) for f in footage["frames"]}
+    times, near = frames_of.times, frames_of.tolerance
     problems = []
     for index in frames:
         if index not in times:
             problems.append(f"frame {index} does not exist (frames are 0-{len(times) - 1})")
         elif index not in seen_frames:
             problems.append(f"frame {index} was not looked at; fetch it with get_frame or cite a frame you saw")
-        elif not start - TOLERANCE_S <= times[index] <= end + TOLERANCE_S:
+        elif not start - near <= times[index] <= end + near:
             problems.append(f"frame {index} is at {times[index]} s, outside the moment's {start}-{end} s")
     return problems
 
 
+WORD = re.compile(r"[^\W_]+")
+
+
 def _words(text: str) -> str:
-    return " ".join(re.sub(r"[\W_]+", " ", text.casefold()).split())
+    return " ".join(w.casefold() for w in WORD.findall(text))
 
 
 def _contains(haystack: str, needle: str) -> bool:
@@ -145,14 +166,26 @@ def _near(lines: Iterable[dict[str, Any]], start: float, end: float) -> list[dic
 
 
 def _find_quote(text: str, footage: dict[str, Any], start: float, end: float) -> Quote | None:
-    """The shortest run of consecutive transcript lines near the moment that holds the quote's words."""
-    words = _words(text)
+    """The quote as heard: the shortest run of consecutive transcript lines near the moment that holds its words.
+
+    Matching ignores case and punctuation, but the Quote keeps the transcript's own
+    words, from the first matched word to the end of the last (with its punctuation).
+    """
+    wanted = _words(text).split()
+    if not wanted:
+        return None
     lines = _near(footage["transcript"], start, end)
     for size in range(1, len(lines) + 1):
         for i in range(len(lines) - size + 1):
             run = lines[i : i + size]
-            if _contains(" ".join(_words(s["text"]) for s in run), words):
-                return Quote(text, start=float(run[0]["start"]), end=float(run[-1]["end"]))
+            heard = " ".join(s["text"].strip() for s in run)
+            tokens = list(WORD.finditer(heard))
+            words = [t.group().casefold() for t in tokens]
+            for j in range(len(words) - len(wanted) + 1):
+                if words[j : j + len(wanted)] == wanted:
+                    first, last = tokens[j], tokens[j + len(wanted) - 1]
+                    stop = re.compile(r"\S*").match(heard, last.end()).end()  # keep the word's trailing punctuation
+                    return Quote(heard[first.start() : stop], start=float(run[0]["start"]), end=float(run[-1]["end"]))
     return None
 
 
@@ -164,9 +197,7 @@ def _quote_problem(text: str, footage: dict[str, Any], start: float, end: float)
 
 
 def _cast_names(cast: list[CastMember]) -> dict[str, str]:
-    names = {}
-    for member in cast:
-        names[member.character.casefold()] = member.character
-        if member.name:
-            names[member.name.casefold()] = member.name
+    """Each name the Watcher may use, mapped to the character it means; a character's own name wins."""
+    names = {m.name.casefold(): m.character for m in cast if m.name}
+    names.update({m.character.casefold(): m.character for m in cast})
     return names

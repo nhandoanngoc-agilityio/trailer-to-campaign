@@ -174,3 +174,38 @@ async def test_the_catalog_of_another_film_is_refused(films: Path, tmp_path: Pat
     _, fake = await run.write([other, read_catalog, submit()])
     [refused] = results(fake.requests[1])
     assert refused["is_error"] and "sample" in refused["content"][0]["text"]
+
+
+# T6: revise mode rewrites only the posts the Checker rejected.
+
+
+async def test_revise_rewrites_only_the_rejected_posts(films: Path, tmp_path: Path) -> None:
+    from trailer_to_campaign.agents.copywriter import Rewrite, revise_posts
+    from trailer_to_campaign.agents.social_posts import Claim, SocialPost
+
+    rejected = SocialPost(
+        "tiktok", "en", f'{TITLE}: "Just a trim, please." Stream it now.', [Claim("t", "catalog:title")]
+    )
+    reason = "The words 'Just a trim' reveal something the Film's team keeps secret. Remove them."
+    fixed = {
+        "platform": "tiktok",
+        "language": "en",
+        "text": f"{TITLE}: a spy walks into a barbershop. Stream it now.",
+        "claims": [{"text": "The title", "source": "catalog:title"}],
+    }
+    too_many = lambda params: reply(use("submit_social_posts", 1, posts=six_posts()))  # noqa: E731
+    just_one = lambda params: reply(use("submit_social_posts", 2, posts=[fixed]))  # noqa: E731
+
+    run = Run(films, tmp_path)
+    client = FakeClient([read_catalog, too_many, just_one])
+    posts = await revise_posts(
+        "sample", MOMENTS, [Rewrite(rejected, [reason])], servers=run.servers, client=client, meter=run.meter
+    )
+
+    assert [(p.platform, p.language, p.text) for p in posts] == [("tiktok", "en", fixed["text"])]
+    [refused] = results(client.messages.requests[2])
+    assert refused["is_error"] and "only the posts asked for" in refused["content"][0]["text"]
+    task = client.messages.requests[0]["messages"][0]["content"]
+    assert reason in task and json.dumps(rejected.text)[1:-1] in task and '"key_moment": 2' in task
+    for request in client.messages.requests:
+        assert SPOILER not in json.dumps(request, default=str)

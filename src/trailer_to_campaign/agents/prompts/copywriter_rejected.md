@@ -1,2 +1,2 @@
-Not accepted. Fix these and submit all six Social Posts again ({left} left):
+Not accepted. Fix these and submit all the posts asked for again ({left} left):
 {problems}

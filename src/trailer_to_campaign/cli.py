@@ -9,7 +9,8 @@ stop and the run log can be checked without an API key or any spend.
 watch runs the Watcher on a Film's trailer (the catalog's link unless --source
 names one) and writes its Key Moments next to the Run Log. write runs the
 Copywriter on those Key Moments and writes the Social Posts the same way; until
-T7 joins them, each command is a Run of its own.
+T7 joins them, each command is a Run of its own. write always runs the Checker
+after the Copywriter: no post leaves it unchecked.
 """
 
 from __future__ import annotations
@@ -132,8 +133,9 @@ def run_agent(
     """One agent in one Run: its Run Log, the Film Budget, and its result saved next to the log.
 
     The Run always ends in the log: completed, film_budget_reached, or error. A result
-    that can't be saved is printed instead, since it was paid for. Returns the exit
-    code and the result (empty unless the Run completed).
+    that can't be saved is printed instead, since it was paid for. If the Film Budget
+    runs out after some of the work is finished (FilmBudgetReachedMidReview carries it
+    as .checked), that part is saved too. Returns the exit code and the saved result.
     """
     import anyio
 
@@ -142,12 +144,16 @@ def run_agent(
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     log.info("running the %s on %s with a Film Budget of $%s; log at %s", agent, film, budget, run_log.path)
+    stop, code = "completed", 0
     try:
         results = anyio.run(start, meter)  # start builds the servers and client, so a setup failure ends the Run
     except FilmBudgetReached as err:
-        run_log.finish(meter.spent, "film_budget_reached")
         print(err, file=sys.stderr)
-        return EXIT_FILM_BUDGET_REACHED, []
+        stop, code = "film_budget_reached", EXIT_FILM_BUDGET_REACHED
+        results = list(getattr(err, "checked", []))  # paid for and finished before the budget ran out
+        if not results:
+            run_log.finish(meter.spent, stop)
+            return code, []
     except AgentFailed as err:
         run_log.finish(meter.spent, "error")
         print(err, file=sys.stderr)
@@ -166,9 +172,9 @@ def run_agent(
         print(f"could not save the {noun} to {out} ({type(err).__name__}); printed above", file=sys.stderr)
         return EXIT_AGENT_FAILED, []
     meter.event(out.stem, agent=agent, count=len(results), file=out)
-    run_log.finish(meter.spent, "completed")
+    run_log.finish(meter.spent, stop)
     print(f"{len(results)} {noun} for {film}, ${meter.spent:.4f} of ${budget}: {out}")
-    return 0, results
+    return code, results
 
 
 def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
@@ -196,7 +202,7 @@ def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settin
 
 
 def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
-    from trailer_to_campaign.agents import copywriter
+    from trailer_to_campaign.agents import review
     from trailer_to_campaign.agents.key_moments import load_key_moments
 
     try:
@@ -216,12 +222,18 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
         return 2
 
     async def start(meter: FilmMeter) -> list[Any]:
-        servers, client = copywriter.copywriter_servers(settings), make_client(api_key)
-        return await copywriter.write_posts(film, key_moments, servers=servers, client=client, meter=meter)
+        # The whole loop, never the Copywriter alone: no post leaves this command unchecked.
+        agents = review.agents_for(film, settings, make_client(api_key), meter)
+        return await review.write_and_check(key_moments, agents, meter)
 
-    code, posts = run_agent(film, budget, runs_dir, "copywriter", start, "social_posts.json", "Social Posts")
-    for post in posts:
-        print(f"  {post.platform:9} {post.language}: {post.text}")
+    code, checked = run_agent(film, budget, runs_dir, "copywriter+checker", start, "social_posts.json", "Social Posts")
+    for c in checked:
+        print(f"  {c.status:7} {c.post.platform:9} {c.post.language}: {c.post.text}")
+        for problem in c.problems:
+            print(f"          ! {problem}")
+    if checked:
+        flagged = sum(c.status == "flagged" for c in checked)
+        print(f"{len(checked) - flagged} passed, {flagged} flagged for a person")
     return code
 
 

@@ -17,8 +17,8 @@ from typing import Any
 
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
-from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
-from trailer_to_campaign.agents.social_posts import SocialPost, trace
+from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
+from trailer_to_campaign.agents.social_posts import ALL_PAIRS, SocialPost, trace
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 
@@ -70,10 +70,19 @@ def copywriter_servers(settings: Settings) -> list[Any]:
     return [create_catalog_server(settings.films_dir.resolve())]
 
 
+@dataclass(frozen=True)
+class Rewrite:
+    """A post the Checker rejected, and why, in words the Copywriter may see (never the Spoiler List)."""
+
+    post: SocialPost
+    reasons: list[str]
+
+
 @dataclass
 class _Writing:
     film: str
     key_moments: list[KeyMoment]
+    required: list[tuple[str, str]]
     gate: Submissions
     catalog: dict[str, Any] | None = None
 
@@ -101,10 +110,50 @@ def key_moments_data(key_moments: list[KeyMoment]) -> str:
 async def write_posts(
     film: str, key_moments: list[KeyMoment], *, servers: list[Any], client: Any, meter: FilmMeter
 ) -> list[SocialPost]:
+    """The first draft: all six posts."""
+    task = load_prompt("copywriter_task").format(film=film, key_moments=key_moments_data(key_moments))
+    return await _write(film, key_moments, list(ALL_PAIRS), task, servers=servers, client=client, meter=meter)
+
+
+async def revise_posts(
+    film: str,
+    key_moments: list[KeyMoment],
+    rewrites: list[Rewrite],
+    *,
+    servers: list[Any],
+    client: Any,
+    meter: FilmMeter,
+) -> list[SocialPost]:
+    """A rewrite of only the rejected posts; the posts that passed are not shown or touched."""
+    data = json.dumps(
+        [
+            {"platform": r.post.platform, "language": r.post.language, "text": r.post.text, "reasons": r.reasons}
+            for r in rewrites
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+    task = load_prompt("copywriter_revise_task").format(
+        film=film, key_moments=key_moments_data(key_moments), rewrites=data
+    )
+    required = [(r.post.platform, r.post.language) for r in rewrites]
+    return await _write(film, key_moments, required, task, servers=servers, client=client, meter=meter)
+
+
+async def _write(
+    film: str,
+    key_moments: list[KeyMoment],
+    required: list[tuple[str, str]],
+    task: str,
+    *,
+    servers: list[Any],
+    client: Any,
+    meter: FilmMeter,
+) -> list[SocialPost]:
     gate = Submissions(
         meter, "copywriter", "Social Posts", "were not traced", load_prompt("copywriter_rejected"), MAX_SUBMISSIONS
     )
-    writing = _Writing(film, key_moments, gate)
+    writing = _Writing(film, key_moments, required, gate)
 
     async def write(mcp: McpTools) -> list[SocialPost]:
         async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -116,7 +165,10 @@ async def write_posts(
                 return ToolResult.error(f"this Run is for the Film {writing.film!r} only")
             result = await mcp.call(name, arguments)
             if not result.is_error and name == "get_catalog":
-                writing.catalog = json.loads(result.content[0]["text"])
+                try:
+                    writing.catalog = json.loads(result.content[0]["text"])
+                except (IndexError, KeyError, ValueError) as err:
+                    raise AgentFailed(f"the Copywriter could not read the catalog ({type(err).__name__})") from err
             return result
 
         loop = AgentLoop(
@@ -125,12 +177,11 @@ async def write_posts(
             agent="copywriter",
             model=MODEL,
             effort=EFFORT,
-            system=load_prompt("copywriter"),
+            system=load_prompt("copywriter") + "\n\n" + load_prompt("brand"),
             tools=[*mcp.definitions, submit_tool()],
             max_turns=MAX_TURNS,
             nudge=load_prompt("copywriter_nudge"),
         )
-        task = load_prompt("copywriter_task").format(film=film, key_moments=key_moments_data(key_moments))
         await loop.run([{"role": "user", "content": task}], call_tool, lambda: gate.accepted is not None)
         assert gate.accepted is not None
         return gate.accepted
@@ -143,4 +194,4 @@ def _submit(writing: _Writing, arguments: dict[str, Any]) -> ToolResult:
     if catalog is None:
         return ToolResult.error("call get_catalog before submitting")
     submitted = list(arguments.get("posts") or [])
-    return writing.gate.submit(lambda: trace(submitted, writing.key_moments, catalog))
+    return writing.gate.submit(lambda: trace(submitted, writing.key_moments, catalog, writing.required))

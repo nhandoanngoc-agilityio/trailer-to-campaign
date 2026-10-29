@@ -39,7 +39,15 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
+          # allowedTools: the same tools the code-review command declares.
+          # append-system-prompt: subagents launched in the background are lost when this
+          # non-interactive run ends its turn (run 40215456609 stopped after 5s, before reviewing).
+          claude_args: >-
+            --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),mcp__github_inline_comment__create_inline_comment"
+            --append-system-prompt "This is a non-interactive CI run that ends when you stop. Run every subagent in the foreground and wait for its result before continuing."
+          # Show Claude's report in the run's Step Summary, so a silent run still explains what it checked
+          # or why it skipped. Safer than show_full_output, which logs every tool result.
+          display_report: true
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 

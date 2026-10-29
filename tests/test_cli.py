@@ -7,6 +7,7 @@ import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -149,3 +150,156 @@ def test_servers_refuse_to_start_without_a_films_folder(
     monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: pytest.fail("must not start"))
     assert main([command], env={"T2C_FILMS_DIR": str(tmp_path / "missing")}) == 2
     assert "T2C_FILMS_DIR" in capsys.readouterr().err
+
+
+# t2c watch: the wiring around the Watcher (the Watcher itself is tested in test_watcher.py).
+
+FILMS = Path(__file__).resolve().parent.parent / "films"
+KEY_ENV = {"ANTHROPIC_API_KEY": "sk-test", "T2C_FILMS_DIR": str(FILMS)}
+
+
+def a_moment(start: float) -> Any:
+    from trailer_to_campaign.agents.key_moments import KeyMoment, Quote
+
+    return KeyMoment(
+        start, start + 2, "Agent 327 walks in.", "deadpan", Quote("Hello.", start, start + 1), ["Agent 327"], [3]
+    )
+
+
+class FakeWatcher:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, outcome: Any = None) -> None:
+        from trailer_to_campaign import cli
+        from trailer_to_campaign.agents import watcher
+
+        self.calls: list[dict[str, Any]] = []
+        self.outcome = outcome
+        monkeypatch.setattr(watcher, "watch_trailer", self)
+        monkeypatch.setattr(watcher, "watcher_servers", lambda settings: ["footage", "catalog"])
+        monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
+
+    async def __call__(self, film: str, source: str, *, servers: Any, client: Any, meter: Any) -> Any:
+        self.calls.append({"film": film, "source": source, "servers": servers, "client": client})
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        if self.outcome == "spend":
+            with meter.call("claude-opus-5-5", 50_000, 16_000, agent="watcher") as call:
+                call.record(Usage(input=50_000, output=1_000))
+        return [a_moment(t) for t in (0.0, 10.0, 20.0, 30.0, 40.0)]
+
+
+def watch_log(runs_dir: Path) -> list[dict]:
+    [path] = runs_dir.glob("agent-327/*/run.jsonl")
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_watch_needs_an_api_key_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeWatcher(monkeypatch)
+    code = main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env={"T2C_FILMS_DIR": str(FILMS)})
+    assert code == 2
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    assert fake.calls == [] and not any(tmp_path.iterdir())
+
+
+def test_watch_writes_key_moments_next_to_the_run_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeWatcher(monkeypatch, outcome="spend")
+    code = main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV)
+    assert code == 0
+    [call] = fake.calls
+    assert call == {
+        "film": "agent-327",
+        "source": "https://www.youtube.com/watch?v=mN0zPOpADL4",  # the catalog's trailer link
+        "servers": ["footage", "catalog"],
+        "client": "client for sk-test",
+    }
+    [saved] = tmp_path.glob("agent-327/*/key_moments.json")
+    moments = json.loads(saved.read_text())
+    assert len(moments) == 5
+    assert moments[0]["quote"] == {"text": "Hello.", "start": 0.0, "end": 1.0}
+    lines = watch_log(tmp_path)
+    assert lines[-1]["event"] == "run_finished" and lines[-1]["stop_reason"] == "completed"
+    assert Decimal(lines[-1]["total_usd"]) > 0
+    assert "5 Key Moments" in capsys.readouterr().out
+
+
+def test_watch_takes_a_source_from_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeWatcher(monkeypatch)
+    argv = ["watch", "--film", "agent-327", "--source", "trailer.mp4", "--runs-dir", str(tmp_path)]
+    assert main(argv, env=KEY_ENV) == 0
+    assert fake.calls[0]["source"] == "trailer.mp4"
+
+
+def test_watch_stops_at_the_film_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    FakeWatcher(monkeypatch, outcome="spend")
+    argv = ["watch", "--film", "agent-327", "--budget", "0.05", "--runs-dir", str(tmp_path)]
+    assert main(argv, env=KEY_ENV) == EXIT_FILM_BUDGET_REACHED
+    assert "Film Budget reached" in capsys.readouterr().err
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "film_budget_reached"
+    assert list(tmp_path.glob("agent-327/*/key_moments.json")) == []
+
+
+def test_watch_reports_a_watcher_that_gave_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign.agents.loop import AgentFailed
+
+    FakeWatcher(monkeypatch, outcome=AgentFailed("the watcher did not finish in 30 turns"))
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV) == 1
+    assert "30 turns" in capsys.readouterr().err
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "error"
+
+
+def test_watch_needs_a_trailer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    film = tmp_path / "films" / "agent-327"
+    film.mkdir(parents=True)
+    toml = (FILMS / "agent-327" / "film.toml").read_text()
+    (film / "film.toml").write_text("\n".join(line for line in toml.splitlines() if not line.startswith("trailer =")))
+    fake = FakeWatcher(monkeypatch)
+    env = {**KEY_ENV, "T2C_FILMS_DIR": str(tmp_path / "films")}
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")], env=env) == 2
+    assert "--source" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def test_the_watchers_client_never_retries_a_call_on_its_own() -> None:
+    from trailer_to_campaign.cli import make_client
+
+    client = make_client("sk-test")
+    assert client.max_retries == 0  # a retried call could be billed twice but metered once
+
+
+def test_key_moments_that_cannot_be_saved_are_printed_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeWatcher(monkeypatch, outcome="spend")
+    real_call = fake.__call__
+
+    async def blocked(*args: Any, meter: Any, **kwargs: Any) -> Any:
+        (meter.run_log.path.parent / "key_moments.json").mkdir()  # writing the file will fail
+        return await real_call(*args, meter=meter, **kwargs)
+
+    monkeypatch.setattr("trailer_to_campaign.agents.watcher.watch_trailer", blocked)
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV) == 1
+    out, err = capsys.readouterr()
+    assert len(json.loads(out)) == 5
+    assert "could not save" in err
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "error"
+
+
+def test_a_failure_setting_up_the_watcher_still_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeWatcher(monkeypatch)
+
+    def no_servers(settings: Any) -> Any:
+        raise RuntimeError("no ffmpeg")
+
+    monkeypatch.setattr("trailer_to_campaign.agents.watcher.watcher_servers", no_servers)
+    with pytest.raises(RuntimeError, match="no ffmpeg"):
+        main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV)
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "error"

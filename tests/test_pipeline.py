@@ -252,3 +252,46 @@ def test_a_marketer_who_leaves_ends_the_run_in_an_error_never_an_approval(tmp_pa
         assert code == 1
     assert lines[-1]["stop_reason"] == "error"
     assert len(events(lines, "approval")) == 1
+
+
+# The real recheck stage (tracing + the real Checker loop), with only the Claude API scripted.
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_the_real_recheck_traces_the_edit_and_asks_the_checker(tmp_path: Path) -> None:
+    from fake_claude import FakeClient, reply, use
+
+    from trailer_to_campaign.config import Settings
+    from trailer_to_campaign.pipeline import real_stages
+    from trailer_to_campaign.run_log import RunLog
+
+    film = tmp_path / "films" / "sample"
+    film.mkdir(parents=True)
+    (film / "film.toml").write_text(
+        '[catalog]\ntitle = "Sample Film"\nsynopsis = "A spy."\ngenre = ["comedy"]\nlanguage = "en"\n'
+        'runtime_minutes = 4\n\n[[catalog.cast]]\ncharacter = "Agent 327"\n\n'
+        '[[spoilers]]\nid = "ending"\ntext = "He is captured."\n',
+        encoding="utf-8",
+    )
+    verdict = {"post": 1, "verdict": "pass", "problems": []}
+    client = FakeClient(
+        [
+            lambda p: reply(use("get_spoiler_list", film="sample")),
+            lambda p: reply(use("submit_verdicts", verdicts=[verdict])),
+        ]
+    )
+    stages = real_stages("sample", "trailer.mp4", Settings(films_dir=tmp_path / "films"), client)
+    edit = SocialPost("tiktok", "en", "A spy walks in. Stream it now.", [])  # no title, no claims: not traced
+    meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
+
+    result = await stages.recheck(edit, [moment(1)], meter)
+
+    assert result.verdict == Verdict(True, [])
+    assert any("Sample Film" in p for p in result.problems) and any("claim" in p for p in result.problems)
+    task = client.messages.requests[0]["messages"][0]["content"]
+    assert "A spy walks in." in task  # the Checker judged the marketer's edit

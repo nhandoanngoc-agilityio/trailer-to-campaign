@@ -110,8 +110,7 @@ def test_an_instagram_post_with_more_than_5_hashtags_is_refused() -> None:
     ['"Nobody leaves this barbershop."', '"JUST A TRIM, PLEASE."', '"Just a tri"', "“Just a trim, sir.”"],
 )
 def test_a_quote_that_is_not_a_key_moment_line_word_for_word_is_refused(quoted: str) -> None:
-    [problem] = problems(six(text=f"{TITLE}. {quoted} Watch it now."))
-    assert "quote" in problem
+    assert any("quote" in p for p in problems(six(text=f"{TITLE}. {quoted} Watch it now.")))
 
 
 @pytest.mark.parametrize("quoted", ['"Just a trim"', "“Just a trim, please.”", '"please."'])
@@ -127,8 +126,7 @@ def test_a_quote_must_be_cited_to_the_moment_it_is_from() -> None:
 def test_a_vietnamese_post_must_be_in_vietnamese() -> None:
     posts = six()
     posts[1] = post("facebook", "vi", text=EN)
-    [problem] = problems(posts)
-    assert "Vietnamese" in problem
+    assert any("Vietnamese" in p for p in problems(posts))
 
 
 def test_every_post_names_the_film_exactly() -> None:
@@ -226,3 +224,23 @@ def test_a_title_written_in_another_unicode_form_still_counts() -> None:
 def test_a_source_with_a_non_decimal_digit_is_reported_as_a_bad_source() -> None:
     [problem] = problems(six(claims=[*CLAIMS, {"text": "x", "source": "key_moment:²"}]))
     assert "key_moment:²" in problem
+
+
+# T6: brand rules run inside trace, and a rewrite is traced against only the posts asked for.
+
+
+def test_brand_problems_are_tracing_problems() -> None:
+    [problem] = problems(six(text=f'{TITLE}. "Just a trim, please." WATCH IT NOW.'))
+    assert "ALL CAPS" in problem and "WATCH" in problem
+
+
+def test_a_rewrite_is_traced_against_only_the_posts_asked_for() -> None:
+    [rewritten] = trace([post("tiktok", "vi")], MOMENTS, CATALOG, required={("tiktok", "vi")})
+    assert (rewritten.platform, rewritten.language) == ("tiktok", "vi")
+
+
+def test_a_rewrite_of_a_post_not_asked_for_is_refused() -> None:
+    with pytest.raises(NotTraced) as caught:
+        trace([post("tiktok", "vi"), post("facebook", "en")], MOMENTS, CATALOG, required={("tiktok", "vi")})
+    [problem] = caught.value.problems
+    assert "facebook" in problem and "only" in problem

@@ -125,7 +125,7 @@ async def write_posts(
             agent="copywriter",
             model=MODEL,
             effort=EFFORT,
-            system=load_prompt("copywriter"),
+            system=load_prompt("copywriter") + "\n\n" + load_prompt("brand"),
             tools=[*mcp.definitions, submit_tool()],
             max_turns=MAX_TURNS,
             nudge=load_prompt("copywriter_nudge"),

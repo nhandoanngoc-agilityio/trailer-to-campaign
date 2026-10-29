@@ -18,16 +18,19 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed
+from trailer_to_campaign.agents.brand import brand_problems
 from trailer_to_campaign.agents.key_moments import KeyMoment
 
 PLATFORM_LIMITS = {"facebook": 500, "instagram": 2200, "tiktok": 150}  # characters
 MAX_HASHTAGS = {"instagram": 5}
 LANGUAGES = ("en", "vi")
 CATALOG_FIELDS = ("title", "synopsis", "genre", "language", "runtime_minutes", "cast")
+ALL_PAIRS = tuple((platform, language) for platform in PLATFORM_LIMITS for language in LANGUAGES)
 
 # Quoted lines in any quotation marks a post may use. A closing ’ must end a word,
 # so an apostrophe inside ‘I’m going in’ doesn't close the quote.
@@ -58,8 +61,18 @@ class SocialPost:
     claims: list[Claim]
 
 
-def trace(submitted: list[Any], key_moments: list[KeyMoment], catalog: dict[str, Any]) -> list[SocialPost]:
-    """Return the posts in platform and language order, or raise NotTraced listing every problem."""
+def trace(
+    submitted: list[Any],
+    key_moments: list[KeyMoment],
+    catalog: dict[str, Any],
+    required: Iterable[tuple[str, str]] = ALL_PAIRS,
+) -> list[SocialPost]:
+    """Return the posts in platform and language order, or raise NotTraced listing every problem.
+
+    required is the (platform, language) posts asked for: all six for a first draft,
+    only the rejected ones for a rewrite.
+    """
+    wanted = set(required)
     title = _nfc(str(catalog["title"]))
     problems: list[str] = []
     posts: list[SocialPost] = []
@@ -72,17 +85,19 @@ def trace(submitted: list[Any], key_moments: list[KeyMoment], catalog: dict[str,
         problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in _problems(post, title, key_moments)]
         posts.append(post)
 
-    for platform in PLATFORM_LIMITS:
-        for language in LANGUAGES:
-            n = sum(p.platform == platform and p.language == language for p in posts)
-            if n == 0:
-                problems.append(f"no {platform} post in {language}; write one")
-            elif n > 1:
-                problems.append(f"the {platform} post in {language} is written {'twice' if n == 2 else f'{n} times'}")
+    for platform, language in ALL_PAIRS:
+        n = sum(p.platform == platform and p.language == language for p in posts)
+        if (platform, language) not in wanted:
+            if n:
+                asked = ", ".join(f"{p} {lang}" for p, lang in ALL_PAIRS if (p, lang) in wanted)
+                problems.append(f"write only the posts asked for ({asked}), not the {platform} post in {language}")
+        elif n == 0:
+            problems.append(f"no {platform} post in {language}; write one")
+        elif n > 1:
+            problems.append(f"the {platform} post in {language} is written {'twice' if n == 2 else f'{n} times'}")
     if problems:
         raise NotTraced(problems)
-    order = {(p, lang): i for i, (p, lang) in enumerate((p, lang) for p in PLATFORM_LIMITS for lang in LANGUAGES)}
-    return sorted(posts, key=lambda p: order[(p.platform, p.language)])
+    return sorted(posts, key=lambda p: ALL_PAIRS.index((p.platform, p.language)))
 
 
 def _parse(raw: dict[str, Any]) -> SocialPost:
@@ -119,6 +134,7 @@ def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> lis
         problems.append(f"name the Film exactly as the catalog does: {title!r}")
     if language == "vi" and not _vietnamese(_own_words(text, title)):
         problems.append("a vi post must be written in Vietnamese, not only its title, quotes or gloss")
+    problems += brand_problems(text, language, title)
 
     if not claims:
         problems.append("list every factual claim in the post, each with its source")

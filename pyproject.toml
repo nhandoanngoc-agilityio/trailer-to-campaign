@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Multimodal agent team that turns an indie film trailer into a launch campaign, with human Approval"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "mcp>=2.3.0",
+    "yt-dlp>=2026.10.26",
+]
 
 [project.scripts]
 t2c = "trailer_to_campaign.cli:main"
@@ -18,6 +22,8 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: needs a downloaded model or OS tools; run locally with `uv run pytest -m slow`"]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 line-length = 120
@@ -25,3 +31,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.uv]
+# faster-whisper 1.2.1 calls av.open(metadata_errors=...), which PyAV 19 removed.
+# Drop this once faster-whisper supports PyAV 19.
+constraint-dependencies = ["av<19"]

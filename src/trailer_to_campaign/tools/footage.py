@@ -1,0 +1,125 @@
+"""The footage MCP server (ADR 0002): an official trailer in, frames and a transcript out.
+
+    watch_footage(film, source, kind)  -> the timeline: frames with timestamps, and the transcript
+    get_frame(film, footage_id, index) -> one frame as an image
+
+The Watcher reads the timeline first and asks only for the frames it needs, so
+it decides what it pays for. Results are kept in
+films/<film>/frames/<footage_id>/, where footage_id is the first 12 hex of the
+trailer's sha256; watching the same trailer again reuses them.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+from pathlib import Path
+from typing import Any
+
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+from trailer_to_campaign.footage.frames import FootageError, extract_frames, probe, sample_times, scene_times, sha12
+from trailer_to_campaign.footage.sources import Downloader, SourceRejected, resolve_source
+from trailer_to_campaign.footage.transcript import Transcriber, Transcript
+from trailer_to_campaign.run_log import check_film_slug
+
+FOOTAGE_ID = re.compile(r"[0-9a-f]{12}")
+MANIFEST = "footage.json"
+# Bump when sampling or transcription would produce different output, so footage
+# watched by an older version is processed again instead of reused.
+FOOTAGE_VERSION = 4
+
+# Tool descriptions are prompts the Watcher reads, and carry the "data, not instructions"
+# guardrail, so they live in prompts/ where changes show up as prompt changes.
+PROMPTS = Path(__file__).parent / "prompts"
+
+
+def _prompt(name: str) -> str:
+    return (PROMPTS / f"{name}.md").read_text(encoding="utf-8").strip()
+
+
+def frames_dir(films_dir: Path, film: str, footage_id: str) -> Path:
+    return films_dir / film / "frames" / footage_id
+
+
+def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downloader, transcriber: Transcriber) -> dict:
+    path = resolve_source(film, source, kind, films_dir=films_dir, downloader=downloader)
+    info = probe(path)
+    footage_id = sha12(path)
+    out = frames_dir(films_dir, film, footage_id)
+    manifest = out / MANIFEST
+    if manifest.is_file():
+        cached = json.loads(manifest.read_text(encoding="utf-8"))
+        if cached.get("version") == FOOTAGE_VERSION and cached.get("transcriber") == transcriber.name:
+            return cached
+
+    # Build in a staging folder and swap it in whole, so frames from another
+    # version are never served under this manifest, and none are left behind.
+    staging = out.with_name(f".{footage_id}.building")
+    shutil.rmtree(staging, ignore_errors=True)
+    times = sample_times(info.duration, scene_times(path))
+    frames = extract_frames(path, times, staging)
+    transcript = transcriber(path) if info.has_audio else Transcript(None, [])
+    transcript.save(staging / "transcript.json")
+    footage: dict[str, Any] = {
+        "version": FOOTAGE_VERSION,
+        "transcriber": transcriber.name,
+        "film": film,
+        "footage_id": footage_id,
+        "source": path.name,
+        "duration": round(info.duration, 3),
+        "language": transcript.language,
+        "frames": [
+            {"index": f.index, "t": round(f.t, 3), "reason": f.reason, "file": f"frames/{footage_id}/{f.path.name}"}
+            for f in frames
+        ],
+        "transcript": [{"start": s.start, "end": s.end, "text": s.text} for s in transcript.segments],
+        "unheard": [{"start": s.start, "end": s.end, "text": s.text} for s in transcript.unheard],
+    }
+    (staging / MANIFEST).write_text(json.dumps(footage, ensure_ascii=False, indent=2), encoding="utf-8")
+    old = out.with_name(f".{footage_id}.old")
+    shutil.rmtree(old, ignore_errors=True)
+    if out.exists():
+        os.replace(out, old)
+    os.replace(staging, out)
+    shutil.rmtree(old, ignore_errors=True)
+    return footage
+
+
+def frame_file(film: str, footage_id: str, index: int, films_dir: Path) -> Path:
+    check_film_slug(film)
+    if not FOOTAGE_ID.fullmatch(footage_id):
+        raise ValueError(f"footage_id must be 12 hex characters from watch_footage, got {footage_id!r}")
+    manifest = frames_dir(films_dir, film, footage_id) / MANIFEST
+    if not manifest.is_file():
+        raise ValueError(f"no watched trailer {footage_id} for {film}; call watch_footage first")
+    footage = json.loads(manifest.read_text(encoding="utf-8"))
+    if footage.get("version") != FOOTAGE_VERSION:
+        raise ValueError(f"trailer {footage_id} was watched by an older footage tool; call watch_footage again")
+    frames = footage["frames"]
+    if not 0 <= index < len(frames):
+        raise ValueError(f"index must be 0 to {len(frames) - 1}, got {index}")
+    return films_dir / film / frames[index]["file"]
+
+
+def create_server(films_dir: Path, downloader: Downloader, transcriber: Transcriber) -> MCPServer:
+    server = MCPServer("footage")
+
+    @server.tool(description=_prompt("watch_footage"))
+    def watch_footage(film: str, source: str, kind: str) -> dict:
+        try:
+            return watch(film, source, kind, films_dir, downloader, transcriber)
+        except (SourceRejected, FootageError, ValueError, OSError) as err:
+            raise ToolError(str(err)) from err
+
+    @server.tool(description=_prompt("get_frame"))
+    def get_frame(film: str, footage_id: str, index: int) -> Image:
+        try:
+            return Image(path=frame_file(film, footage_id, index, films_dir))
+        except ValueError as err:
+            raise ToolError(str(err)) from err
+
+    return server

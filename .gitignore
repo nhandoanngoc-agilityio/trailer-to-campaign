@@ -2,6 +2,7 @@
 __pycache__/
 .env
 films/*/frames/
+films/*/source/
 runs/
 .env
 .env.*

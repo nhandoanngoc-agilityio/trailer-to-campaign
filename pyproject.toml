@@ -5,6 +5,7 @@ description = "Multimodal agent team that turns an indie film trailer into a lau
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=2.3.0",
     "faster-whisper>=1.2.1",
     "mcp>=2.3.0",
     "yt-dlp>=2026.10.26",

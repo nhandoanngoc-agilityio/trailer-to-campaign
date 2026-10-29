@@ -196,3 +196,18 @@ async def test_offending_text_matches_in_either_unicode_form(films: Path, tmp_pa
         [read_spoilers, submit([{"post": 1, "verdict": "reject", "problems": [spoiler]}])], posts=[vi]
     )
     assert not verdicts[0].passed
+
+
+async def test_a_spoiler_list_that_cannot_be_read_fails_the_checker_not_the_run(tmp_path: Path) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    broken = MCPServer("spoilers")
+
+    @broken.tool()
+    def get_spoiler_list(film: str) -> dict:
+        return {"film": film, "items": []}  # not the shape the Checker reads
+
+    run_log = RunLog.create(tmp_path / "runs", "sample")
+    client = FakeClient([read_spoilers, submit(GOOD)])
+    with pytest.raises(AgentFailed, match="Spoiler List"):
+        await check_posts("sample", POSTS, servers=[broken], client=client, meter=FilmMeter(Decimal("2"), run_log))

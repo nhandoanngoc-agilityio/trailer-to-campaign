@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed, load_prompt
-from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
+from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
 from trailer_to_campaign.agents.post_text import nfc
 from trailer_to_campaign.agents.social_posts import SocialPost
 from trailer_to_campaign.budget import FilmMeter
@@ -184,7 +184,11 @@ async def check_posts(
                 return ToolResult.error(f"this Run is for the Film {checking.film!r} only")
             result = await mcp.call(name, arguments)
             if not result.is_error and name == "get_spoiler_list":
-                checking.spoiler_ids = {s["id"] for s in json.loads(result.content[0]["text"])["spoilers"]}
+                try:
+                    checking.spoiler_ids = {s["id"] for s in json.loads(result.content[0]["text"])["spoilers"]}
+                except (KeyError, IndexError, TypeError, ValueError) as err:
+                    # Fail closed: without the list nothing can be judged, so these posts get flagged.
+                    raise AgentFailed(f"the Checker could not read the Spoiler List ({type(err).__name__})") from err
             return result
 
         loop = AgentLoop(

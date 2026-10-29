@@ -17,7 +17,7 @@ from typing import Any
 
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
-from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
+from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
 from trailer_to_campaign.agents.social_posts import ALL_PAIRS, SocialPost, trace
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
@@ -165,7 +165,10 @@ async def _write(
                 return ToolResult.error(f"this Run is for the Film {writing.film!r} only")
             result = await mcp.call(name, arguments)
             if not result.is_error and name == "get_catalog":
-                writing.catalog = json.loads(result.content[0]["text"])
+                try:
+                    writing.catalog = json.loads(result.content[0]["text"])
+                except (IndexError, KeyError, ValueError) as err:
+                    raise AgentFailed(f"the Copywriter could not read the catalog ({type(err).__name__})") from err
             return result
 
         loop = AgentLoop(

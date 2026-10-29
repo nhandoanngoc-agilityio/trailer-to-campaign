@@ -166,6 +166,11 @@ async def test_a_checker_that_fails_on_a_retry_keeps_the_passed_posts_and_flags_
     statuses = {pair: c.status for pair, c in by_pair(checked).items()}
     assert statuses.pop(("facebook", "en")) == "flagged"
     assert set(statuses.values()) == {"passed"}
+    # The flagged post is the rewrite, which nobody reviewed: say so, and mark the old reasons as the old version's.
+    rewrite = by_pair(checked)[("facebook", "en")]
+    assert SPOILER_LINE not in rewrite.post.text
+    assert "never reviewed" in rewrite.problems[0]
+    assert all("version before" in p for p in rewrite.problems[1:])
 
 
 async def test_a_copywriter_that_cannot_rewrite_leaves_the_post_flagged(meter: FilmMeter) -> None:
@@ -198,3 +203,51 @@ async def test_rewrites_are_logged(meter: FilmMeter) -> None:
     await write_and_check(MOMENTS, FakeAgents(fixes_after=1).agents(), meter)
     [requested] = events(meter, "rewrites_requested")
     assert requested["posts"] == [["facebook", "en"]] and requested["retry"] == 1
+
+
+# From /code-review: an empty retry, a malformed planted draft, and the Film Budget mid-loop.
+
+
+async def test_no_rewrites_back_means_no_empty_check(meter: FilmMeter) -> None:
+    fake = FakeAgents()
+
+    async def nothing(key_moments: list[KeyMoment], rewrites: list[Rewrite]) -> list[SocialPost]:
+        return []
+
+    agents = Agents(write=fake.write, revise=nothing, check=fake.check)
+    checked = await write_and_check(MOMENTS, agents, meter)
+    assert len(fake.checked) == 1  # never asked to judge zero posts
+    assert any("no rewrite" in p for p in by_pair(checked)[("facebook", "en")].problems)
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        [*draft(), post("facebook", "en")],  # a pair twice: one would silently vanish
+        [*draft()[:5], post("myspace", "en")],  # a pair no platform has
+    ],
+)
+async def test_a_planted_draft_must_have_each_post_once(meter: FilmMeter, planted: list[SocialPost]) -> None:
+    with pytest.raises(ValueError, match="first_draft"):
+        await write_and_check(MOMENTS, FakeAgents().agents(), meter, first_draft=planted)
+
+
+async def test_the_film_budget_mid_loop_keeps_what_the_checker_passed(meter: FilmMeter) -> None:
+    from trailer_to_campaign.agents.review import FilmBudgetReachedMidReview
+
+    fake = FakeAgents(fixes_after=1)
+    real_check = fake.check
+
+    async def budget_on_retry(posts: list[SocialPost]) -> list[Verdict]:
+        if fake.checked:  # the first check went through; the re-check can't be paid for
+            fake.checked.append(posts)
+            raise FilmBudgetReached(Decimal("1.9"), Decimal("2"), Decimal("0.3"))
+        return await real_check(posts)
+
+    agents = Agents(write=fake.write, revise=fake.revise, check=budget_on_retry)
+    with pytest.raises(FilmBudgetReachedMidReview) as caught:
+        await write_and_check(MOMENTS, agents, meter)
+    statuses = {pair: c.status for pair, c in by_pair(caught.value.checked).items()}
+    assert statuses.pop(("facebook", "en")) == "flagged"
+    assert set(statuses.values()) == {"passed"}  # paid for, and passed by the Checker: kept
+    assert "Film Budget" in by_pair(caught.value.checked)[("facebook", "en")].problems[0]

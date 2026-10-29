@@ -336,9 +336,15 @@ class FakeCopywriter:
 
 @pytest.fixture
 def key_moments_file(tmp_path: Path) -> Path:
+    return watched(tmp_path, "agent-327")
+
+
+def watched(tmp_path: Path, film: str) -> Path:
+    """A key_moments.json where t2c watch writes it: <runs>/<film>/<time>/."""
     from dataclasses import asdict
 
-    path = tmp_path / "key_moments.json"
+    path = tmp_path / "watched" / film / "20261029T145957Z" / "key_moments.json"
+    path.parent.mkdir(parents=True)
     path.write_text(json.dumps([asdict(a_moment(t)) for t in (0.0, 10.0, 20.0, 30.0, 40.0)]), encoding="utf-8")
     return path
 
@@ -392,3 +398,22 @@ def test_write_stops_at_the_film_budget(
     FakeCopywriter(monkeypatch, spend=True)
     assert main(write_argv(key_moments_file, tmp_path / "runs", "--budget", "0.05"), env=KEY_ENV) == 3
     assert watch_log(tmp_path / "runs")[-1]["stop_reason"] == "film_budget_reached"
+
+
+def test_write_refuses_a_film_that_does_not_exist_before_any_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    argv = ["write", "--film", "agent-237", "--key-moments", str(watched(tmp_path, "agent-237"))]
+    assert main([*argv, "--runs-dir", str(tmp_path / "runs")], env=KEY_ENV) == 2
+    assert "agent-237" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()
+
+
+def test_write_refuses_key_moments_watched_for_another_film(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeCopywriter(monkeypatch)
+    assert main(write_argv(watched(tmp_path, "the-quiet-river"), tmp_path / "runs"), env=KEY_ENV) == 2
+    assert "the-quiet-river" in capsys.readouterr().err
+    assert fake.calls == [] and not (tmp_path / "runs").exists()

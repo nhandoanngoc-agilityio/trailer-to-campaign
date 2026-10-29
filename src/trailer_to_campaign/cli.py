@@ -201,9 +201,18 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
 
     try:
         api_key = settings.require_api_key()
+        load_film(settings.films_dir, film)  # a typo'd Film would only fail after paid calls
         key_moments = load_key_moments(key_moments_file)
-    except (MissingApiKey, ValueError) as err:
+    except (MissingApiKey, ValueError) as err:  # ValueError: a bad Film or Key Moments file
         print(err, file=sys.stderr)
+        return 2
+    watched_for = key_moments_file.resolve().parent.parent.name  # t2c watch writes <runs>/<film>/<time>/
+    if watched_for != film:
+        print(
+            f"{key_moments_file.name} was not watched for {film} (it is under {watched_for!r}); "
+            f"use the one t2c watch wrote under runs/{film}/",
+            file=sys.stderr,
+        )
         return 2
 
     async def start(meter: FilmMeter) -> list[Any]:

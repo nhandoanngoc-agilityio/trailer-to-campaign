@@ -273,3 +273,33 @@ def test_the_watchers_client_never_retries_a_call_on_its_own() -> None:
 
     client = make_client("sk-test")
     assert client.max_retries == 0  # a retried call could be billed twice but metered once
+
+
+def test_key_moments_that_cannot_be_saved_are_printed_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeWatcher(monkeypatch, outcome="spend")
+    real_call = fake.__call__
+
+    async def blocked(*args: Any, meter: Any, **kwargs: Any) -> Any:
+        (meter.run_log.path.parent / "key_moments.json").mkdir()  # writing the file will fail
+        return await real_call(*args, meter=meter, **kwargs)
+
+    monkeypatch.setattr("trailer_to_campaign.agents.watcher.watch_trailer", blocked)
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV) == 1
+    out, err = capsys.readouterr()
+    assert len(json.loads(out)) == 5
+    assert "could not save" in err
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "error"
+
+
+def test_a_failure_setting_up_the_watcher_still_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeWatcher(monkeypatch)
+
+    def no_servers(settings: Any) -> Any:
+        raise RuntimeError("no ffmpeg")
+
+    monkeypatch.setattr("trailer_to_campaign.agents.watcher.watcher_servers", no_servers)
+    with pytest.raises(RuntimeError, match="no ffmpeg"):
+        main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path)], env=KEY_ENV)
+    assert watch_log(tmp_path)[-1]["stop_reason"] == "error"

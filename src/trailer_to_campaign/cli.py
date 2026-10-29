@@ -131,9 +131,9 @@ def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settin
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     log.info("watching %s (%s) with a Film Budget of $%s; log at %s", film, source, budget, run_log.path)
-    servers = watcher.watcher_servers(settings)
-    client = make_client(api_key)
     try:
+        servers = watcher.watcher_servers(settings)
+        client = make_client(api_key)
         moments = anyio.run(partial(watcher.watch_trailer, film, source, servers=servers, client=client, meter=meter))
     except FilmBudgetReached as err:
         run_log.finish(meter.spent, "film_budget_reached")
@@ -148,7 +148,14 @@ def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settin
         raise
 
     out = run_log.path.parent / "key_moments.json"
-    out.write_text(json.dumps([asdict(m) for m in moments], ensure_ascii=False, indent=2), encoding="utf-8")
+    saved = json.dumps([asdict(m) for m in moments], ensure_ascii=False, indent=2)
+    try:
+        out.write_text(saved, encoding="utf-8")
+    except OSError as err:  # the Key Moments are paid for: print them rather than lose them
+        run_log.finish(meter.spent, "error")
+        print(saved)
+        print(f"could not save the Key Moments to {out} ({type(err).__name__}); printed above", file=sys.stderr)
+        return EXIT_AGENT_FAILED
     meter.event("key_moments", agent="watcher", count=len(moments), file=out)
     run_log.finish(meter.spent, "completed")
     print(f"{len(moments)} Key Moments for {film}, ${meter.spent:.4f} of ${budget}: {out}")

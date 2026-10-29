@@ -1,9 +1,13 @@
 """The t2c command line.
 
     t2c dummy-run --film sample --budget 0.001
+    t2c run --film agent-327 [--source trailer.mp4]
     t2c watch --film agent-327 [--source trailer.mp4]
     t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
 
+run is one Run for a Film: the Watcher, the Approval of its Key Moments, the
+Copywriter and the Checker, then the Approval of the Social Posts, in this
+terminal, under one Film Budget and one Run Log.
 dummy-run sends fake model calls through the Film Budget meter, so the hard
 stop and the run log can be checked without an API key or any spend.
 watch runs the Watcher on a Film's trailer (the catalog's link unless --source
@@ -75,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
     dummy.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     dummy.add_argument("--calls", type=int, default=5, help="how many fake model calls to make")
     dummy.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    run = commands.add_parser("run", help="one Run for a Film: watch, approve, write and check, approve")
+    run.add_argument("--film", type=_film_arg, required=True)
+    run.add_argument("--source", help="a file in films/<film>/source/ or a trailer link (default: the catalog's)")
+    run.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
+    run.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
 
     watch = commands.add_parser("watch", help="run the Watcher on a Film's trailer and write its Key Moments")
     watch.add_argument("--film", type=_film_arg, required=True)
@@ -177,18 +187,39 @@ def run_agent(
     return code, results
 
 
-def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
-    from trailer_to_campaign.agents import watcher
-
+def _key_and_trailer(film: str, source: str | None, settings: Settings) -> tuple[str, str] | None:
+    """The API key and the trailer to watch, checked before any Run starts; None after saying what's wrong."""
     try:
         api_key = settings.require_api_key()
         source = source or load_film(settings.films_dir, film).catalog.trailer
     except (MissingApiKey, ValueError) as err:  # ValueError: a bad or missing film.toml
         print(err, file=sys.stderr)
-        return 2
+        return None
     if not source:
         print(f"{film} has no trailer link in its film.toml; name one with --source", file=sys.stderr)
+        return None
+    return api_key, source
+
+
+def run(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    from trailer_to_campaign import pipeline
+    from trailer_to_campaign.approval import TerminalApprover
+
+    checked = _key_and_trailer(film, source, settings)
+    if checked is None:
         return 2
+    api_key, source = checked
+    stages = pipeline.real_stages(film, source, settings, make_client(api_key))
+    return pipeline.run_film(film, budget, runs_dir, stages, TerminalApprover())
+
+
+def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    from trailer_to_campaign.agents import watcher
+
+    checked = _key_and_trailer(film, source, settings)
+    if checked is None:
+        return 2
+    api_key, source = checked
 
     async def start(meter: FilmMeter) -> list[Any]:
         servers, client = watcher.watcher_servers(settings), make_client(api_key)
@@ -279,8 +310,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             calls=args.calls,
             runs_dir=args.runs_dir or settings.runs_dir,
         )
-    if args.command == "watch":
-        return watch(
+    if args.command in ("run", "watch"):
+        command = run if args.command == "run" else watch
+        return command(
             film=args.film,
             source=args.source,
             budget=args.budget or settings.film_budget_usd,

@@ -14,6 +14,14 @@ _Avoid_: Movie, title, content
 The trailer or screener of a Film that the agents analyse; only footage the company has rights to use internally.
 _Avoid_: Video, asset, media
 
+**Frame**:
+A still sampled from the Source Footage at a timestamp, on a fixed interval or at a scene change; what the Watcher sees instead of video.
+_Avoid_: Screenshot, thumbnail, image
+
+**Transcript**:
+The timestamped speech heard in the Source Footage. Lines the speech model judged not to be speech are kept apart and are never dialogue.
+_Avoid_: Subtitles, captions, script
+
 **Catalog Metadata**:
 The platform's stored facts about a Film: title, synopsis, genre, cast, runtime, language.
 _Avoid_: Film info, details

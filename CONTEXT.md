@@ -58,6 +58,10 @@ _Avoid_: Verified, validated, fact-checked
 Said of a Social Post whose every factual claim cites its source, a Key Moment or a Catalog Metadata field, and whose every quoted line is a Key Moment's quote word for word, as checked by code. Only traced posts go on to the Checker.
 _Avoid_: Sourced, fact-checked, verified
 
+**Flagged**:
+Said of a Social Post the Checker still rejects after the Copywriter's retries, or that couldn't be fully reviewed. It is kept, with the Checker's reasons, for a marketer to fix or drop at Approval, and never counts as passed.
+_Avoid_: Failed, blocked, escalated
+
 **Social Post**:
 A ready-to-publish caption for one social platform, written in English or Vietnamese.
 _Avoid_: Caption, copy, content

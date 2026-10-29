@@ -69,8 +69,16 @@ A change the approving marketer marks as light; rewriting a Draft's hook is neve
 _Avoid_: Minor change, tweak
 
 **Film Budget**:
-The maximum model spend allowed for producing one Campaign; the run stops when it is reached.
+The maximum model spend allowed for one Run; the Run stops when it is reached.
 _Avoid_: Cost limit, quota
+
+**Run**:
+One pass of the agent team over one Film, from its trailer to the Approval of its Social Posts; the Approval of Key Moments is a pause inside the Run, however long it takes. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
+_Avoid_: Job, execution, session
+
+**Run Log**:
+The record a Run leaves of every model call, what each cost, and how the Run ended.
+_Avoid_: Trace, audit log, history
 
 **Eval Set**:
 A fixed group of past Films, with the posts the team actually published and planted Traps, that every change to the agents is tested against.

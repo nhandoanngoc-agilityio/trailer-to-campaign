@@ -76,6 +76,10 @@ _Avoid_: Output, result, suggestion
 
 ### Governance
 
+**Marketer**:
+A member of the marketing team who has been named as able to give Approval. Only a Marketer's action counts as Approval; anyone else who can see a Run can follow it but cannot decide on its drafts.
+_Avoid_: User, reviewer, approver
+
 **Approval**:
 A human marketer's explicit decision to accept, edit, or reject a Campaign Draft; nothing reaches the public without one.
 _Avoid_: Review, sign-off, check
@@ -95,6 +99,10 @@ _Avoid_: Cost limit, quota
 **Run**:
 One pass of the agent team over one Film, from its trailer to the Approval of its Social Posts; the Approval of Key Moments is a pause inside the Run, however long it takes. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
 _Avoid_: Job, execution, session
+
+**Run Thread**:
+The Slack thread, started by the request that began a Run, where that Run posts its progress and Campaign Drafts and where Marketers give Approval. One Run, one Run Thread: a new request, even inside an old thread, starts a new Run in a new Run Thread.
+_Avoid_: Channel, conversation, campaign thread
 
 **Run Log**:
 The record a Run leaves of every model call, what each cost, and how the Run ended.

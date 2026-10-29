@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=2.3.0",
     "faster-whisper>=1.2.1",
     "mcp>=2.3.0",
+    "slack-bolt>=1.30.0",
     "yt-dlp>=2026.10.26",
 ]
 

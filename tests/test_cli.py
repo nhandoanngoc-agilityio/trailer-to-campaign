@@ -90,3 +90,12 @@ def test_t2c_is_installed_as_a_command(tmp_path: Path) -> None:
     )
     assert result.returncode == EXIT_FILM_BUDGET_REACHED
     assert "Film Budget reached" in result.stderr
+
+
+def test_serve_footage_runs_the_footage_server_on_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    served: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: served.append((self.name, args)))
+    assert main(["serve-footage"], env={}) == 0
+    assert served == [("footage", ())]

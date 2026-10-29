@@ -1,0 +1,3 @@
+# Slice 1 accepts trailers only, and every run has a hard Film Budget
+
+Slice 1 processes only official trailers, never screeners, even though screeners would give the Watcher far richer material. Trailers are already public, so this removes the rights and confidentiality risk of sending unreleased footage to a model provider while the value is still being proven. Screeners can be allowed later, with frames and transcripts deleted once the Campaign is approved, after leadership has seen results. Every run also has a Film Budget with a hard stop, so a looping or misbehaving agent cannot run up cost unnoticed.

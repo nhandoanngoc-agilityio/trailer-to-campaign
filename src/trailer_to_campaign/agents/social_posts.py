@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed
-from trailer_to_campaign.agents.brand import brand_problems
+from trailer_to_campaign.agents.brand import WORD, brand_problems
 from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.post_text import HASHTAG, QUOTED, nfc, own_words, whole_words
 
@@ -69,6 +69,7 @@ def trace(
     """
     wanted = set(required)
     title = nfc(str(catalog["title"]))
+    catalog_words = _catalog_words(catalog)
     problems: list[str] = []
     posts: list[SocialPost] = []
     for i, raw in enumerate(submitted, start=1):
@@ -77,7 +78,10 @@ def trace(
         except (KeyError, TypeError, AttributeError):
             problems.append(f"post {i}: needs platform, language, text and claims (each claim a text and a source)")
             continue
-        problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in _problems(post, title, key_moments)]
+        problems += [
+            f"post {i} ({post.platform} {post.language}): {p}"
+            for p in _problems(post, title, catalog_words, key_moments)
+        ]
         posts.append(post)
 
     for platform, language in ALL_PAIRS:
@@ -100,7 +104,14 @@ def _parse(raw: dict[str, Any]) -> SocialPost:
     return SocialPost(str(raw["platform"]), str(raw["language"]), str(raw["text"]).strip(), claims)
 
 
-def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> list[str]:
+def _catalog_words(catalog: dict[str, Any]) -> set[str]:
+    """Words the catalog writes, which a post may write the same way (IMAX, NASA)."""
+    parts = [str(catalog.get(f, "")) for f in ("title", "synopsis")] + [str(g) for g in catalog.get("genre", [])]
+    parts += [str(c.get(k) or "") for c in catalog.get("cast", []) for k in ("character", "name")]
+    return set(WORD.findall(nfc(" ".join(parts))))
+
+
+def _problems(post: SocialPost, title: str, catalog_words: set[str], key_moments: list[KeyMoment]) -> list[str]:
     platform, language, claims = post.platform, post.language, post.claims
     text = nfc(post.text)  # the same letters can be one code point or two; compare them one way
     problems = []
@@ -121,7 +132,7 @@ def _problems(post: SocialPost, title: str, key_moments: list[KeyMoment]) -> lis
         problems.append(f"name the Film exactly as the catalog does: {title!r}")
     if language == "vi" and not _vietnamese(own_words(text, title)):
         problems.append("a vi post must be written in Vietnamese, not only its title, quotes or gloss")
-    problems += brand_problems(text, language, title)
+    problems += brand_problems(text, language, title, catalog_words)
 
     if not claims:
         problems.append("list every factual claim in the post, each with its source")

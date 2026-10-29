@@ -93,7 +93,10 @@ def test_an_unknown_platform_or_language_is_refused(field: str, value: str) -> N
 
 def test_a_tiktok_post_over_150_characters_is_refused() -> None:
     posts = six()
-    posts[4] = post("tiktok", "en", text=EN + " " + "x" * (150 - len(EN)))
+    padded = f"{TITLE}: a spy walks in {'and walks ' * 20}"
+    text = padded[: 151 - len(" Watch it now.")] + " Watch it now."
+    assert len(text) == 151
+    posts[4] = post("tiktok", "en", text=text)
     [problem] = problems(posts)
     assert "tiktok" in problem and "150" in problem
 

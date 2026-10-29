@@ -99,3 +99,21 @@ def test_serve_footage_runs_the_footage_server_on_stdio(monkeypatch: pytest.Monk
     monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: served.append((self.name, args)))
     assert main(["serve-footage"], env={}) == 0
     assert served == [("footage", ())]
+
+
+def test_serve_footage_uses_an_absolute_films_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # An MCP host may start the server in / or $HOME, so films/ must not depend on the cwd.
+    from mcp.server.mcpserver import MCPServer
+
+    from trailer_to_campaign.tools import footage
+
+    seen: list[Path] = []
+    real = footage.create_server
+    monkeypatch.setattr(
+        footage, "create_server", lambda films_dir, **kw: seen.append(films_dir) or real(films_dir, **kw)
+    )
+    monkeypatch.setattr(MCPServer, "run", lambda self, *args, **kw: None)
+    main(["serve-footage"], env={"T2C_FILMS_DIR": str(tmp_path / "films")})
+    main(["serve-footage"], env={})
+    assert seen[0] == tmp_path / "films"
+    assert seen[1].is_absolute()

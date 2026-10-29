@@ -38,7 +38,8 @@ def films(tmp_path: Path, clip: Path) -> Path:
 
 
 class FakeTranscriber:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "fake:small") -> None:
+        self.name = name
         self.calls = 0
 
     def __call__(self, video: Path) -> Transcript:
@@ -211,3 +212,36 @@ async def test_a_download_failure_is_a_tool_error_with_its_reason(films: Path, s
             "watch_footage", {"film": "sample", "source": "https://youtu.be/abc", "kind": "trailer"}
         )
     assert result.is_error and "Private video" in result.content[0].text
+
+
+async def test_a_different_whisper_model_transcribes_again(films: Path, spies: Spies) -> None:
+    body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
+    medium = FakeTranscriber(name="fake:medium")
+    server = create_server(films_dir=films, downloader=spies.downloader, transcriber=medium)
+    async with Client(server) as client:
+        result = await client.call_tool("watch_footage", {"film": "sample", "source": "trailer.mp4", "kind": "trailer"})
+    assert body(result)["transcriber"] == "fake:medium"
+    assert medium.calls == 1
+
+
+async def test_tool_descriptions_come_from_prompt_files() -> None:
+    from trailer_to_campaign.tools import footage
+
+    server = create_server(films_dir=Path("films"), downloader=lambda u, d: d, transcriber=FakeTranscriber())
+    async with Client(server) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+    prompts = Path(footage.__file__).parent / "prompts"
+    assert tools["watch_footage"].description == (prompts / "watch_footage.md").read_text(encoding="utf-8").strip()
+    assert tools["get_frame"].description == (prompts / "get_frame.md").read_text(encoding="utf-8").strip()
+
+
+async def test_a_films_folder_that_cannot_be_written_is_a_tool_error(films: Path, spies: Spies) -> None:
+    def unwritable(url: str, dest: Path) -> Path:
+        raise PermissionError(13, "Permission denied", str(dest))
+
+    server = create_server(films_dir=films, downloader=unwritable, transcriber=spies.transcriber)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "watch_footage", {"film": "sample", "source": "https://youtu.be/abc", "kind": "trailer"}
+        )
+    assert result.is_error and "Permission denied" in result.content[0].text

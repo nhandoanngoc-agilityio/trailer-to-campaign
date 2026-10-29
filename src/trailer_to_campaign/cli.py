@@ -94,7 +94,8 @@ def serve_footage(settings: Settings) -> int:
     from trailer_to_campaign.tools.footage import create_server
 
     server = create_server(
-        films_dir=settings.films_dir,
+        # Absolute, because an MCP host may start this server in / or $HOME.
+        films_dir=settings.films_dir.resolve(),
         downloader=YtDlpDownloader(),
         transcriber=FasterWhisperTranscriber(settings.whisper_model),
     )

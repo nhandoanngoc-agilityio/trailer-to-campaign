@@ -3,6 +3,7 @@
 ANTHROPIC_API_KEY   needed only by commands that call a model
 FILM_BUDGET_USD     the Film Budget for one Run, default 2.00
 T2C_WHISPER_MODEL   the faster-whisper model for transcripts, default small
+T2C_FILMS_DIR       where the films/ folder is, default films (relative to the cwd)
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     budget = env.get("FILM_BUDGET_USD")
     return Settings(
         film_budget_usd=DEFAULT_FILM_BUDGET_USD if budget is None else parse_film_budget(budget),
+        films_dir=Path(env.get("T2C_FILMS_DIR") or "films"),
         whisper_model=env.get("T2C_WHISPER_MODEL") or DEFAULT_WHISPER_MODEL,
         _api_key=env.get("ANTHROPIC_API_KEY") or None,
     )

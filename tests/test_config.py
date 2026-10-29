@@ -46,3 +46,7 @@ def test_api_key_never_shows_in_repr() -> None:
     settings = load_settings({"ANTHROPIC_API_KEY": KEY})
     assert KEY not in repr(settings)
     assert KEY not in str(settings)
+
+
+def test_films_folder_can_be_set() -> None:
+    assert load_settings({"T2C_FILMS_DIR": "/srv/films"}).films_dir == Path("/srv/films")

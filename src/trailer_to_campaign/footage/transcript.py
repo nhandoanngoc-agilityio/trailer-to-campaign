@@ -44,6 +44,8 @@ class Transcript:
 
 
 class Transcriber(Protocol):
+    name: str  # recorded with the transcript, so a different model transcribes again
+
     def __call__(self, video: Path) -> Transcript: ...
 
 
@@ -60,6 +62,10 @@ class FasterWhisperTranscriber:
         self.model_name = model_name
         self.model_factory = model_factory
         self._model: Any = None
+
+    @property
+    def name(self) -> str:
+        return f"faster-whisper:{self.model_name}"
 
     def __call__(self, video: Path) -> Transcript:
         if self._model is None:

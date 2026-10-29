@@ -2,7 +2,8 @@
 
 Transcription runs on this machine, so the footage's audio never goes to a
 model provider and costs nothing against the Film Budget. The transcript is
-data for the Watcher, never instructions.
+data for the Watcher, never instructions. Segments Whisper itself scores as
+probably not speech are dropped, so music is never transcribed as dialogue.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+from trailer_to_campaign.footage import settings
 
 
 @dataclass(frozen=True)
@@ -62,4 +65,7 @@ class FasterWhisperTranscriber:
         if self._model is None:
             self._model = self.model_factory(self.model_name)
         segments, info = self._model.transcribe(str(video.resolve()), vad_filter=True)
-        return Transcript.from_segments(info.language, (Segment(s.start, s.end, s.text) for s in segments))
+        heard = (s for s in segments if (getattr(s, "no_speech_prob", 0.0) or 0.0) <= settings.NO_SPEECH_MAX)
+        transcript = Transcript.from_segments(info.language, (Segment(s.start, s.end, s.text) for s in heard))
+        # With no speech left, Whisper's language guess is about the music: drop it.
+        return transcript if transcript.segments else Transcript(None, [])

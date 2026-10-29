@@ -19,5 +19,9 @@ MAX_FRAMES = 120
 LONG_EDGE_PX = 768
 MIN_GAP_S = 0.5  # frames closer than this are the same moment
 
+# Over music or silence Whisper invents speech ("I hope you enjoyed this video").
+# Segments it scores as more likely not speech than this are dropped.
+NO_SPEECH_MAX = 0.6
+
 # A ceiling on any one ffmpeg or ffprobe call.
 SUBPROCESS_TIMEOUT_S = 300

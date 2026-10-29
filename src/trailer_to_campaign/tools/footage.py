@@ -27,6 +27,9 @@ from trailer_to_campaign.run_log import check_film_slug
 
 FOOTAGE_ID = re.compile(r"[0-9a-f]{12}")
 MANIFEST = "footage.json"
+# Bump when sampling or transcription would produce different output, so footage
+# watched by an older version is processed again instead of reused.
+FOOTAGE_VERSION = 2
 
 WATCH_FOOTAGE = """Sample an official trailer into frames and a timestamped transcript.
 
@@ -55,7 +58,9 @@ def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downlo
     out = frames_dir(films_dir, film, footage_id)
     manifest = out / MANIFEST
     if manifest.is_file():
-        return json.loads(manifest.read_text(encoding="utf-8"))
+        cached = json.loads(manifest.read_text(encoding="utf-8"))
+        if cached.get("version") == FOOTAGE_VERSION:
+            return cached
 
     times = sample_times(info.duration, scene_times(path))
     frames = extract_frames(path, times, out)
@@ -63,6 +68,7 @@ def watch(film: str, source: str, kind: str, films_dir: Path, downloader: Downlo
     transcript.save(out / "transcript.json")
     film_dir = films_dir / film
     footage: dict[str, Any] = {
+        "version": FOOTAGE_VERSION,
         "film": film,
         "footage_id": footage_id,
         "source": path.name,

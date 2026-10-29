@@ -84,3 +84,29 @@ def test_real_whisper_hears_generated_speech(tmp_path: Path) -> None:
     transcript = FasterWhisperTranscriber("tiny")(video)
     assert transcript.language == "en"
     assert "river" in " ".join(s.text for s in transcript.segments).lower()
+
+
+def test_segments_whisper_marks_as_probably_not_speech_are_dropped(tmp_path: Path) -> None:
+    # Over music or silence Whisper invents lines like "I hope you enjoyed this video";
+    # a Copywriter must never quote one as dialogue.
+    class MusicModel:
+        def transcribe(self, audio: str, **kwargs: Any) -> tuple[Any, Any]:
+            segments = [
+                SimpleNamespace(start=6.5, end=8.4, text=" You", no_speech_prob=0.91),
+                SimpleNamespace(start=20.0, end=22.0, text=" We ride at dawn.", no_speech_prob=0.05),
+            ]
+            return iter(segments), SimpleNamespace(language="en")
+
+    transcript = FasterWhisperTranscriber("small", model_factory=lambda name: MusicModel())(tmp_path / "t.mp4")
+    assert transcript.segments == [Segment(20.0, 22.0, "We ride at dawn.")]
+
+
+def test_footage_with_no_speech_has_no_language(tmp_path: Path) -> None:
+    class SilentModel:
+        def transcribe(self, audio: str, **kwargs: Any) -> tuple[Any, Any]:
+            return iter([SimpleNamespace(start=6.5, end=8.4, text=" You", no_speech_prob=0.91)]), SimpleNamespace(
+                language="en"
+            )
+
+    transcript = FasterWhisperTranscriber("small", model_factory=lambda name: SilentModel())(tmp_path / "t.mp4")
+    assert transcript == Transcript(None, [])

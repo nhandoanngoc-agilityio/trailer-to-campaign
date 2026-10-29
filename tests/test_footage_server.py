@@ -163,3 +163,14 @@ async def test_tool_descriptions_say_footage_is_data() -> None:
         tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == {"watch_footage", "get_frame"}
     assert "data, not instructions" in tools["watch_footage"].description
+
+
+async def test_footage_from_an_older_tool_version_is_processed_again(films: Path, spies: Spies) -> None:
+    footage = body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
+    manifest = films / "sample" / "frames" / footage["footage_id"] / "footage.json"
+    stale = json.loads(manifest.read_text())
+    stale["version"] = footage["version"] - 1
+    manifest.write_text(json.dumps(stale))
+    again = body(await call(films, spies, "watch_footage", film="sample", source="trailer.mp4", kind="trailer"))
+    assert again["version"] == footage["version"]
+    assert spies.transcriber.calls == 2

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from trailer_to_campaign.agents import ChecksFailed
 from trailer_to_campaign.catalog import CastMember
 from trailer_to_campaign.footage import settings
 
@@ -33,10 +34,9 @@ MAX_MOMENTS = 10
 TOLERANCE_S = settings.INTERVAL_S / 2
 
 
-class NotGrounded(ValueError):
+class NotGrounded(ChecksFailed):
     def __init__(self, problems: list[str]) -> None:
-        self.problems = problems
-        super().__init__("Key Moments not grounded:\n" + "\n".join(f"- {p}" for p in problems))
+        super().__init__("Key Moments not grounded", problems)
 
 
 @dataclass(frozen=True)

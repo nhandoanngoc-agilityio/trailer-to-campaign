@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
-from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, ToolResult
-from trailer_to_campaign.agents.social_posts import NotTraced, SocialPost, trace
+from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
+from trailer_to_campaign.agents.social_posts import SocialPost, trace
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 
@@ -27,13 +27,6 @@ EFFORT = "medium"
 MAX_TURNS = 12
 MAX_SUBMISSIONS = 3
 SUBMIT = "submit_social_posts"
-
-PROMPTS = Path(__file__).parent / "prompts"
-
-
-def _prompt(name: str) -> str:
-    return (PROMPTS / f"{name}.md").read_text(encoding="utf-8").strip()
-
 
 _POST_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -59,7 +52,7 @@ _POST_SCHEMA: dict[str, Any] = {
 def submit_tool() -> dict[str, Any]:
     return {
         "name": SUBMIT,
-        "description": _prompt(SUBMIT),
+        "description": load_prompt(SUBMIT),
         "strict": True,
         "input_schema": {
             "type": "object",
@@ -81,9 +74,8 @@ def copywriter_servers(settings: Settings) -> list[Any]:
 class _Writing:
     film: str
     key_moments: list[KeyMoment]
+    gate: Submissions
     catalog: dict[str, Any] | None = None
-    submissions: int = 0
-    posts: list[SocialPost] | None = None
 
 
 def key_moments_data(key_moments: list[KeyMoment]) -> str:
@@ -109,12 +101,15 @@ def key_moments_data(key_moments: list[KeyMoment]) -> str:
 async def write_posts(
     film: str, key_moments: list[KeyMoment], *, servers: list[Any], client: Any, meter: FilmMeter
 ) -> list[SocialPost]:
-    writing = _Writing(film, key_moments)
+    gate = Submissions(
+        meter, "copywriter", "Social Posts", "were not traced", load_prompt("copywriter_rejected"), MAX_SUBMISSIONS
+    )
+    writing = _Writing(film, key_moments, gate)
 
     async def write(mcp: McpTools) -> list[SocialPost]:
         async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if name == SUBMIT:
-                return _submit(writing, arguments, meter)
+                return _submit(writing, arguments)
             if name not in mcp:
                 return ToolResult.error(f"there is no tool {name!r}")
             if arguments.get("film") != writing.film:
@@ -130,31 +125,22 @@ async def write_posts(
             agent="copywriter",
             model=MODEL,
             effort=EFFORT,
-            system=_prompt("copywriter"),
+            system=load_prompt("copywriter"),
             tools=[*mcp.definitions, submit_tool()],
             max_turns=MAX_TURNS,
-            nudge=_prompt("copywriter_nudge"),
+            nudge=load_prompt("copywriter_nudge"),
         )
-        task = _prompt("copywriter_task").format(film=film, key_moments=key_moments_data(key_moments))
-        await loop.run([{"role": "user", "content": task}], call_tool, lambda: writing.posts is not None)
-        assert writing.posts is not None
-        return writing.posts
+        task = load_prompt("copywriter_task").format(film=film, key_moments=key_moments_data(key_moments))
+        await loop.run([{"role": "user", "content": task}], call_tool, lambda: gate.accepted is not None)
+        assert gate.accepted is not None
+        return gate.accepted
 
     return await McpTools.using(servers, write)
 
 
-def _submit(writing: _Writing, arguments: dict[str, Any], meter: FilmMeter) -> ToolResult:
-    if writing.catalog is None:
+def _submit(writing: _Writing, arguments: dict[str, Any]) -> ToolResult:
+    catalog = writing.catalog
+    if catalog is None:
         return ToolResult.error("call get_catalog before submitting")
-    writing.submissions += 1
-    try:
-        posts = trace(list(arguments.get("posts") or []), writing.key_moments, writing.catalog)
-    except NotTraced as err:
-        meter.event("social_posts_rejected", agent="copywriter", attempt=writing.submissions, problems=err.problems)
-        if writing.submissions >= MAX_SUBMISSIONS:
-            raise AgentFailed(f"the Copywriter's Social Posts were not traced after {MAX_SUBMISSIONS} tries") from err
-        left = MAX_SUBMISSIONS - writing.submissions
-        problems = "\n".join(f"- {p}" for p in err.problems)
-        return ToolResult.error(_prompt("copywriter_rejected").format(left=left, problems=problems))
-    writing.posts = posts
-    return ToolResult.text(f"Accepted {len(posts)} Social Posts.")
+    submitted = list(arguments.get("posts") or [])
+    return writing.gate.submit(lambda: trace(submitted, writing.key_moments, catalog))

@@ -21,6 +21,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
+from trailer_to_campaign.agents import ChecksFailed
 from trailer_to_campaign.agents.key_moments import KeyMoment
 
 PLATFORM_LIMITS = {"facebook": 500, "instagram": 2200, "tiktok": 150}  # characters
@@ -38,10 +39,9 @@ OUTER_PUNCTUATION = " \t\n.,!?;:…"
 VIETNAMESE_MARKS = {"̆", "̛", "̉", "̣"}
 
 
-class NotTraced(ValueError):
+class NotTraced(ChecksFailed):
     def __init__(self, problems: list[str]) -> None:
-        self.problems = problems
-        super().__init__("Social Posts not traced:\n" + "\n".join(f"- {p}" for p in problems))
+        super().__init__("Social Posts not traced", problems)
 
 
 @dataclass(frozen=True)

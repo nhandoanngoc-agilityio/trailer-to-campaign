@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-from trailer_to_campaign.agents.key_moments import KeyMoment, NotGrounded, ground
-from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, ToolResult
+from trailer_to_campaign.agents import load_prompt
+from trailer_to_campaign.agents.key_moments import KeyMoment, ground
+from trailer_to_campaign.agents.loop import AgentLoop, McpTools, Submissions, ToolResult
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.catalog import CastMember
 from trailer_to_campaign.config import Settings
@@ -30,13 +30,6 @@ EFFORT = "medium"
 MAX_TURNS = 30
 MAX_SUBMISSIONS = 3
 SUBMIT = "submit_key_moments"
-
-PROMPTS = Path(__file__).parent / "prompts"
-
-
-def _prompt(name: str) -> str:
-    return (PROMPTS / f"{name}.md").read_text(encoding="utf-8").strip()
-
 
 _MOMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -57,7 +50,7 @@ _MOMENT_SCHEMA: dict[str, Any] = {
 def submit_tool() -> dict[str, Any]:
     return {
         "name": SUBMIT,
-        "description": _prompt(SUBMIT),
+        "description": load_prompt(SUBMIT),
         "strict": True,
         "input_schema": {
             "type": "object",
@@ -92,22 +85,24 @@ class _Watching:
 
     film: str
     source: str
+    gate: Submissions
     footage: dict[str, Any] | None = None
     cast: list[CastMember] | None = None
     seen_frames: set[int] = field(default_factory=set)
-    submissions: int = 0
-    moments: list[KeyMoment] | None = None
 
 
 async def watch_trailer(
     film: str, source: str, *, servers: list[Any], client: Any, meter: FilmMeter
 ) -> list[KeyMoment]:
-    watching = _Watching(film, source)
+    gate = Submissions(
+        meter, "watcher", "Key Moments", "were not grounded", load_prompt("watcher_rejected"), MAX_SUBMISSIONS
+    )
+    watching = _Watching(film, source, gate)
 
     async def watch(mcp: McpTools) -> list[KeyMoment]:
         async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if name == SUBMIT:
-                return _submit(watching, arguments, meter)
+                return _submit(watching, arguments)
             if name not in mcp:
                 return ToolResult.error(f"there is no tool {name!r}")
             refusal = _off_run(watching, name, arguments)
@@ -124,15 +119,15 @@ async def watch_trailer(
             agent="watcher",
             model=MODEL,
             effort=EFFORT,
-            system=_prompt("watcher"),
+            system=load_prompt("watcher"),
             tools=[*mcp.definitions, submit_tool()],
             max_turns=MAX_TURNS,
-            nudge=_prompt("watcher_nudge"),
+            nudge=load_prompt("watcher_nudge"),
         )
-        task = _prompt("watcher_task").format(film=film, source=source)
-        await loop.run([{"role": "user", "content": task}], call_tool, lambda: watching.moments is not None)
-        assert watching.moments is not None
-        return watching.moments
+        task = load_prompt("watcher_task").format(film=film, source=source)
+        await loop.run([{"role": "user", "content": task}], call_tool, lambda: gate.accepted is not None)
+        assert gate.accepted is not None
+        return gate.accepted
 
     return await McpTools.using(servers, watch)
 
@@ -162,20 +157,9 @@ def _remember(watching: _Watching, name: str, arguments: dict[str, Any], result:
             watching.cast = [CastMember(c["character"], c.get("name")) for c in data["cast"]]
 
 
-def _submit(watching: _Watching, arguments: dict[str, Any], meter: FilmMeter) -> ToolResult:
-    if watching.footage is None or watching.cast is None:
+def _submit(watching: _Watching, arguments: dict[str, Any]) -> ToolResult:
+    footage, cast = watching.footage, watching.cast
+    if footage is None or cast is None:
         return ToolResult.error("call get_catalog and watch_footage, and look at frames, before submitting")
-    watching.submissions += 1
-    try:
-        moments = ground(
-            list(arguments.get("key_moments") or []), watching.footage, watching.cast, watching.seen_frames
-        )
-    except NotGrounded as err:
-        meter.event("key_moments_rejected", agent="watcher", attempt=watching.submissions, problems=err.problems)
-        if watching.submissions >= MAX_SUBMISSIONS:
-            raise AgentFailed(f"the Watcher's Key Moments were not grounded after {MAX_SUBMISSIONS} tries") from err
-        left = MAX_SUBMISSIONS - watching.submissions
-        problems = "\n".join(f"- {p}" for p in err.problems)
-        return ToolResult.error(_prompt("watcher_rejected").format(left=left, problems=problems))
-    watching.moments = moments
-    return ToolResult.text(f"Accepted {len(moments)} Key Moments.")
+    submitted = list(arguments.get("key_moments") or [])
+    return watching.gate.submit(lambda: ground(submitted, footage, cast, watching.seen_frames))

@@ -17,7 +17,7 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
 - `.claude/hooks/`: guardrails wired in `.claude/settings.json`, tested in `tests/test_hooks.py`. A hook block or approval prompt is team policy: change the approach (branch, PR, specific files) rather than reaching the same result another way.
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.
-- `evals/`: the Eval Set (from T8). `evals/expected/` is the human-owned answer key: Claude reads it and never edits it.
+- `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
 - `.github/workflows/`: `ci.yml` (lint and tests), `claude-code-review.yml` (Claude reviews every PR), `claude.yml` (`@claude` in issues and PRs).
 
 ## The ticket loop

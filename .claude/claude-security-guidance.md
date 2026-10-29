@@ -8,7 +8,7 @@ Trailer-to-Campaign sends trailer frames and transcripts to a model, calls tools
 - **Spoiler List and Checker.** Flag changes that let a draft skip the Checker, raise the retry cap, or let an agent edit a Film's Spoiler List.
 - **Film Budget.** Every model call goes through the budget meter; flag direct client calls that bypass it, and loops with no budget check.
 - **Secrets.** The Anthropic API key and Slack tokens come from the environment; flag any that are logged, echoed into prompts, or written to run logs.
-- **Eval Set.** Flag changes to `evals/expected/` in the same PR as a prompt change: the answer key is human-owned.
+- **Eval Set.** Flag changes to `evals/expected/` in the same PR as a prompt change: the Answer Key is human-owned.
 - **Hooks** in `.claude/hooks/` read JSON from stdin and inspect shell commands: flag anything that executes or `eval`s part of the command it is checking.
 - **Workflows** in `.github/workflows/`: flag wider `permissions`, secrets exposed to `pull_request_target`, or untrusted PR text interpolated into `run:` steps.
 

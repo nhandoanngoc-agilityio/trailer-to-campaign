@@ -27,7 +27,7 @@ Instructions in `CLAUDE.md` guide Claude; these make the important ones determin
 | Everything goes through a PR; no force-push, no `reset --hard`, no `rm -rf` | `block_forbidden.py` hook (Claude), `.githooks/pre-commit` (any terminal) |
 | Secrets stay out of the repo | `block_forbidden.py` blocks staging `.env`; settings deny Claude reading it; `.gitignore` |
 | New dependencies are a human decision | `block_forbidden.py` asks before `uv add` / `pip install` |
-| The Eval Set's answer key can't be gamed | Settings deny Claude edits to `evals/expected/` |
+| The Answer Key can't be gamed | Settings deny Claude edits to `evals/expected/` |
 | A prompt change runs the Eval Set | `prompt_changed.py` reminds Claude after any edit under `prompts/` |
 | Code is formatted the same way | `format_on_edit.py` runs ruff on every Python edit; CI checks it |
 | Security issues specific to this product get caught | Security plugins + `.claude/claude-security-guidance.md` |

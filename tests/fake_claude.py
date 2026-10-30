@@ -79,6 +79,20 @@ def result_json(params: dict[str, Any], tool_use_id: str) -> Any:
     return json.loads(block["content"][0]["text"])
 
 
+class HangingClient(FakeClient):
+    """A call that never answers, like the Copywriter's call in #34 that sat on an open connection."""
+
+    def __init__(self, on: str = "create") -> None:
+        super().__init__([])
+
+        async def hang(**params: Any) -> Any:
+            import anyio
+
+            await anyio.sleep_forever()
+
+        setattr(self.messages, on, hang)
+
+
 class LoopBoundClient(FakeClient):
     """Like the real async client: bound to the event loop it first ran in, broken in any other."""
 

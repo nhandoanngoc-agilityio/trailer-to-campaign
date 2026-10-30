@@ -23,11 +23,12 @@ a response cut off, or a request in flight when the CLI dies, is charged its wor
 from __future__ import annotations
 
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
+import anyio
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKError,
@@ -44,7 +45,7 @@ from claude_agent_sdk import tool as sdk_tool
 
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
-from trailer_to_campaign.agents.loop import MAX_TOKENS, AgentFailed, McpTools, ToolResult
+from trailer_to_campaign.agents.loop import MAX_TOKENS, MODEL_CALL_TIMEOUT_S, AgentFailed, McpTools, ToolResult
 from trailer_to_campaign.agents.watcher import EFFORT, MAX_TURNS, MODEL, start_watching, submit_tool, tool_gate
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.footage.settings import LONG_EDGE_PX
@@ -71,6 +72,7 @@ RESULT_CHARS = 1_000_000
 CLI_ENV = {
     "CLAUDE_CODE_MAX_RETRIES": "0",
     "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES": "0",
+    "API_TIMEOUT_MS": str(MODEL_CALL_TIMEOUT_S * 1000),  # each request; a silent stream is cut off in watch (T17)
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(MAX_TOKENS),
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -78,7 +80,7 @@ CLI_ENV = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 
-Query = Callable[..., AsyncIterator[Any]]
+Query = Callable[..., AsyncGenerator[Any, None]]
 
 
 def tool_name(name: str) -> str:
@@ -302,22 +304,34 @@ async def watch_trailer_sdk(
         task = load_prompt("watcher_task").format(film=film, source=source)
         result: ResultMessage | None = None
         error: ClaudeSDKError | None = None
+        # The stream sends usage while a response is written, so this long a silence is a hang (T17).
+        # One scope around the whole stream, its deadline moved on by each message: the query's
+        # own cancel scopes stay nested inside it.
+        silence = anyio.CancelScope()
         with tempfile.TemporaryDirectory(prefix="t2c-watcher-") as cwd:
             options = sdk_options(server=server, allowed=allowed, hooks=hooks, cap=cap, api_key=api_key, cwd=cwd)
+            messages = query(prompt=task, options=options)
             try:
-                async for message in query(prompt=task, options=options):
-                    session.start()
-                    if isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
-                        session.stream(message.event)
-                    elif isinstance(message, ResultMessage):
-                        result = message
+                with silence:
+                    silence.deadline = anyio.current_time() + MODEL_CALL_TIMEOUT_S
+                    async for message in messages:
+                        silence.deadline = anyio.current_time() + MODEL_CALL_TIMEOUT_S
+                        session.start()
+                        if isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
+                            session.stream(message.event)
+                        elif isinstance(message, ResultMessage):
+                            result = message
             except ClaudeSDKError as err:
                 error = err
             finally:
+                await messages.aclose()  # stops the CLI if the stream was cut off
                 if result is None or result.subtype == "error_during_execution":
                     session.unfinished()  # first, so the result's partial usage for it is netted out
                 if result is not None and result.model_usage:
                     session.result(dict(result.model_usage))
+        silent = silence.cancelled_caught
+        if silent and session.failure is None and watching.gate.accepted is None:
+            raise AgentFailed(f"the {AGENT}'s Claude Code stream sent nothing for {MODEL_CALL_TIMEOUT_S} s")
         return _outcome(session, watching.gate.accepted, result, error, meter, margin)
 
     return await McpTools.using(servers, watch)

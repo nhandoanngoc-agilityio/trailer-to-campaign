@@ -92,6 +92,10 @@ _Avoid_: Accuracy, score
 A change the approving marketer marks as light; rewriting a Draft's hook is never light, however few words it touches.
 _Avoid_: Minor change, tweak
 
+**Measured Change**:
+The share of a draft's words an edit changed, from 0% (unchanged) to 100% (rewritten); shown to the approving marketer and recorded beside their Light Edit mark as a check on it, never in place of it. A Light Edit over 30% is flagged for a second look.
+_Avoid_: Edit distance, diff size
+
 **Film Budget**:
 The maximum model spend allowed for one Run; the Run stops when it is reached.
 _Avoid_: Cost limit, quota

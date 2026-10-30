@@ -6,3 +6,12 @@ if [ "$branch" = "main" ]; then
     echo "pre-commit: committing directly on main is not allowed; create a branch first (t<n>-<slug>)." >&2
     exit 1
 fi
+
+# The Answer Key is human-owned (T14). This catches any way the files were written; a person
+# changing them on purpose says so for that one commit. Claude's shell hook refuses the override.
+if [ -z "$T2C_ANSWER_KEY_EDIT" ] && [ -n "$(git diff --cached --name-only -- evals/expected/)" ]; then
+    echo "pre-commit: this commit changes the Answer Key (evals/expected/), which is human-owned." >&2
+    echo "If an agent changed it, unstage it and fix the code or the prompt instead." >&2
+    echo "A person changing it on purpose: T2C_ANSWER_KEY_EDIT=1 git commit ..." >&2
+    exit 1
+fi

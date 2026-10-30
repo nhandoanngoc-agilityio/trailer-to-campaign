@@ -19,9 +19,12 @@ One file per Film, checked strictly: an unknown key, a missing field or a `spoil
 It is guarded against accidental changes (T14):
 - Claude's file tools are denied in `.claude/settings.json`.
 - `.claude/hooks/block_forbidden.py` blocks the obvious shell writes: `>`, `cp`, `mv`, `tee`, `sed -i`, `rm`, `touch`, `git checkout`/`restore`.
+- `.githooks/pre-commit` refuses any commit that changes it, however the files were written.
 - The `answer-key` CI job shows red on any PR that changes it.
 
-A person changing it on purpose merges past that red job knowing what changed.
+A person changing it on purpose:
+1. Commits with `T2C_ANSWER_KEY_EDIT=1 git commit ...`. Claude's shell hook refuses that override, so only a person can use it.
+2. Merges past the red CI job, knowing what changed.
 
 ```toml
 [[published_posts]]   # what the Film's studio actually posted, shown beside the generated posts

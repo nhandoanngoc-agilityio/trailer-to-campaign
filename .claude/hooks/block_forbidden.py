@@ -20,7 +20,8 @@ Blocked:
   restore / rm / mv of it, of anything in it, or of a folder that holds it (rm -r evals,
   git checkout .). Paths count with ./, absolute, after a cd, or from git -C. A tripwire
   for accidents, not a sandbox: a script or python -c that writes the file is out of
-  reach, and the answer-key CI job is the backstop (T14).
+  reach: .githooks/pre-commit and the answer-key CI job catch those (T14).
+- setting T2C_ANSWER_KEY_EDIT, the pre-commit override that only a person may use
 
 Ported from the claude-training repo, where this hook is battle-tested.
 
@@ -53,6 +54,7 @@ ANSWER_KEY = "evals/expected"
 ANSWER_KEY_REASON = (
     "the Answer Key (evals/expected/) is human-owned: change the code or the prompt, never the expected answers"
 )
+ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
 OPERATOR_CHARS = ";&|<>()\n"  # split off as their own tokens, as a shell does, unless quoted
 SEPARATOR_CHARS = set(";&|()\n")
 REDIRECT_CHARS = set("<>&|")
@@ -410,6 +412,8 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
     if depth > 3:
         return None
     for segment in split_segments(command):
+        if any(tok.split("=", 1)[0] == ANSWER_KEY_OVERRIDE for tok in segment):
+            return f"{ANSWER_KEY_OVERRIDE} is for a person changing the Answer Key on purpose, never an agent"
         words, targets = strip_redirects(segment)
         if any(in_answer_key(target, state) for target in targets):
             return ANSWER_KEY_REASON

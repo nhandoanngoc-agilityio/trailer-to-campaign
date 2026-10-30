@@ -233,3 +233,55 @@ def test_settings_wire_every_hook_file() -> None:
     settings = (HOOKS.parent / "settings.json").read_text()
     for hook in HOOKS.glob("*.py"):
         assert hook.name in settings, f"{hook.name} exists but is not wired in settings.json"
+
+
+# --- .githooks/pre-commit (T14): an Answer Key change needs a person to say so -------
+
+GITHOOKS = HOOKS.parent.parent / ".githooks"
+
+
+def commit(repo: Path, path: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    import os
+
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / path).write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", path], check=True)
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+    )
+
+
+@pytest.fixture
+def hooked(repo: Path) -> Path:
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(GITHOOKS)], check=True)
+    return repo
+
+
+def test_pre_commit_refuses_an_answer_key_change(hooked: Path) -> None:
+    result = commit(hooked, "evals/expected/charge.toml")
+    assert result.returncode != 0
+    assert "Answer Key" in result.stderr and "T2C_ANSWER_KEY_EDIT=1" in result.stderr
+
+
+def test_pre_commit_lets_a_person_change_the_answer_key_on_purpose(hooked: Path) -> None:
+    assert commit(hooked, "evals/expected/charge.toml", {"T2C_ANSWER_KEY_EDIT": "1"}).returncode == 0
+
+
+def test_pre_commit_lets_everything_else_through(hooked: Path) -> None:
+    assert commit(hooked, "evals/films/charge/film.toml").returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "T2C_ANSWER_KEY_EDIT=1 git commit -m x",
+        "export T2C_ANSWER_KEY_EDIT=1 && git commit -m x",
+        "env T2C_ANSWER_KEY_EDIT=1 git commit -m x",
+    ],
+)
+def test_the_answer_key_override_is_for_people_only(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2 and "T2C_ANSWER_KEY_EDIT" in result.stderr

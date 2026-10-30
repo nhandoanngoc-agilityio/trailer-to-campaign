@@ -156,3 +156,28 @@ def test_an_empty_edit_is_asked_again_and_never_rechecked() -> None:
     assert rechecked == ["Real text. Stream it now."]  # the empty one cost nothing
     assert decision.text == "Real text. Stream it now."
     assert "empty" in out.getvalue()
+
+
+# T10: the measured change, the check beside a Marketer's Light/heavy mark.
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "changed"),
+    [
+        ("A spy walks in. Stream it now.", "A spy walks in. Stream it now.", 0.0),
+        ("one two three four five six seven eight nine ten", "one two three four five six seven eight nine TEN", 0.1),
+        ("A spy walks in.", "Completely different words here now", 1.0),
+        ("", "", 0.0),
+        ("", "New text.", 1.0),
+    ],
+)
+def test_the_measured_change_is_the_share_of_words_changed(before: str, after: str, changed: float) -> None:
+    from trailer_to_campaign.approval import measured_change
+
+    assert measured_change(before, after) == pytest.approx(changed, abs=0.01)
+
+
+def test_spacing_alone_is_not_a_change() -> None:
+    from trailer_to_campaign.approval import measured_change
+
+    assert measured_change("A spy  walks in.\n", "A spy walks in.") == 0.0

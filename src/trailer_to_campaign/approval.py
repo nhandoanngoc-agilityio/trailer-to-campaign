@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Protocol, TextIO
 
 from trailer_to_campaign.agents.checker import Verdict
@@ -26,6 +27,15 @@ from trailer_to_campaign.agents.review import CheckedPost
 END_OF_EDIT = "."
 # Each answer is its key or its whole word, nothing else: "abort" must never read as "approve".
 WORDS = {"a": "approve", "e": "edit", "r": "reject", "l": "light", "h": "heavy"}
+
+
+def measured_change(before: str, after: str) -> float:
+    """The share of words an edit changed: 0.0 unchanged, 1.0 rewritten. A check beside the Light/heavy mark.
+
+    Words, not characters, so fixing a diacritic or a comma weighs like one word, as a reader sees it.
+    """
+    old, new = before.split(), after.split()
+    return round(1 - SequenceMatcher(None, old, new, autojunk=False).ratio(), 3)
 
 
 class ApprovalAborted(Exception):

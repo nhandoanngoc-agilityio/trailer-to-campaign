@@ -44,7 +44,7 @@ from claude_agent_sdk import tool as sdk_tool
 
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
-from trailer_to_campaign.agents.loop import MAX_TOKENS, AgentFailed, McpTools, ToolResult
+from trailer_to_campaign.agents.loop import MAX_TOKENS, MODEL_CALL_TIMEOUT_S, AgentFailed, McpTools, ToolResult
 from trailer_to_campaign.agents.watcher import EFFORT, MAX_TURNS, MODEL, start_watching, submit_tool, tool_gate
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.footage.settings import LONG_EDGE_PX
@@ -71,6 +71,7 @@ RESULT_CHARS = 1_000_000
 CLI_ENV = {
     "CLAUDE_CODE_MAX_RETRIES": "0",
     "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES": "0",
+    "API_TIMEOUT_MS": str(MODEL_CALL_TIMEOUT_S * 1000),  # the same deadline as v0's calls (T17)
     "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(MAX_TOKENS),
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",

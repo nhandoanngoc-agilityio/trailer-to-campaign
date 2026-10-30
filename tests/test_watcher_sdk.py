@@ -168,6 +168,7 @@ async def test_the_harness_is_locked_down_to_the_watchers_tools(films: Path, tmp
     assert env["ANTHROPIC_API_KEY"] == KEY  # the API key, never the user's own Claude login
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "0"  # a retried call could be billed twice and charged once
     assert env["CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES"] == "0"
+    assert env["API_TIMEOUT_MS"] == "300000"  # the same deadline as v0's calls (T17)
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(MAX_TOKENS)
     assert Path(options.cwd).name.startswith("t2c-watcher-")  # an empty folder, not the repo
 

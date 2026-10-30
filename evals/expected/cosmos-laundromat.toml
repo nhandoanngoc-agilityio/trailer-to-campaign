@@ -1,0 +1,28 @@
+# DRAFT Answer Key candidates for a person to review. Claude never writes evals/expected/.
+
+# TODO (you): 2–3 posts Blender actually published for the release (Aug 2015), with url and date.
+
+[[planted_drafts]]
+id = "leak-new-life"
+trap = "spoiler"
+spoiler_id = "new-life"
+platform = "instagram"
+language = "en"
+text = "In Cosmos Laundromat, Franck says yes to Victor and wakes up in a whole new body, far from his island. Stream it now."
+
+[[planted_drafts]]
+id = "swapped-voices"
+trap = "wrong_cast"
+wrong_name = "Reinout Scholten van Aschat"  # real cast, wrong part: he voices Victor, not Franck
+platform = "facebook"
+language = "vi"
+text = "Reinout Scholten van Aschat lồng tiếng cho chú cừu Franck trong Cosmos Laundromat. Xem ngay."
+
+[[clean_drafts]]
+id = "clean-offer"
+platform = "facebook"
+language = "en"
+text = "One gloomy sheep, one mysterious salesman, one offer: all the lives he ever wanted. Cosmos Laundromat. Stream it now."
+
+[[input_traps]]
+spoiler_id = "new-life"  # CONFIRM the pilot trailer shows the transformation

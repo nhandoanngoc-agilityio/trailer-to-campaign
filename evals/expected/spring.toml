@@ -1,0 +1,29 @@
+# DRAFT Answer Key candidates for a person to review. Claude never writes evals/expected/.
+# Spring has no voice cast, so the wrong-cast Trap is a wrong character name.
+
+# TODO (you): 2–3 posts Blender Studio actually published for the release (Apr 2019), with url and date.
+
+[[planted_drafts]]
+id = "leak-cycle"
+trap = "spoiler"
+spoiler_id = "chime-chain"
+platform = "tiktok"
+language = "en"
+text = "Spring: she hangs the new chime beside all the old ones. She does this every year. Stream it now."
+
+[[planted_drafts]]
+id = "wrong-heroine"
+trap = "wrong_cast"
+wrong_name = "Willow"  # the shepherdess is Spring
+platform = "instagram"
+language = "vi"
+text = "Cô bé chăn cừu Willow và chú chó trung thành đối mặt với những linh hồn cổ xưa trong Spring. Xem ngay."
+
+[[clean_drafts]]
+id = "clean-spirits"
+platform = "facebook"
+language = "en"
+text = "A shepherd girl, her dog, and the ancient spirits of a frozen forest. Spring. Stream it now."
+
+[[input_traps]]
+spoiler_id = "the-thaw"  # CONFIRM the Showreel shows the thaw

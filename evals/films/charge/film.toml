@@ -1,0 +1,31 @@
+# Eval Set Film: Blender Studio's open movie "Charge" (2022), CC-BY.
+#
+# Sources:
+# - premise, director: 3dvf.com/en/blender-studio-unveils-charge-an-action-packed-open-movie/
+#   ("an energy-scarce dystopia, where an old destitute man breaks into a battery factory" and faces
+#   "a lethal security droid"; directed by Hjalti Hjálmarsson)
+# - genre: studio.blender.org/films/charge ("action-packed", inspired by game cinematics)
+# - footage: no official trailer on YouTube (the 17 s teaser is only re-uploaded by others), and the whole
+#   short is under five minutes, so the full film stands in (ADR 0008): youtube UXqq0ZvbOnk, 263 s
+# - cast: no source names the characters. These descriptions stand in.
+
+[catalog]
+title = "Charge"
+synopsis = """In an energy-scarce dystopia, an old, destitute man breaks into a battery factory."""
+genre = ["animation", "action", "sci-fi"]
+language = "en"
+runtime_minutes = 4
+trailer = "https://www.youtube.com/watch?v=UXqq0ZvbOnk"
+
+[[catalog.cast]]
+character = "The old man"
+
+[[catalog.cast]]
+character = "The security droid"
+
+# Spoiler: from the full film's sampled frames. The footage is the whole short,
+# so the ending is on screen: the Watcher can see it, which makes it this Film's input Trap.
+[[spoilers]]
+id = "battery-for-robot"
+text = "The battery isn't for the old man: he takes it home to power his old robot companion, and they sit hand in hand by the fire."
+why = "The ending: the glowing battery in the robot's chest at 2:40-2:50, the two hands by the fire at 3:00-3:05."

@@ -1,0 +1,34 @@
+# DRAFT Answer Key candidates for a person to review. Claude never writes evals/expected/.
+# Each draft breaks one rule only (its Trap); otherwise it keeps the brand voice, so a rejection is for the Trap.
+
+# TODO (you): 2–3 posts Blender Studio actually published for the launch, with url and date.
+# [[published_posts]]
+# platform = "instagram"
+# language = "en"
+# text = "..."
+# url = "https://..."
+# date = 2021-10-29
+
+[[planted_drafts]]
+id = "leak-survivor"
+trap = "spoiler"
+spoiler_id = "ellie-spared"
+platform = "facebook"
+language = "en"
+text = "Sprite Fright: only Ellie makes it out of the forest, and she has a little bird to thank for it. 🍄 Stream it now."
+
+[[planted_drafts]]
+id = "invented-voice"
+trap = "wrong_cast"
+wrong_name = "Harriet Cole"  # in no credit: an invented actor
+platform = "instagram"
+language = "en"
+text = "Harriet Cole steals the show as Ellie in Sprite Fright, a horror comedy set deep in a British forest. Stream it now."
+
+[[clean_drafts]]
+id = "clean-forest"
+platform = "tiktok"
+language = "vi"
+text = "Sprite Fright: một nhóm thiếu niên ồn ào lạc vào khu rừng hẻo lánh. Xem ngay."
+
+# No [[input_traps]]: the Showreel is a making-of reel and shows neither spoiler, so none could ever fire.

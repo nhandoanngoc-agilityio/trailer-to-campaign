@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -38,10 +39,18 @@ class FakeClient:
         self.posted: list[dict[str, Any]] = []
         self.reactions: list[dict[str, Any]] = []
         self.ephemeral: list[dict[str, Any]] = []
+        self.views: list[dict[str, Any]] = []
+        self.draft_posted = threading.Event()
 
     def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
         self.posted.append(kwargs)
+        if kwargs.get("blocks"):
+            self.draft_posted.set()
         return {"ok": True, "ts": f"200.{len(self.posted)}"}
+
+    def views_open(self, **kwargs: Any) -> dict[str, Any]:
+        self.views.append(kwargs)
+        return {"ok": True}
 
     def chat_update(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
         return {"ok": True}
@@ -221,3 +230,66 @@ def test_the_app_is_freed_even_if_the_last_post_to_the_thread_fails(
     front.handle_mention(mention("agent-327", ts="100.2"), client)
     assert len(runs.started) == 2  # not stuck "in progress"
     assert front.waiting_run_ids() == []
+
+
+# T10: Edit opens the form at once, and a saved form reaches the Run waiting on that draft.
+
+
+def in_a_thread(work: Callable[[], None]) -> None:
+    threading.Thread(target=work, daemon=True).start()  # as the app runs a Run; daemon, so a failure can't hang
+
+
+def edit_click(value: str, user: str = MARKETER) -> dict[str, Any]:
+    return {**click(value, user, action="t2c_edit"), "trigger_id": "trigger-7"}
+
+
+def saved_form(value: str, fields: dict[str, str], user: str = MARKETER) -> dict[str, Any]:
+    values = {name: {"value": {"type": "plain_text_input", "value": text}} for name, text in fields.items()}
+    return {
+        "user": {"id": user},
+        "view": {"callback_id": "t2c_edit", "private_metadata": value, "state": {"values": values}},
+    }
+
+
+def test_edit_opens_the_form_and_a_saved_edit_reaches_the_run(films: Path) -> None:
+    runs, client = Runs(), FakeClient()
+    decided: list[Any] = []
+    finished = threading.Event()
+
+    def body(approver: SlackApprover) -> int:
+        decided.append(approver.key_moment(1, 1, MOMENT))
+        finished.set()
+        return 0
+
+    runs.body = body
+    front = door(films, runs, start=in_a_thread)
+    front.handle_mention(mention("agent-327"), client)
+    assert client.draft_posted.wait(2)
+    [run_id] = front.waiting_run_ids()
+
+    front.handle_action(edit_click(f"{run_id}:km1"), client)
+    [opened] = client.views
+    assert opened["trigger_id"] == "trigger-7" and opened["view"]["private_metadata"] == f"{run_id}:km1"
+
+    front.handle_submission(saved_form(f"{run_id}:km1", {"what_happens": "A spy strolls in.", "mood": "cool"}), client)
+    front.handle_action(click(f"{run_id}:km1", action="t2c_approve_light"), client)
+    assert finished.wait(2)
+    [decision] = decided
+    assert (decision.decision, decision.what_happens, decision.light, decision.by) == (
+        "edit",
+        "A spy strolls in.",
+        True,
+        MARKETER,
+    )
+
+
+def test_a_saved_form_for_a_run_that_is_gone_is_ignored_safely(films: Path) -> None:
+    runs, client = Runs(), FakeClient()
+    door(films, runs).handle_submission(saved_form("gone:km1", {"what_happens": "x", "mood": "y"}), client)
+    assert runs.started == []
+
+
+def test_an_edit_click_for_a_run_that_is_gone_is_answered_privately(films: Path) -> None:
+    runs, client = Runs(), FakeClient()
+    door(films, runs).handle_action(edit_click("gone:km1"), client)
+    assert client.views == [] and "no longer" in client.ephemeral[0]["text"]

@@ -71,7 +71,7 @@ def test_a_bad_key_is_asked_again() -> None:
 def test_a_key_moment_edit_changes_only_its_description_and_mood() -> None:
     terminal, _, _ = approver("e", "He grins as the cape goes up.", "", "l")  # Enter keeps the mood
     assert terminal.key_moment(1, 5, MOMENT) == KeyMomentDecision(
-        "edit", what_happens="He grins as the cape goes up.", mood="deadpan", light=True
+        "edit", what_happens="He grins as the cape goes up.", mood="deadpan", light=True, changed=pytest.approx(0.765)
     )
 
 
@@ -97,7 +97,9 @@ def test_an_edited_post_is_rechecked_shown_and_then_decided() -> None:
     terminal, _, out = approver("e", "A spy walks into a barbershop.", "Stream it now.", ".", "a", "h")
     decision = terminal.social_post(1, 6, POST, recheck)
     assert rechecked == ["A spy walks into a barbershop.\nStream it now."]
-    assert decision == PostDecision("edit", text="A spy walks into a barbershop.\nStream it now.", light=False)
+    assert decision == PostDecision(
+        "edit", text="A spy walks into a barbershop.\nStream it now.", light=False, changed=pytest.approx(0.6, abs=0.2)
+    )
     shown = out.getvalue()
     assert "end with a call to watch" in shown and "Ends weakly." in shown  # the re-check, before the decision
 
@@ -156,3 +158,40 @@ def test_an_empty_edit_is_asked_again_and_never_rechecked() -> None:
     assert rechecked == ["Real text. Stream it now."]  # the empty one cost nothing
     assert decision.text == "Real text. Stream it now."
     assert "empty" in out.getvalue()
+
+
+# T10: the measured change, the check beside a Marketer's Light/heavy mark.
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "changed"),
+    [
+        ("A spy walks in. Stream it now.", "A spy walks in. Stream it now.", 0.0),
+        ("one two three four five six seven eight nine ten", "one two three four five six seven eight nine TEN", 0.1),
+        ("A spy walks in.", "Completely different words here now", 1.0),
+        ("", "", 0.0),
+        ("", "New text.", 1.0),
+    ],
+)
+def test_the_measured_change_is_the_share_of_words_changed(before: str, after: str, changed: float) -> None:
+    from trailer_to_campaign.approval import measured_change
+
+    assert measured_change(before, after) == pytest.approx(changed, abs=0.01)
+
+
+def test_the_terminal_shows_the_measured_change_before_light_or_heavy() -> None:
+    terminal, keys, out = approver("e", "A cape is drawn up to his chin, slowly.", "", "l")
+    terminal.key_moment(1, 5, MOMENT)
+    shown = out.getvalue()
+    assert "changed" in shown and "% of the words" in shown
+    assert shown.index("% of the words") < shown.rindex("Light Edit")  # seen before the mark is asked
+
+    terminal, _, out = approver("e", "A spy walks in. Stream it now.", ".", "a", "h")
+    terminal.social_post(1, 6, POST, lambda t: Recheck([], Verdict(True, [])))
+    assert "% of the words" in out.getvalue()
+
+
+def test_spacing_alone_is_not_a_change() -> None:
+    from trailer_to_campaign.approval import measured_change
+
+    assert measured_change("A spy  walks in.\n", "A spy walks in.") == 0.0

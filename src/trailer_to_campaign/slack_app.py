@@ -7,7 +7,8 @@
 - One Run at a time: a mention while one is going is told to wait.
 - The Run Thread is the thread under the mention. A mention inside an old thread starts
   a new Run in a new Run Thread: one Run, one Run Thread.
-- Button clicks go to the waiting Run's SlackApprover, which decides who may click.
+- Button clicks go to the waiting Run's SlackApprover, which decides who may click. Edit opens
+  its form at once (Slack's trigger_id expires within seconds); the saved form goes to that Run.
 - close() (the app stopping) ends any wait with ApprovalAborted, so the Run ends in an error.
 
 Slack messages are data: the mention is only read for a Film and a trailer
@@ -24,7 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from trailer_to_campaign.slack_approval import APPROVE, REJECT, SlackApprover
+from trailer_to_campaign.slack_approval import BUTTONS, EDIT, EDIT_FORM, SlackApprover
 from trailer_to_campaign.slack_request import Refusal, RunRequest, parse_request
 from trailer_to_campaign.slack_thread import SlackThread
 
@@ -116,7 +117,24 @@ class FrontDoor:
                     channel=channel, user=user, text="That Run is no longer waiting for Approval."
                 )
                 continue
-            approver.click(action.get("action_id", ""), value, user)
+            if action.get("action_id") == EDIT:  # the form must open now: the trigger_id expires within seconds
+                approver.open_editor(client, body.get("trigger_id", ""), value, user)
+            else:
+                approver.click(action.get("action_id", ""), value, user)
+
+    def handle_submission(self, body: dict[str, Any], client: Any) -> None:
+        """A saved edit form goes to the Run waiting on that draft; the approver decides whether it counts."""
+        view, user = body.get("view", {}), body.get("user", {}).get("id", "")
+        value = str(view.get("private_metadata", ""))
+        approver = self._approvers.get(value.split(":", 1)[0])
+        if approver is None:
+            log.info("an edit was saved for a Run that is no longer waiting: %s", value)
+            return
+        fields = {
+            name: str((inputs.get("value") or {}).get("value") or "")
+            for name, inputs in view.get("state", {}).get("values", {}).items()
+        }
+        approver.submit_edit(value, user, fields)
 
     def close(self) -> None:
         for approver in list(self._approvers.values()):
@@ -140,9 +158,14 @@ def build_app(bot_token: str, door: FrontDoor) -> Any:
     def on_mention(event: dict[str, Any], client: Any) -> None:
         door.handle_mention(event, client)
 
-    @app.action(re.compile(f"^({APPROVE}|{REJECT})$"))
+    @app.action(re.compile(f"^({'|'.join(BUTTONS)})$"))
     def on_click(ack: Callable[[], None], body: dict[str, Any], client: Any) -> None:
         ack()
         door.handle_action(body, client)
+
+    @app.view(EDIT_FORM)
+    def on_saved_edit(ack: Callable[[], None], body: dict[str, Any], client: Any) -> None:
+        ack()  # closes the form; what the edit means is the Run's to decide
+        door.handle_submission(body, client)
 
     return app

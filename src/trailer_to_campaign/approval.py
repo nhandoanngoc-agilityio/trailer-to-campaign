@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Protocol, TextIO
 
 from trailer_to_campaign.agents.checker import Verdict
@@ -26,6 +27,20 @@ from trailer_to_campaign.agents.review import CheckedPost
 END_OF_EDIT = "."
 # Each answer is its key or its whole word, nothing else: "abort" must never read as "approve".
 WORDS = {"a": "approve", "e": "edit", "r": "reject", "l": "light", "h": "heavy"}
+
+
+def measured_change(before: str, after: str) -> float:
+    """The share of words an edit changed: 0.0 unchanged, 1.0 rewritten. A check beside the Light/heavy mark.
+
+    Words, not characters, so fixing a diacritic or a comma weighs like one word, as a reader sees it.
+    """
+    old, new = before.split(), after.split()
+    return round(1 - SequenceMatcher(None, old, new, autojunk=False).ratio(), 3)
+
+
+def key_moment_text(what_happens: str, mood: str) -> str:
+    """What a Marketer can edit in a Key Moment, as one text: the measured change is taken on this."""
+    return f"{what_happens}\n{mood}"
 
 
 class ApprovalAborted(Exception):
@@ -39,6 +54,8 @@ class KeyMomentDecision:
     mood: str | None = None
     light: bool | None = None  # an edit only: True for a Light Edit, False for heavy
     by: str | None = None  # the Marketer who decided, when the surface knows (a Slack user id)
+    edited_by: str | None = None  # the Marketer who wrote the edit, when it wasn't the one who approved it
+    changed: float | None = None  # an edit's measured change, as shown when it was marked Light or heavy
 
 
 @dataclass(frozen=True)
@@ -47,6 +64,8 @@ class PostDecision:
     text: str | None = None  # the edited text
     light: bool | None = None
     by: str | None = None
+    edited_by: str | None = None
+    changed: float | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +103,8 @@ class TerminalApprover:
                 if answer in (key, WORDS[key]):
                     return key
 
-    def _light(self) -> bool:
+    def _light(self, changed: float) -> bool:
+        self._say(f"This edit changed {changed:.0%} of the words.")
         self._say("Is this a Light Edit? Rewriting the hook is never light.")
         return self._choose("[l]ight / [h]eavy: ", "lh") == "l"
 
@@ -105,7 +125,8 @@ class TerminalApprover:
         mood = self._read("Mood: ").strip() or moment.mood
         if what == moment.what_happens and mood == moment.mood:
             return KeyMomentDecision("approve")
-        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light())
+        changed = measured_change(key_moment_text(moment.what_happens, moment.mood), key_moment_text(what, mood))
+        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light(changed), changed=changed)
 
     def social_post(self, i: int, n: int, checked: CheckedPost, recheck: Callable[[str], Recheck]) -> PostDecision:
         post = checked.post
@@ -130,7 +151,8 @@ class TerminalApprover:
             self._show(recheck(text))
             choice = self._choose("[a]pprove this edit / [e]dit again / [r]eject: ", "aer")
             if choice == "a":
-                return PostDecision("edit", text=text, light=self._light())
+                changed = measured_change(post.text, text)
+                return PostDecision("edit", text=text, light=self._light(changed), changed=changed)
         return PostDecision("reject")
 
     def _edit(self) -> str:

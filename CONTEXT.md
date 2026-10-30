@@ -36,6 +36,14 @@ _Avoid_: Blocklist, restrictions
 The agent that studies a Film's Source Footage and produces its Key Moments.
 _Avoid_: Vision agent, analyser
 
+**v0 Watcher**:
+The Watcher on the project's own hand-written tool loop; the default.
+_Avoid_: Old Watcher, legacy Watcher
+
+**SDK Watcher**:
+The Watcher on the Claude Agent SDK, with the v0 Watcher's tools, prompts and grounding; chosen with `--watcher sdk`.
+_Avoid_: New Watcher, Watcher v1, Claude Code Watcher
+
 **Copywriter**:
 The agent that turns approved Key Moments into Social Posts.
 _Avoid_: Writer, creative agent

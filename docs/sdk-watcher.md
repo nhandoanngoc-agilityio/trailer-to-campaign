@@ -13,22 +13,47 @@ The Watcher's cost per Film is reported but doesn't decide. Planted Drafts never
 
 ## Results
 
-_To fill in from two `t2c eval` runs on the same day: `--watcher v0` and `--watcher sdk`._
+Two `t2c eval` runs on 2026-10-30, one after the other: `--watcher v0` (`runs/_eval/20261030T080038Z/`) and `--watcher sdk` (`runs/_eval/20261030T080918Z/`). Both cover the four Blender Films; Song Lang isn't on that clone, so it was skipped in both.
 
 | | v0 | SDK |
 |---|---|---|
-| Films completed | | |
-| Input Traps caught | | |
-| Grounding rejections (total) | | |
-| Key Moments (total) | | |
-| Watcher cost (total) | | |
-| Watcher model calls (total) | | |
-| Planted Drafts caught (Checker, unchanged) | | |
-| Eval Set cost (total) | | |
+| Films completed | 4 of 4 | 4 of 4 |
+| Input Traps caught | 1 of 3 | 2 of 3 |
+| Grounding rejections (total) | 1 | 1 |
+| Key Moments (total) | 34 | 35 |
+| Watcher cost (total) | $0.7115 | $0.7605 (+7%) |
+| Watcher model calls / tool calls | 22 / 92 | 22 / 87 |
+| Planted Drafts caught (Checker) | 8 of 8 | 8 of 8 |
+| Clean Drafts: false alarms | 0 of 4 | 0 of 4 |
+| Eval Set cost (total) | $1.4057 | $1.6238 |
 
-Per Film: _from each `summary.json`, `films[].watcher`._
+Per Film, the Watcher's own numbers (cost, model calls, grounding rejections, Key Moments):
 
-Verdict: _passes / misses the bar, and why._
+| Film | v0 | SDK |
+|---|---|---|
+| Sprite Fright | $0.1991, 6, 1, 8 | $0.1802, 5, 0, 8 |
+| Cosmos Laundromat | $0.1418, 5, 0, 7 | $0.1713, 5, 0, 8 |
+| Spring | $0.1731, 5, 0, 9 | $0.1714, 5, 0, 10 |
+| Charge | $0.1976, 6, 0, 10 | $0.2376, 7, 1, 9 |
+
+**Verdict: the SDK Watcher meets the bar.**
+- Every Film completed.
+- It caught at least as many Input Traps.
+- It had no more grounding rejections: one each, a frame placed outside its moment's time range, caught and fixed on the next try.
+
+Read the extra Input Trap as "no worse", not "better". Spring's `the-thaw` was caught because the Copywriter wrote a post touching it and the Checker named it, and the Checker varies from run to run (#38). The Watcher's own numbers are close on every Film.
+
+The SDK Watcher cost 7% more. Most of the gap is one Film (Charge: one more model call after its grounding rejection). The SDK's own plumbing adds about 600 tokens to the first prompt (about 3,000 against v0's 2,400). The Eval Set's total cost differs more than the Watcher's, because the Copywriter and the Checker vary between runs.
+
+**In the SDK Runs' logs:**
+- every response was charged after the fact at our prices
+- there were no worst-case charges, no SDK estimates and no other models
+- the largest prompt was 25,323 tokens, against the 50,000-token guard
+- the only tools called were the Watcher's four
+
+A smoke run on Agent 327 (`t2c watch --watcher sdk`) cost $0.1835 and stopped right after the accepted submission, with no extra model call.
+
+v0 stays the default (T11's Analyze): switching is a call to make after the talk.
 
 ## Same tools, same guardrails
 
@@ -55,7 +80,7 @@ The SDK wraps each of our tools. Every call still goes through `watcher.tool_gat
 - **Control.**
   - v0 sees and counts each request before it is sent.
   - With the SDK, our code sees a response only once it has started, and a tool's exception never reaches us (the SDK shows it to the model). Hooks are the control points.
-- **Cost.** _From the results: the SDK's own system plumbing, and any background calls it made._
+- **Cost.** 7% more for the Watcher across the Eval Set. The SDK made no background model calls once they were turned off, and it cached the prompt on its own.
 - **Testing.**
   - The SDK's in-process tool server is real MCP. The tests drive it through a fake CLI (`tests/fake_agent_sdk.py`), so the SDK's own input checks and content conversion run in every test, with no CLI started and nothing spent.
 - **Dependency.** `claude-agent-sdk` ships the Claude Code CLI inside it (113 MB).

@@ -84,6 +84,22 @@ async def test_a_call_that_never_answers_fails_the_agent_and_is_charged_its_wors
     assert agent.meter.spent == Decimal(call["cost_usd"]) == Decimal(call["reserved_usd"]) > 0
 
 
+async def test_the_clients_own_timeout_also_fails_the_agent_cleanly(tmp_path: Path) -> None:
+    # The client's per-read timeout can fire before the loop's deadline: the same clean failure, not a crash.
+    import anthropic
+
+    agent, log = hung_loop(tmp_path, "create")
+
+    async def times_out(**params: Any) -> Any:
+        raise anthropic.APITimeoutError(request=None)  # type: ignore[arg-type]
+
+    agent.client.messages.create = times_out
+    with pytest.raises(AgentFailed, match="copywriter.*timed out"):
+        await run_hung(agent)
+    [call] = logged(log, "model_call")
+    assert call["error"] == "APITimeoutError" and call["charged"] == "worst_case"
+
+
 async def test_a_token_count_that_never_answers_fails_the_agent_and_costs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -286,7 +286,9 @@ def test_the_client_waits_no_longer_than_a_model_calls_deadline() -> None:
     from trailer_to_campaign.agents.loop import MODEL_CALL_TIMEOUT_S
     from trailer_to_campaign.cli import make_client
 
-    assert make_client("sk-test").timeout == MODEL_CALL_TIMEOUT_S == 300
+    timeout = make_client("sk-test").timeout
+    assert timeout.read == MODEL_CALL_TIMEOUT_S
+    assert timeout.connect == 5.0  # an unreachable API still fails at once, not after the deadline
 
 
 def test_key_moments_that_cannot_be_saved_are_printed_not_lost(

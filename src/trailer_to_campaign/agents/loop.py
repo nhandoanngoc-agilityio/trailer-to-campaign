@@ -23,6 +23,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+import anthropic
 import anyio
 from mcp import Client
 from mcp.types import ImageContent, TextContent
@@ -33,9 +34,10 @@ from trailer_to_campaign.pricing import Usage
 
 MAX_TOKENS = 16_000
 # A model call's whole time, end to end (T17). The client's own timeout is per read, so a
-# connection that stays open hung a Copywriter call for 25+ minutes (#34). The slowest real
-# call so far took 37 s; 300 s also covers a full MAX_TOKENS reply at 54 tokens a second.
-MODEL_CALL_TIMEOUT_S = 300
+# connection that stays open hung a Copywriter call for 25+ minutes (#34). 600 s is the most
+# the SDK allows a non-streaming call; it expects up to 450 s for a full MAX_TOKENS reply,
+# and the slowest real call so far took 37 s.
+MODEL_CALL_TIMEOUT_S = 600
 
 log = logging.getLogger(__name__)
 
@@ -203,6 +205,8 @@ class AgentLoop:
                 raise AgentFailed(
                     f"the {self.agent}'s call to {self.model} did not answer within {MODEL_CALL_TIMEOUT_S} s"
                 ) from err
+            except anthropic.APITimeoutError as err:  # the client's own timeout fired first
+                raise AgentFailed(f"the {self.agent}'s call to {self.model} timed out: {err}") from err
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "tool_use":

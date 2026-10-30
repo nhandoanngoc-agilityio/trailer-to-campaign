@@ -47,7 +47,7 @@ uv run t2c eval                         # the Eval Set: how many Traps the Check
 
 `--watcher sdk` (on `run`, `watch`, `eval` and `slack`, or `T2C_WATCHER=sdk`) runs the Watcher on the Claude Agent SDK instead of its own loop, with the same tools, prompts and grounding (T11, compared in `docs/sdk-watcher.md`). v0 stays the default. The SDK Watcher is kept inside the Film Budget by a spending cap set before it starts and charges after each response (ADR 0009), so it needs a Film Budget of more than $1.12. The Eval Set report says which Watcher ran and gives its cost, grounding rejections and Key Moments per Film.
 
-`t2c result --film <film> --old-way <min> --new-way <min>` writes the side-by-side page for a real launch (T12, see `docs/side-by-side.md`). Time Saved comes from two marketers' stopwatch times, one working the old way and one with Trailer-to-Campaign. The Approval Rate comes from the Run whose Campaign was used. Cost per Film is every Run of that Film added up, re-runs included. The page holds numbers only and is written next to the Run Logs, in `runs/<film>/result.md`.
+`t2c result --film <film> --old-way <min> --new-way <min>` writes the side-by-side page for a real launch (T12, see `docs/side-by-side.md`). Time Saved comes from two marketers' stopwatch times, one working the old way and one with Trailer-to-Campaign. The Approval Rate comes from the Run whose Campaign was used (the last to finish that gave one, or `--run <folder>`). Cost per Film is every launch Run of that Film added up, re-runs included; Eval Set and dummy Runs are left out. The page holds numbers only and is written next to the Run Logs, as `runs/<film>/result.md` and `result.json`.
 
 ### In Slack
 

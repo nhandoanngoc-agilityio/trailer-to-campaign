@@ -41,7 +41,13 @@ from trailer_to_campaign.agents.social_posts import LANGUAGES, PLATFORM_LIMITS, 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
 from trailer_to_campaign.config import Settings
-from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
+from trailer_to_campaign.run_log import (
+    EXIT_AGENT_FAILED,
+    EXIT_FILM_BUDGET_REACHED,
+    RunLog,
+    check_film_slug,
+    read_events,
+)
 
 TRAPS = ("spoiler", "wrong_cast")
 REPORTS = "_eval"  # under runs/: a Film slug has no "_", so this never collides with a Film's Run Logs
@@ -455,13 +461,8 @@ def _film_summary(r: FilmResult) -> dict[str, Any]:
 
 def _watcher_numbers(r: FilmResult) -> dict[str, Any]:
     """The Watcher's own share of a Film's Run, read from its Run Log: what v0 and the SDK Watcher are compared on."""
-    events = []
-    if r.run_log is not None and r.run_log.exists():
-        for line in r.run_log.read_text(encoding="utf-8").splitlines():
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:  # a line cut short by Ctrl-C: the report must still be written
-                continue
+    # read_events skips a line cut short by Ctrl-C: the report must still be written.
+    events = read_events(r.run_log) if r.run_log is not None and r.run_log.exists() else []
     mine = [e for e in events if e.get("agent") == "watcher"]
     calls = [e for e in mine if e["event"] == "model_call"]
     return {

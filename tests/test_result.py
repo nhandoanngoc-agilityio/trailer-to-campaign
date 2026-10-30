@@ -48,14 +48,16 @@ def a_run(
     end: str | None,
     minutes: float = 10,
     rate: dict[str, Any] | None = None,
+    agent: str = "watcher",
+    extra: list[dict[str, Any]] | None = None,
 ) -> Path:
     """One Run Log under runs/<film>/<stamp>/, as the pipeline writes it; end=None is a Run killed mid-way."""
     folder = runs / FILM / stamp
     folder.mkdir(parents=True)
-    began = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    began = datetime.strptime(stamp[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
     start = began.isoformat()
-    lines: list[dict[str, Any]] = [{"event": "run_started", "at": start, "film": FILM}]
-    lines += [{"event": "model_call", "at": start, "agent": "watcher", "cost_usd": c} for c in costs]
+    lines: list[dict[str, Any]] = [{"event": "run_started", "at": start, "film": FILM}, *(extra or [])]
+    lines += [{"event": "model_call", "at": start, "agent": agent, "cost_usd": c} for c in costs]
     if rate is not None:
         lines.append({"event": "approval_rate", "at": start, **rate})
     if end is not None:
@@ -153,3 +155,62 @@ def test_bad_input_is_refused_before_anything_is_written(
 def test_a_film_with_no_runs_is_refused(tmp_path: Path, films: Path) -> None:
     with pytest.raises(ValueError, match="no Run Logs"):
         film_result(FILM, tmp_path / "runs", films, old_minutes=240, new_minutes=60)
+
+
+# From /code-review on #43.
+
+
+def test_eval_set_and_dummy_runs_are_not_launch_work(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    trial(runs)
+    a_run(runs, "20261102T050000Z", costs=["0.60"], end="completed", extra=[{"event": "eval_run", "at": "x"}])
+    a_run(runs, "20261102T060000Z", costs=["0.02"], end="completed", agent="dummy")
+    result = film_result(FILM, runs, films, old_minutes=240, new_minutes=60)
+    assert result.cost == Decimal("1.35") and len(result.runs) == 4  # as before: neither counts
+    assert result.left_out == 2
+    page = write_result(result, runs).read_text(encoding="utf-8")
+    assert "2 Eval Set or dummy Runs are left out" in page
+
+
+def test_a_completed_run_with_no_approved_posts_is_not_the_one_used(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    trial(runs)
+    a_run(runs, "20261102T050000Z", costs=["0.20"], end="completed", rate={**RATE, "social_posts": "0/6"})
+    result = film_result(FILM, runs, films, old_minutes=240, new_minutes=60)
+    assert result.used is not None and result.used.stamp == "20261102T040000Z"  # no Campaign came out of the last one
+
+
+def test_the_run_that_was_used_can_be_named(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    trial(runs)
+    result = film_result(FILM, runs, films, old_minutes=240, new_minutes=60, used_run="20261102T030000Z")
+    assert result.used is not None and result.approval["overall"] == "9/15"
+    with pytest.raises(ValueError, match="no completed Run"):
+        film_result(FILM, runs, films, old_minutes=240, new_minutes=60, used_run="20261102T010000Z")  # it failed
+
+
+def test_the_run_used_is_the_last_to_finish_not_the_last_folder(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    a_run(runs, "20261102T030000Z", costs=["0.40"], end="completed", minutes=120, rate=RATE)  # ends 05:00
+    a_run(runs, "20261102T040000Z", costs=["0.40"], end="completed", minutes=10, rate={**RATE, "overall": "1/15"})
+    a_run(runs, "20261102T030000Z-10", costs=["0.01"], end="error", minutes=1)
+    a_run(runs, "20261102T030000Z-2", costs=["0.01"], end="error", minutes=1)
+    result = film_result(FILM, runs, films, old_minutes=240, new_minutes=60)
+    assert result.used is not None and result.used.stamp == "20261102T030000Z"
+    assert [r.stamp for r in result.runs] == [
+        "20261102T030000Z", "20261102T030000Z-2", "20261102T030000Z-10", "20261102T040000Z"]  # fmt: skip
+
+
+def test_a_malformed_run_log_is_refused_with_a_message(tmp_path: Path, films: Path) -> None:
+    folder = a_run(tmp_path / "runs", "20261102T030000Z", costs=["0.40"], end="completed", rate=RATE)
+    log = folder / "run.jsonl"
+    log.write_text(log.read_text().replace('"total_usd": "0.40"', '"total_usd": "lots"') + "[1, 2]\n")
+    with pytest.raises(ValueError, match="20261102T030000Z"):
+        film_result(FILM, tmp_path / "runs", films, old_minutes=240, new_minutes=60)
+
+
+def test_a_slower_new_way_says_so(tmp_path: Path, films: Path) -> None:
+    trial(tmp_path / "runs")
+    result = film_result(FILM, tmp_path / "runs", films, old_minutes=60, new_minutes=90)
+    page = write_result(result, tmp_path / "runs").read_text(encoding="utf-8")
+    assert "Time Saved: none: Trailer-to-Campaign took 30 min longer (50%)" in page

@@ -64,3 +64,16 @@ class RunLog:
 
     def finish(self, total_usd: Decimal, stop_reason: str) -> None:
         self.event("run_finished", total_usd=total_usd, stop_reason=stop_reason)
+
+
+def read_events(path: Path) -> list[dict[str, Any]]:
+    """A Run Log's events, in order. A line cut short (a Run killed mid-write) or not an event is skipped."""
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events

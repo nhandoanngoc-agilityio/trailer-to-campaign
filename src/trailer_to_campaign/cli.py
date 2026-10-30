@@ -123,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--old-way", required=True, help="minutes the old way took, from that marketer's stopwatch")
     result.add_argument("--new-way", required=True, help="minutes Trailer-to-Campaign took, timed the same way")
     result.add_argument("--runs-dir", type=Path, help="where the Film's Run Logs are (default: runs/)")
+    result.add_argument(
+        "--run", help="the Run whose Campaign was used, by its folder (default: the last to finish that gave one)"
+    )
 
     for watching in (run, watch, evaluate, slack):
         watching.add_argument(
@@ -362,19 +365,37 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     return 0
 
 
-def side_by_side(film: str, old_way: str, new_way: str, runs_dir: Path, settings: Settings) -> int:
+def side_by_side(
+    film: str, old_way: str, new_way: str, runs_dir: Path, settings: Settings, used_run: str | None = None
+) -> int:
     """T12's one-page result from the Film's Run Logs and the two stopwatch times. Reads files only."""
     from trailer_to_campaign.result import film_result, write_result
 
     try:
-        result = film_result(film, runs_dir, settings.films_dir, old_minutes=old_way, new_minutes=new_way)
+        result = film_result(
+            film, runs_dir, settings.films_dir, old_minutes=old_way, new_minutes=new_way, used_run=used_run
+        )
     except ValueError as err:
         print(err, file=sys.stderr)
         return 2
-    page = write_result(result, runs_dir)
+    try:
+        page = write_result(result, runs_dir)
+    except OSError as err:  # never pass the OS message on: it holds the local path
+        print(f"could not write the result for {film} ({type(err).__name__})", file=sys.stderr)
+        return 2
     print(page.read_text(encoding="utf-8"))
-    print(f"Written to {Path(runs_dir.name) / film / page.name} (gitignored: share the numbers once the team agrees)")
+    print(f"Written: {_where(runs_dir, film)} (gitignored: share the numbers once the team agrees)")
     return 0
+
+
+def _where(runs_dir: Path, film: str) -> str:
+    """Where the result went, without printing a local path the person didn't type."""
+    if not runs_dir.is_absolute():
+        return f"{runs_dir / film / 'result.md'} and result.json"
+    try:
+        return f"{runs_dir.relative_to(Path.cwd()) / film / 'result.md'} and result.json"
+    except ValueError:
+        return f"{film}/result.md and result.json under the --runs-dir folder"
 
 
 def serve_footage(settings: Settings) -> int:
@@ -447,6 +468,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             new_way=args.new_way,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
+            used_run=args.run,
         )
     if args.command == "eval":
         return run_eval_set(

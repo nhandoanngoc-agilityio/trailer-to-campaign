@@ -6,9 +6,11 @@
 One marketer prepares the Film's posts the old way and another uses Trailer-to-Campaign,
 each timing their own active work with a stopwatch (docs/side-by-side.md). Those two
 times give Time Saved. Everything else comes from the Film's own Run Logs:
-- cost per Film is the sum of every Run, re-runs and failures included, since the Film
-  Budget caps each Run, not the Film; a Run killed mid-way counts what its model calls spent;
-- the Approval Rate is the Run whose Campaign was used: the last completed one with Approval;
+- cost per Film is the sum of every launch Run, re-runs and failures included, since the Film
+  Budget caps each Run, not the Film; a Run killed mid-way counts what its model calls spent.
+  Eval Set and dummy Runs of the Film are left out: they are not launch work;
+- the Approval Rate is the Run whose Campaign was used: by default the last Run to finish that
+  gave a Campaign (completed, at least one Social Post approved), or the one named with --run;
 - each Run's Run Log time (start to finish) is shown beside the stopwatch, as a check only:
   it includes any wait for the Marketer at Approval.
 
@@ -22,12 +24,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from trailer_to_campaign.catalog import load_film
-from trailer_to_campaign.run_log import check_film_slug
+from trailer_to_campaign.pipeline import LIGHT_EDIT_FLAG
+from trailer_to_campaign.run_log import check_film_slug, read_events
 
 UNFINISHED = "did not finish"
 
@@ -37,8 +40,23 @@ class RunSummary:
     stamp: str  # the Run's folder under runs/<film>/
     ended: str  # completed, film_budget_reached, error, or "did not finish"
     cost: Decimal
-    minutes: Decimal | None  # Run Log time, start to finish; None if it never finished
+    started: datetime | None
+    finished: datetime | None
     approval: dict[str, Any] | None  # its approval_rate event, if it reached one
+    launch: bool = True  # False for an Eval Set or dummy Run: not launch work, so not counted
+
+    @property
+    def minutes(self) -> Decimal | None:
+        """Run Log time, start to finish; None if it never finished."""
+        if self.started is None or self.finished is None:
+            return None
+        return Decimal(str(round((self.finished - self.started).total_seconds() / 60, 1)))
+
+    @property
+    def gave_a_campaign(self) -> bool:
+        """Completed, with Approval, and at least one Social Post approved: a Campaign came out of it."""
+        posts = (self.approval or {}).get("social_posts", "0/0")
+        return self.ended == "completed" and self.approval is not None and _done(posts) > 0
 
 
 @dataclass(frozen=True)
@@ -47,17 +65,13 @@ class FilmResult:
     title: str
     old_minutes: Decimal
     new_minutes: Decimal
-    runs: list[RunSummary] = field(default_factory=list)
+    runs: list[RunSummary] = field(default_factory=list)  # launch Runs, in the order they started
+    used: RunSummary | None = None  # the Run whose Campaign was used
+    left_out: int = 0  # Eval Set and dummy Runs of the Film, not counted
 
     @property
     def cost(self) -> Decimal:
         return sum((r.cost for r in self.runs), Decimal(0))
-
-    @property
-    def used(self) -> RunSummary | None:
-        """The Run whose Campaign was used: the last completed one with Approval."""
-        done = [r for r in self.runs if r.ended == "completed" and r.approval is not None]
-        return done[-1] if done else None
 
     @property
     def approval(self) -> dict[str, Any]:
@@ -76,17 +90,46 @@ class FilmResult:
         return sum((r.minutes for r in self.runs if r.minutes is not None), Decimal(0))
 
 
+Minutes = str | float | Decimal  # from the command line, minutes arrive as text
+
+
 def film_result(
-    film: str, runs_dir: Path, films_dir: Path, *, old_minutes: float | Decimal, new_minutes: float | Decimal
+    film: str,
+    runs_dir: Path,
+    films_dir: Path,
+    *,
+    old_minutes: Minutes,
+    new_minutes: Minutes,
+    used_run: str | None = None,
 ) -> FilmResult:
-    """Read every Run Log of the Film. Refuses bad input before anything is written."""
+    """Read every Run Log of the Film. Refuses bad input before anything is written.
+
+    used_run names the Run whose Campaign was used; by default it is the last Run to finish
+    that gave a Campaign (completed, with at least one Social Post approved)."""
     check_film_slug(film)
     old, new = _minutes(old_minutes, "old-way"), _minutes(new_minutes, "new-way")
     title = load_film(films_dir, film).catalog.title
-    logs = sorted((runs_dir / film).glob("*/run.jsonl"))
-    if not logs:
+    every = [_summary(log) for log in (runs_dir / film).glob("*/run.jsonl")]
+    runs = sorted((r for r in every if r.launch), key=_started_order)
+    if not runs:
         raise ValueError(f"no Run Logs for {film} under {runs_dir.name}/{film}/: run the Film first")
-    return FilmResult(film, title, old, new, [_summary(log) for log in logs])
+    return FilmResult(film, title, old, new, runs, _used(runs, used_run), len(every) - len(runs))
+
+
+def _used(runs: list[RunSummary], named: str | None) -> RunSummary | None:
+    if named is not None:
+        match = [r for r in runs if r.stamp == named and r.ended == "completed" and r.approval is not None]
+        if not match:
+            raise ValueError(f"no completed Run with Approval named {named!r}; see the Runs under runs/<film>/")
+        return match[0]
+    campaigns = [r for r in runs if r.gave_a_campaign]
+    return max(campaigns, key=lambda r: r.finished or datetime.min) if campaigns else None
+
+
+def _started_order(r: RunSummary) -> tuple[Any, ...]:
+    """By start time; Runs started in the same second by their folder's suffix (-2 before -10)."""
+    base, _, n = r.stamp.partition("-")
+    return (r.started is None, r.started or datetime.min, base, int(n) if n.isdigit() else 0)
 
 
 def write_result(result: FilmResult, runs_dir: Path) -> Path:
@@ -97,7 +140,7 @@ def write_result(result: FilmResult, runs_dir: Path) -> Path:
     return page
 
 
-def _minutes(value: float | Decimal, which: str) -> Decimal:
+def _minutes(value: Minutes, which: str) -> Decimal:
     try:
         minutes = Decimal(str(value))
     except ArithmeticError:
@@ -108,25 +151,45 @@ def _minutes(value: float | Decimal, which: str) -> Decimal:
 
 
 def _summary(log: Path) -> RunSummary:
-    events = []
-    for line in log.read_text(encoding="utf-8").splitlines():
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:  # a line cut short when the Run was killed: the rest still counts
-            continue
+    stamp = log.parent.name
+    events = read_events(log)  # a line cut short when the Run was killed is skipped: the rest still counts
     started = next((e for e in events if e.get("event") == "run_started"), None)
     finished = next((e for e in reversed(events) if e.get("event") == "run_finished"), None)
     approval = next((e for e in reversed(events) if e.get("event") == "approval_rate"), None)
+    launch = not any(e.get("event") == "eval_run" or e.get("agent") == "dummy" for e in events)
     if finished is not None:
-        cost, ended = Decimal(finished["total_usd"]), finished.get("stop_reason") or UNFINISHED
+        cost, ended = _money(finished.get("total_usd"), stamp), finished.get("stop_reason") or UNFINISHED
     else:  # killed mid-Run: what its model calls spent was still spent
-        cost = sum((Decimal(e["cost_usd"]) for e in events if e.get("event") == "model_call"), Decimal(0))
+        calls = [e for e in events if e.get("event") == "model_call"]
+        cost = sum((_money(e.get("cost_usd"), stamp) for e in calls), Decimal(0))
         ended = UNFINISHED
-    minutes = None
-    if started is not None and finished is not None:
-        seconds = (datetime.fromisoformat(finished["at"]) - datetime.fromisoformat(started["at"])).total_seconds()
-        minutes = Decimal(str(round(seconds / 60, 1)))
-    return RunSummary(log.parent.name, ended, cost, minutes, approval)
+    return RunSummary(stamp, ended, cost, _when(started, stamp), _when(finished, stamp), approval, launch)
+
+
+def _money(value: Any, stamp: str) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        amount = Decimal("NaN")
+    if value is None or not amount.is_finite():
+        raise ValueError(f"the Run Log {stamp}/run.jsonl has a cost that isn't an amount: {value!r}")
+    return amount
+
+
+def _when(event: dict[str, Any] | None, stamp: str) -> datetime | None:
+    if event is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(event.get("at")))
+    except ValueError:
+        raise ValueError(f"the Run Log {stamp}/run.jsonl has a time that can't be read: {event.get('at')!r}") from None
+
+
+def _done(fraction: str) -> int:
+    try:
+        return int(str(fraction).split("/")[0])
+    except ValueError:
+        return 0
 
 
 def _rate(fraction: str) -> str:
@@ -144,13 +207,17 @@ def _plural(n: int, word: str) -> str:
 
 def _page(r: FilmResult) -> str:
     a = r.approval
+    if r.time_saved >= 0:
+        saved = f"- Time Saved: {r.time_saved:g} min ({r.time_saved_share:.0%})"
+    else:
+        saved = f"- Time Saved: none: Trailer-to-Campaign took {-r.time_saved:g} min longer ({-r.time_saved_share:.0%})"
     lines = [
         f"# {r.title}: side by side",
         "",
-        f"- Time Saved: {r.time_saved:g} min ({r.time_saved_share:.0%})",
+        saved,
         f"- Approval Rate: {_rate(a['overall'])}"
         if a
-        else "- Approval Rate: not finished (no completed Run with Approval)",
+        else "- Approval Rate: not finished (no completed Run that gave a Campaign)",
         f"- Cost per Film: ${r.cost:.4f} over {_plural(len(r.runs), 'Run')}",
         "",
         "## How it was measured",
@@ -162,7 +229,13 @@ def _page(r: FilmResult) -> str:
         f"- The Run Logs add up to {r.run_log_minutes:g} min from start to finish. That includes any wait for the "
         "Marketer at Approval, so it is a check on the stopwatch, not the measure.",
         "- Cost per Film is every Run's cost: the Film Budget caps each Run, not the Film, so re-runs and failed "
-        "Runs count.",
+        "Runs count."
+        + (
+            f" {_plural(r.left_out, 'Eval Set or dummy Run')} {'is' if r.left_out == 1 else 'are'} left out: "
+            "not launch work."
+            if r.left_out
+            else ""
+        ),
     ]
     if a:
         light, heavy = a.get("light_edit_change") or {}, a.get("heavy_edit_change") or {}
@@ -175,7 +248,8 @@ def _page(r: FilmResult) -> str:
             f"- Social Posts: {_rate(a.get('social_posts', '?'))}",
             f"- Light Edits: {light.get('count', 0)}, mean measured change {_share(light.get('mean'))}; "
             f"heavy edits: {heavy.get('count', 0)}, mean {_share(heavy.get('mean'))}",
-            f"- Light Edits that changed over {_share(a.get('light_edit_flag', 0.3))} of the words: {len(flagged)}",
+            f"- Light Edits that changed over {_share(a.get('light_edit_flag', LIGHT_EDIT_FLAG))} of the words: "
+            f"{len(flagged)}",
         ]
     lines += ["", "## Runs", "", "| Run | Ended | Cost | Run Log time |", "|---|---|---|---|"]
     lines += [

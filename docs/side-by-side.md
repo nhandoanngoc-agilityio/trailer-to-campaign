@@ -31,10 +31,10 @@ Write your minutes down as soon as you stop: A's and B's, to the minute.
 uv run t2c result --film <film> --old-way <A's minutes> --new-way <B's minutes>
 ```
 
-This writes `runs/<film>/result.md`:
-- **Time Saved:** A's minutes minus B's.
-- **Approval Rate:** from the Run whose Campaign was used.
-- **Cost per Film:** every Run of the Film added up, re-runs and failed Runs included, since the Film Budget caps each Run, not the Film.
+This writes `runs/<film>/result.md`, plus `result.json` with the same numbers:
+- **Time Saved:** A's minutes minus B's. If B took longer, the page says so.
+- **Approval Rate:** from the Run whose Campaign was used. By default that's the last Run to finish that gave a Campaign (completed, with at least one Social Post approved). If that isn't the one you used, name it: `--run <its folder under runs/<film>/>`.
+- **Cost per Film:** every Run of the Film added up, re-runs and failed Runs included, since the Film Budget caps each Run, not the Film. Eval Set and `dummy-run` Runs are left out, because they aren't launch work.
 - Each Run's Run Log time, beside the stopwatch, as a check.
 
-The page holds the Film's title and numbers only, never a post or a plot point. It stays gitignored next to the Run Logs. Once the team agrees, a copy goes to `docs/results/` for the talk (T13).
+The pages hold the Film's title and numbers only, never a post or a plot point. They stay gitignored next to the Run Logs. Once the team agrees, a copy of both goes to `docs/results/` for the talk (T13).

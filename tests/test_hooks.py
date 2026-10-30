@@ -52,6 +52,8 @@ def git_switch_main(repo: Path) -> None:
         "git add .env",
         "git add config/.env.local",
         "bash -c 'git push -f'",
+        "rm -r '' -f build",  # an empty argument is not a separator (found in T14)
+        "git status\ngit push -f origin t1-skeleton",  # a newline separates commands (T14 /code-review)
     ],
 )
 def test_blocks_forbidden_commands(repo: Path, command: str) -> None:
@@ -75,6 +77,104 @@ def test_allows_normal_commands(repo: Path, command: str) -> None:
     result = run_hook("block_forbidden.py", {"command": command}, repo)
     assert result.returncode == 0, result.stderr
     assert "permissionDecision" not in result.stdout
+
+
+# T14: the Answer Key (evals/expected/) is human-owned. A tripwire for obvious shell writes, not a sandbox.
+
+ANSWER_KEY_WRITES = [
+    "echo x > evals/expected/charge.toml",
+    "echo x >evals/expected/charge.toml",
+    "echo x >> evals/expected/charge.toml",
+    "uv run t2c eval 2> evals/expected/log.txt",
+    "uv run t2c eval &> evals/expected/log.txt",
+    "cp notes.toml evals/expected/charge.toml",
+    "cp notes.toml evals/expected/",
+    "cp -t evals/expected notes.toml",
+    "cp --target-directory=evals/expected notes.toml",
+    "mv evals/expected/charge.toml /tmp/",
+    "mv notes.toml evals/expected/",
+    "cat notes.toml | tee evals/expected/charge.toml",
+    "tee -a evals/expected/charge.toml < notes.toml",
+    "rm evals/expected/charge.toml",
+    "touch evals/expected/new.toml",
+    "sed -i 's/a/b/' evals/expected/charge.toml",
+    "sed -i.bak 's/a/b/' evals/expected/charge.toml",
+    "sed -i '' 's/a/b/' evals/expected/charge.toml",
+    "sed --in-place 's/a/b/' evals/expected/charge.toml",
+    "git checkout -- evals/expected/charge.toml",
+    "git checkout main evals/expected/",
+    "git restore evals/expected/charge.toml",
+    "git rm evals/expected/charge.toml",
+    "git mv evals/expected/charge.toml evals/expected/old.toml",
+    # the same writes, spelled differently
+    "touch ./evals/expected/new.toml",
+    "touch /Users/someone/trailer-to-campaign/evals/expected/new.toml",
+    "cd evals/expected && touch new.toml",
+    "cd evals && sed -i 's/a/b/' expected/charge.toml",
+    "bash -c 'cp notes.toml evals/expected/charge.toml'",
+    "sudo rm evals/expected/charge.toml",
+    # from /code-review on #45
+    "echo hi\ntouch evals/expected/x.toml",
+    "echo hi>evals/expected/x.toml",
+    "cat a>>evals/expected/b.toml",
+    "echo x >| evals/expected/a.toml",
+    "rm -r evals",
+    "git checkout -- evals",
+    "git checkout .",
+    "git restore .",
+    "mv evals evals_old",
+    "sed -Ei 's/a/b/' evals/expected/x.toml",
+    "git -C evals checkout -- expected/a.toml",
+    "cp -at evals/expected notes.toml",
+    "(cd evals/expected && touch x.toml)",
+    "cat > evals/expected/x.toml <<'EOF'\nfilms = []\nEOF",
+    "cat <<'EOF' > notes.md\nhi\nEOF\ntouch evals/expected/x.toml",  # a command after the heredoc still counts
+]
+
+ANSWER_KEY_READS = [
+    "cat evals/expected/charge.toml",
+    "ls evals/expected/",
+    "diff evals/expected/charge.toml /tmp/charge.toml",
+    "grep spoiler evals/expected/charge.toml",
+    "cp evals/expected/charge.toml /tmp/",
+    "sed -n 1,5p evals/expected/charge.toml",
+    "git diff -- evals/expected/",
+    "git log -- evals/expected/",
+    "git show HEAD:evals/expected/charge.toml > /tmp/charge.toml",
+    "echo hi > evals/drafts/charge.toml",
+    "cd evals/expected && cat charge.toml",
+    # from /code-review on #45
+    'grep ">" evals/expected/charge.toml',
+    "bash -c 'cd evals/expected' && touch notes.toml",  # bash -c's cd ends with that shell
+    "git checkout main",
+    "git checkout -b t14-guard",
+    "uv run t2c eval 2>&1 | tee /tmp/eval.log",
+    "cp notes.toml backup.toml 2> /tmp/err.log",
+    # a heredoc's body is text, not commands, even now that newlines separate commands
+    "cat > notes.md <<'EOF'\nNever run git push --force or rm -rf build.\nEOF",
+    "cat >> notes.md <<EOF\ntouch evals/expected/x.toml\nEOF\necho done",
+]
+
+
+@pytest.mark.parametrize("command", ANSWER_KEY_WRITES)
+def test_blocks_shell_writes_to_the_answer_key(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
+@pytest.mark.parametrize("command", ANSWER_KEY_READS)
+def test_allows_reading_the_answer_key(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("command", ["touch expected/x.toml", "sed -i 's/a/b/' expected/charge.toml", "rm -r expected"])
+def test_a_shell_already_inside_evals_is_still_guarded(repo: Path, command: str) -> None:
+    # Claude's Bash keeps its directory between calls: an earlier `cd evals` leaves the shell there.
+    result = run_hook("block_forbidden.py", {"command": command}, repo / "evals")
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
 
 
 def test_blocks_commit_on_main(repo: Path) -> None:
@@ -133,3 +233,55 @@ def test_settings_wire_every_hook_file() -> None:
     settings = (HOOKS.parent / "settings.json").read_text()
     for hook in HOOKS.glob("*.py"):
         assert hook.name in settings, f"{hook.name} exists but is not wired in settings.json"
+
+
+# --- .githooks/pre-commit (T14): an Answer Key change needs a person to say so -------
+
+GITHOOKS = HOOKS.parent.parent / ".githooks"
+
+
+def commit(repo: Path, path: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    import os
+
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / path).write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", path], check=True)
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+    )
+
+
+@pytest.fixture
+def hooked(repo: Path) -> Path:
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(GITHOOKS)], check=True)
+    return repo
+
+
+def test_pre_commit_refuses_an_answer_key_change(hooked: Path) -> None:
+    result = commit(hooked, "evals/expected/charge.toml")
+    assert result.returncode != 0
+    assert "Answer Key" in result.stderr and "T2C_ANSWER_KEY_EDIT=1" in result.stderr
+
+
+def test_pre_commit_lets_a_person_change_the_answer_key_on_purpose(hooked: Path) -> None:
+    assert commit(hooked, "evals/expected/charge.toml", {"T2C_ANSWER_KEY_EDIT": "1"}).returncode == 0
+
+
+def test_pre_commit_lets_everything_else_through(hooked: Path) -> None:
+    assert commit(hooked, "evals/films/charge/film.toml").returncode == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "T2C_ANSWER_KEY_EDIT=1 git commit -m x",
+        "export T2C_ANSWER_KEY_EDIT=1 && git commit -m x",
+        "env T2C_ANSWER_KEY_EDIT=1 git commit -m x",
+    ],
+)
+def test_the_answer_key_override_is_for_people_only(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2 and "T2C_ANSWER_KEY_EDIT" in result.stderr

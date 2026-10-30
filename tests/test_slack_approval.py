@@ -118,13 +118,46 @@ def test_stopping_the_app_never_approves() -> None:
         slack.social_post(1, 6, POST, no_recheck)
 
 
-def test_a_post_is_decided_and_a_flagged_one_shows_its_problems() -> None:
-    slack, client = approver()
+def test_a_flagged_posts_reasons_go_only_to_the_marketers() -> None:
+    """The Checker's reasons can describe the spoiler: the channel sees that a post was flagged, not why."""
+    client = FakeClient()
+    slack = SlackApprover(client, "C0TEST", "1.0", frozenset({MARKETER, "U07SECOND"}), run_id="run1")
     slack.click("t2c_approve", "run1:post1", MARKETER)
     slack.click("t2c_reject", "run1:post2", MARKETER)
     assert slack.social_post(1, 6, POST, no_recheck) == PostDecision("approve", by=MARKETER)
     assert slack.social_post(2, 6, FLAGGED, no_recheck) == PostDecision("reject", by=MARKETER)
-    assert "FLAGGED" in text_of(client.posted[1]) and "gives away the ending" in text_of(client.posted[1])
+
+    in_channel = text_of(client.posted[1]) + " " + text_of(client.updated[1])
+    assert "FLAGGED" in in_channel and "gives away the ending" not in in_channel
+    assert "ending-capture" not in in_channel  # a Spoiler List id can say too much
+    privately = {e["user"]: e["text"] for e in client.ephemeral}
+    assert set(privately) == {MARKETER, "U07SECOND"}
+    assert all("gives away the ending" in text for text in privately.values())
+
+
+# From /code-review: a Slack hiccup never loses a decision, and a long draft still fits.
+
+
+class UpdateFails(FakeClient):
+    def chat_update(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
+        raise RuntimeError("message_not_found")
+
+
+def test_a_decision_survives_a_failed_message_update() -> None:
+    client = UpdateFails()
+    slack = SlackApprover(client, "C0TEST", "1.0", frozenset({MARKETER}), run_id="run1")
+    slack.click("t2c_approve", "run1:km1", MARKETER)
+    assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision("approve", by=MARKETER)
+
+
+def test_a_long_draft_is_split_into_blocks_slack_accepts() -> None:
+    long_post = CheckedPost(SocialPost("instagram", "en", "&<> " * 700 + "Stream it now.", []), "passed", [], 0)
+    slack, client = approver()
+    slack.click("t2c_approve", "run1:post1", MARKETER)
+    slack.social_post(1, 6, long_post, no_recheck)
+    sections = [b for b in client.posted[0]["blocks"] if b["type"] == "section"]
+    assert len(sections) > 1 and all(len(s["text"]["text"]) <= 3000 for s in sections)
+    assert "Stream it now." in text_of(client.posted[0])
 
 
 def test_model_text_cannot_ping_or_link_in_slack() -> None:

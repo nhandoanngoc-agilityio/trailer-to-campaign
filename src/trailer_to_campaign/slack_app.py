@@ -98,9 +98,13 @@ class FrontDoor:
             log.exception("the Run for %s stopped", request.film)
             print(f"The Run stopped with an error ({type(err).__name__}). Its Run Log has the details.", file=thread)
         finally:
-            thread.flush()
+            # Free the app first: a failed last post must never leave every later request "in progress".
             self._approvers.pop(run_id, None)
             self._busy.release()
+            try:
+                thread.flush()
+            except Exception:
+                log.warning("could not post the end of the Run for %s", request.film, exc_info=True)
 
     def handle_action(self, body: dict[str, Any], client: Any) -> None:
         user, channel = body["user"]["id"], body["channel"]["id"]

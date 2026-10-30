@@ -338,7 +338,9 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     try:
         SocketModeHandler(app, app_token).start()
     except KeyboardInterrupt:
-        log.info("stopping: any Run waiting on Approval ends in an error")
+        # A Run waiting on Approval ends now. One mid-stage finishes that stage (inside its Film Budget)
+        # and ends at its next Approval point: stopping it mid-call would lose its Run Log's total.
+        log.info("stopping: a Run waiting on Approval ends now, in an error; one mid-stage ends at its next Approval")
     finally:
         door.close()
     return 0

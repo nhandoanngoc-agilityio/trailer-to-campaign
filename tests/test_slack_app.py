@@ -194,3 +194,30 @@ def test_a_run_that_crashes_says_so_and_frees_the_app(films: Path) -> None:
     runs.body = lambda approver: 0
     front.handle_mention(mention("agent-327", ts="100.2"), client)
     assert len(runs.started) == 2
+
+
+def test_the_app_is_freed_even_if_the_last_post_to_the_thread_fails(
+    films: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trailer_to_campaign import slack_app
+
+    class FailingThread(SlackThread):
+        def flush(self) -> None:
+            raise RuntimeError("ratelimited")
+
+        def close(self) -> None:  # the stream's finalizer would flush again
+            pass
+
+    def like_a_thread(work: Any) -> None:  # an error in a worker thread never reaches handle_mention
+        try:
+            work()
+        except RuntimeError:
+            pass
+
+    monkeypatch.setattr(slack_app, "SlackThread", FailingThread)
+    runs, client = Runs(), FakeClient()
+    front = door(films, runs, start=like_a_thread)
+    front.handle_mention(mention("agent-327", ts="100.1"), client)
+    front.handle_mention(mention("agent-327", ts="100.2"), client)
+    assert len(runs.started) == 2  # not stuck "in progress"
+    assert front.waiting_run_ids() == []

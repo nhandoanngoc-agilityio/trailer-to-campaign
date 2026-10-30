@@ -99,8 +99,10 @@ def run_film(
 ) -> int:
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
-    run = _Run(film, run_log, meter, out)
-    print(f"Run for {film} with a Film Budget of ${budget}; log at {run_log.path}", file=out)
+    # The Run by its place under runs/, never a path on this machine: in Slack the whole channel reads it.
+    where = Path(runs_dir.name) / run_log.path.parent.relative_to(runs_dir)
+    run = _Run(film, run_log, meter, out, where)
+    print(f"Run for {film} with a Film Budget of ${budget}; its Run Log is in {where}/", file=out)
     try:
         run.go(stages, approver)
     except FilmBudgetReached as err:
@@ -117,8 +119,8 @@ def run_film(
 
 
 class _Run:
-    def __init__(self, film: str, run_log: RunLog, meter: FilmMeter, out: TextIO) -> None:
-        self.film, self.run_log, self.meter, self.out = film, run_log, meter, out
+    def __init__(self, film: str, run_log: RunLog, meter: FilmMeter, out: TextIO, where: Path) -> None:
+        self.film, self.run_log, self.meter, self.out, self.where = film, run_log, meter, out, where
         self.decisions: dict[str, list[bool]] = {"key_moments": [], "social_posts": []}  # approved light or unedited?
         self.km_record: list[dict[str, Any]] = []  # what the marketer decided, kept however the Run ends
         self.posts_record: list[dict[str, Any]] = []
@@ -212,7 +214,7 @@ class _Run:
                 f"Approval Rate (approved unedited or with a Light Edit): Key Moments {rates['key_moments']}, "
                 f"Social Posts {rates['social_posts']}, overall {rates['overall']}."
             )
-        self.say(f"Files are next to the Run Log: {self.run_log.path.parent}")
+        self.say(f"Files are next to the Run Log, in {self.where}/")
         return code
 
 

@@ -20,6 +20,8 @@ eval runs the Eval Set (ADR 0008): one Eval Set Run per Film, scored against its
 Answer Key, with no Approval, so it needs no person and runs unattended.
 run, watch, eval and slack take --watcher v0|sdk: the Watcher on its own loop (the
 default) or on the Claude Agent SDK (T11).
+result writes a real Film's side-by-side page (T12): Time Saved from the two
+marketers' stopwatch times, and the Approval Rate and cost per Film from its Run Logs.
 """
 
 from __future__ import annotations
@@ -115,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
     slack.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    result = commands.add_parser("result", help="the side-by-side result for a real Film: Time Saved, Approval, cost")
+    result.add_argument("--film", type=_film_arg, required=True)
+    result.add_argument("--old-way", required=True, help="minutes the old way took, from that marketer's stopwatch")
+    result.add_argument("--new-way", required=True, help="minutes Trailer-to-Campaign took, timed the same way")
+    result.add_argument("--runs-dir", type=Path, help="where the Film's Run Logs are (default: runs/)")
 
     for watching in (run, watch, evaluate, slack):
         watching.add_argument(
@@ -354,6 +362,21 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     return 0
 
 
+def side_by_side(film: str, old_way: str, new_way: str, runs_dir: Path, settings: Settings) -> int:
+    """T12's one-page result from the Film's Run Logs and the two stopwatch times. Reads files only."""
+    from trailer_to_campaign.result import film_result, write_result
+
+    try:
+        result = film_result(film, runs_dir, settings.films_dir, old_minutes=old_way, new_minutes=new_way)
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        return 2
+    page = write_result(result, runs_dir)
+    print(page.read_text(encoding="utf-8"))
+    print(f"Written to {Path(runs_dir.name) / film / page.name} (gitignored: share the numbers once the team agrees)")
+    return 0
+
+
 def serve_footage(settings: Settings) -> int:
     from trailer_to_campaign.footage.sources import YtDlpDownloader
     from trailer_to_campaign.footage.transcript import FasterWhisperTranscriber
@@ -414,6 +437,14 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             film=args.film,
             key_moments_file=args.key_moments,
             budget=args.budget or settings.film_budget_usd,
+            runs_dir=args.runs_dir or settings.runs_dir,
+            settings=settings,
+        )
+    if args.command == "result":
+        return side_by_side(
+            film=args.film,
+            old_way=args.old_way,
+            new_way=args.new_way,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
         )

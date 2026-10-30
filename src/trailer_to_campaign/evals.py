@@ -322,6 +322,9 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
     except AgentFailed as err:
         stop = "error"
         result.errors.append(str(err))
+    except Exception as err:  # e.g. an API timeout: it ends this Film's Run, never the other Films' scores
+        stop = "error"
+        result.errors.append(f"{type(err).__name__}: {err}")
     except BaseException:
         run_log.finish(meter.spent, "error")  # Ctrl-C or a crash still leaves the total
         raise
@@ -339,24 +342,21 @@ def run_eval(
 ) -> int:
     """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly."""
     out = out or sys.stdout  # looked up now, not at import, so a redirected stdout is the one written to
-    results = []
+    results: list[FilmResult] = []
     for film in films:
         if film.key is None:
             result = FilmResult(film.slug, None)
             print(f"{film.slug:20} skipped (not on this clone)", file=out, flush=True)
         else:
             print(f"{film.slug:20} running...", file=out, flush=True)
-            result = evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film.slug))
+            try:
+                result = evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film.slug))
+            except BaseException:  # Ctrl-C: the Films already run were paid for, so their report is still written
+                _write_report(results, runs_dir, out, interrupted=film.slug)
+                raise
             print(f"{film.slug:20} {_film_line(result)}", file=out, flush=True)
         results.append(result)
-
-    summary = _summary(results)
-    report_dir = _report_dir(runs_dir)
-    (report_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    (report_dir / "report.md").write_text(_report(summary, results), encoding="utf-8")
-    for line in _totals_lines(summary):
-        print(line, file=out)
-    print(f"Report: {report_dir / 'report.md'}", file=out)
+    _write_report(results, runs_dir, out)
 
     ran = [r for r in results if r.key is not None]
     if any(r.stop == "film_budget_reached" for r in ran):
@@ -364,6 +364,20 @@ def run_eval(
     if any(r.stop == "error" or r.errors for r in ran):
         return EXIT_AGENT_FAILED
     return 0
+
+
+def _write_report(results: list[FilmResult], runs_dir: Path, out: TextIO, interrupted: str | None = None) -> None:
+    summary = _summary(results)
+    if interrupted:
+        summary["interrupted"] = interrupted  # this Film and the ones after it were not run
+    report_dir = _report_dir(runs_dir)
+    (report_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    (report_dir / "report.md").write_text(_report(summary, results), encoding="utf-8")
+    for line in _totals_lines(summary):
+        print(line, file=out)
+    if interrupted:
+        print(f"Interrupted during {interrupted}: the totals cover only the Films above.", file=out)
+    print(f"Report: {report_dir / 'report.md'}", file=out)
 
 
 def _film_line(r: FilmResult) -> str:

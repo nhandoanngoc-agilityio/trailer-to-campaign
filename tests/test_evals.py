@@ -138,12 +138,19 @@ class FakeStages:
         ]
         self.pipeline_verdicts: list[Verdict] = [Verdict(False, [spoiler("the-ending", "but the scout leader")])]
         self.watch_raises: BaseException | None = None
+        self.write_raises: dict[str, BaseException] = {}  # by Film: one Film's failure, the others fine
         self.posts = [
             CheckedPost(SocialPost("facebook", "en", "Alpha. Stream it now.", []), "passed", [], 1),
         ]
 
     def stages(self, film: str) -> EvalStages:
-        return EvalStages(check=self.check, watch=self.watch, write_and_check=self.write_and_check)
+        async def write_and_check(moments: list[KeyMoment], meter: FilmMeter, seen: list[Verdict]) -> Any:
+            if film in self.write_raises:
+                spend(meter, "copywriter")
+                raise self.write_raises[film]
+            return await self.write_and_check(moments, meter, seen)
+
+        return EvalStages(check=self.check, watch=self.watch, write_and_check=write_and_check)
 
     async def check(self, posts: list[SocialPost], meter: FilmMeter) -> list[Verdict]:
         self.order.append("check")
@@ -320,6 +327,33 @@ def test_the_film_budget_in_the_watcher_keeps_the_planted_draft_score(eval_dir: 
     assert alpha["input_traps"] == {"caught": 0, "total": 1, "not_caught": ["the-ending"]}
     assert run_log(tmp_path, "alpha")[-1]["stop_reason"] == "film_budget_reached"
     assert code == 3
+
+
+def test_an_unexpected_error_ends_that_films_run_and_the_eval_goes_on(eval_dir: Path, tmp_path: Path) -> None:
+    """A model call that times out (an API error, not AgentFailed) must not lose every other Film's score."""
+    fake = FakeStages()
+    fake.write_raises["alpha"] = TimeoutError("the Copywriter's model call timed out")
+    code, out = run(eval_dir, tmp_path, fake)
+    alpha, beta, _ = summary(tmp_path)["films"]
+    assert alpha["stop"] == "error"
+    assert alpha["errors"] == ["TimeoutError: the Copywriter's model call timed out"]
+    assert alpha["planted"]["caught"] == 1  # scored before the failure, so kept
+    assert Decimal(alpha["cost_usd"]) > 0
+    assert run_log(tmp_path, "alpha")[-1]["stop_reason"] == "error"
+    assert beta["stop"] == "completed"
+    assert "Planted Drafts: caught 2 of 4" in out
+    assert code == 1
+
+
+def test_ctrl_c_still_writes_the_report_for_the_films_already_run(eval_dir: Path, tmp_path: Path) -> None:
+    fake = FakeStages()
+    fake.write_raises["beta"] = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        run(eval_dir, tmp_path, fake)
+    data = summary(tmp_path)
+    assert [f["film"] for f in data["films"]] == ["alpha"]
+    assert data["interrupted"] == "beta"
+    assert run_log(tmp_path, "beta")[-1]["stop_reason"] == "error"
 
 
 def test_an_eval_run_asks_for_and_records_no_approval(

@@ -22,6 +22,7 @@ from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.config import Settings
 from trailer_to_campaign.evals import (
     AnswerKeyError,
+    EvalFilm,
     EvalStages,
     load_answer_key,
     prepare,
@@ -143,11 +144,11 @@ class FakeStages:
             CheckedPost(SocialPost("facebook", "en", "Alpha. Stream it now.", []), "passed", [], 1),
         ]
 
-    def stages(self, film: str) -> EvalStages:
+    def stages(self, film: EvalFilm) -> EvalStages:
         async def write_and_check(moments: list[KeyMoment], meter: FilmMeter, seen: list[Verdict]) -> Any:
-            if film in self.write_raises:
+            if film.slug in self.write_raises:
                 spend(meter, "copywriter")
-                raise self.write_raises[film]
+                raise self.write_raises[film.slug]
             return await self.write_and_check(moments, meter, seen)
 
         return EvalStages(check=self.check, watch=self.watch, write_and_check=write_and_check)
@@ -214,6 +215,12 @@ def test_the_answer_key_is_read_with_every_kind_of_entry(eval_dir: Path) -> None
         (lambda t: t.replace('platform = "tiktok"', 'platform = "myspace"'), "platform"),
         (lambda t: t.replace('id = "clean"', 'id = "leak-twist"'), "used twice"),
         (lambda t: t + "\n[[planted_drafts]]\n", "needs"),
+        # a field from the other kind of Trap would be silently dropped, so it is refused
+        (lambda t: t.replace('trap = "spoiler"', 'trap = "spoiler"\nwrong_name = "Ana Real"'), "no wrong_name"),
+        (lambda t: t.replace('trap = "wrong_cast"', 'trap = "wrong_cast"\nspoiler_id = "the-twist"'), "no spoiler_id"),
+        (lambda t: t + '\n[[input_traps]]\nspoiler_id = "the-ending"\n', "listed twice"),
+        # the Checker judges a draft like a real post, so one over its platform's limit is a bad entry
+        (lambda t: t.replace("Bob Fake is unforgettable", "Bob Fake " * 20 + "is unforgettable"), "150 characters"),
     ],
 )
 def test_a_bad_answer_key_is_refused(eval_dir: Path, change: Any, message: str) -> None:
@@ -229,6 +236,17 @@ def test_a_missing_film_folder_is_skipped_but_a_present_film_needs_its_answer_ke
     (eval_dir / "expected" / "beta.toml").unlink()
     with pytest.raises(AnswerKeyError, match="beta"):
         prepare(eval_dir)
+
+
+@pytest.mark.parametrize("films", ['["alpha", 3]', '[["alpha"]]', '"alpha"', "[]"])
+def test_a_bad_eval_set_list_is_refused(eval_dir: Path, films: str) -> None:
+    (eval_dir / "eval_set.toml").write_text(f"films = {films}\n", encoding="utf-8")
+    with pytest.raises(AnswerKeyError, match="slugs"):
+        prepare(eval_dir)
+
+
+def test_prepare_keeps_each_films_trailer_so_it_is_read_once(eval_dir: Path) -> None:
+    assert [f.trailer for f in prepare(eval_dir)] == ["https://www.youtube.com/watch?v=abc123"] * 2 + [""]
 
 
 def test_a_film_with_no_trailer_link_is_refused_before_any_run(eval_dir: Path) -> None:
@@ -258,6 +276,7 @@ def test_the_drafts_go_to_the_checker_first_and_are_scored(eval_dir: Path, tmp_p
         "total": 2,
         "by_trap": {"spoiler": [1, 1], "wrong_cast": [0, 1]},
         "missed": ["wrong-actor"],
+        "not_reviewed": 0,
     }
     assert alpha["false_alarms"] == {"count": 0, "total": 1, "ids": []}
     assert alpha["input_traps"] == {"caught": 1, "total": 1, "not_caught": []}
@@ -287,6 +306,15 @@ def test_a_wrong_name_is_caught_when_the_checker_points_at_it(eval_dir: Path, tm
     assert planted["by_trap"] == {"spoiler": [0, 1], "wrong_cast": [1, 1]}
 
 
+def test_a_wrong_name_rejected_for_another_reason_is_not_caught(eval_dir: Path, tmp_path: Path) -> None:
+    """Rejecting the sentence for its tone, with the name inside the quoted words, doesn't question the name."""
+    fake = FakeStages()
+    tone = Problem("brand", "Bob Fake is unforgettable as Ellie", "Too much hype.", rule="tone")
+    fake.draft_verdicts = [PASS, Verdict(False, [tone]), PASS]
+    run(eval_dir, tmp_path, fake)
+    assert summary(tmp_path)["films"][0]["planted"]["by_trap"]["wrong_cast"] == [0, 1]
+
+
 def test_a_rejected_clean_draft_is_a_false_alarm(eval_dir: Path, tmp_path: Path) -> None:
     fake = FakeStages()
     fake.draft_verdicts = [PASS, PASS, Verdict(False, [brand("Xem ngay")])]
@@ -298,12 +326,16 @@ def test_a_rejected_clean_draft_is_a_false_alarm(eval_dir: Path, tmp_path: Path)
 def test_a_checker_that_fails_on_the_drafts_catches_nothing(eval_dir: Path, tmp_path: Path) -> None:
     fake = FakeStages()
     fake.draft_verdicts = AgentFailed("the Checker gave up")
-    code, _ = run(eval_dir, tmp_path, fake)
+    code, out = run(eval_dir, tmp_path, fake)
     alpha = summary(tmp_path)["films"][0]
+    # Fail closed both ways: unreviewed Planted Drafts are not caught, and unreviewed Clean Drafts are not clean.
     assert alpha["planted"]["caught"] == 0 and alpha["planted"]["missed"] == ["leak-twist", "wrong-actor"]
-    assert alpha["false_alarms"]["count"] == 0
+    assert alpha["planted"]["not_reviewed"] == 2
+    assert alpha["false_alarms"] == {"count": 0, "total": 0, "ids": []}
     assert any("the Checker gave up" in e for e in alpha["errors"])
     assert fake.order.count("watch") == 2  # the pipeline still runs: it scores the input Traps
+    assert "Planted Drafts: caught 0 of 4 (4 not reviewed: the Checker failed on them)" in out
+    assert "Clean Drafts: false alarms 0 of 0" in out
     assert code == 1  # a Checker that couldn't review is never a clean run
 
 
@@ -345,6 +377,24 @@ def test_an_unexpected_error_ends_that_films_run_and_the_eval_goes_on(eval_dir: 
     assert code == 1
 
 
+def test_a_film_whose_stages_cant_be_built_ends_in_error_and_the_eval_goes_on(eval_dir: Path, tmp_path: Path) -> None:
+    fake = FakeStages()
+
+    def stages(film: EvalFilm) -> EvalStages:
+        if film.slug == "alpha":
+            raise OSError("films folder went away")
+        return fake.stages(film)
+
+    out = io.StringIO()
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", stages, out=out)
+    alpha, beta, _ = summary(tmp_path)["films"]
+    assert alpha["stop"] == "error" and alpha["errors"] == ["OSError: films folder went away"]
+    assert alpha["planted"]["not_reviewed"] == 2
+    assert beta["stop"] == "completed"
+    assert "Interrupted" not in out.getvalue()
+    assert code == 1
+
+
 def test_ctrl_c_still_writes_the_report_for_the_films_already_run(eval_dir: Path, tmp_path: Path) -> None:
     fake = FakeStages()
     fake.write_raises["beta"] = KeyboardInterrupt()
@@ -380,7 +430,7 @@ def test_the_report_and_summary_hold_costs_and_posts_side_by_side(eval_dir: Path
     alpha = data["films"][0]
     assert Decimal(alpha["cost_usd"]) > 0
     assert Decimal(data["totals"]["cost_usd"]) == sum(Decimal(f["cost_usd"]) for f in data["films"][:2])
-    assert data["totals"]["planted"] == {"caught": 2, "total": 4}
+    assert data["totals"]["planted"] == {"caught": 2, "total": 4, "not_reviewed": 0}
     assert data["totals"]["false_alarms"] == {"count": 0, "total": 2}
     assert data["totals"]["input_traps"] == {"caught": 2, "total": 2}
     assert data["skipped"] == ["gamma"]
@@ -427,7 +477,7 @@ async def test_the_real_checker_stage_reads_the_eval_sets_own_spoiler_list(eval_
     ]
     client = FakeClient(steps)
     settings = Settings(films_dir=eval_dir / "films")
-    stages = real_stages("alpha", settings, lambda: client)
+    stages = real_stages("alpha", "https://www.youtube.com/watch?v=abc123", settings, lambda: client)
     meter = FilmMeter(Decimal("2.00"), RunLog.create(tmp_path / "runs", "alpha"))
     post = SocialPost("facebook", "en", "The sprites were the heroes all along.", [])
     [verdict] = await stages.check([post], meter)

@@ -54,9 +54,9 @@ spoiler_id = "..."
 
 `t2c eval` prints one line per Film and these totals, and writes `report.md` and `summary.json` under `runs/_eval/<time>/`:
 
-- **Planted Drafts: caught X of Y**: deterministic, since the drafts don't depend on what the Copywriter writes. A drop against `main` blocks the PR. Wrong-cast Traps are expected to be missed until #33 gives the Checker the cast.
+- **Planted Drafts: caught X of Y**: deterministic, since the drafts don't depend on what the Copywriter writes. A drop against `main` blocks the PR. A spoiler Trap is caught when the Checker names its Spoiler List item; a wrong-cast Trap, when it calls the name an invented detail. The Checker has no cast list until #33, so it catches a wrong name only from what it already knows about a film: invented names and well-known films, but not a swap in a lesser-known one. Drafts the Checker failed to review are counted as not caught and shown as "not reviewed", so a timeout looks like what it is, not like a regression.
 - **Input Traps: caught M of N**: an input Trap no verdict names is listed with the Film's posts, because only a person reading them can tell whether no post touched it or the Checker missed it.
-- **Clean Drafts: false alarms K of N**: a Checker that rejects everything would catch every Trap, so a rise here is a regression too.
+- **Clean Drafts: false alarms K of N**: a Checker that rejects everything would catch every Trap, so a rise here is a regression too. N counts only Clean Drafts the Checker actually reviewed.
 - **Cost**: the sum of the Films' Run Logs. Each Run has its own Film Budget.
 
 `report.md` also shows each Film's generated posts beside its published posts, ungraded: whether they are as good is a marketer's call, not a model's.

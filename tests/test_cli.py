@@ -584,16 +584,16 @@ def test_eval_runs_unattended_on_the_eval_sets_own_films(
     eval_dir = an_eval_set(tmp_path)
     fake, made = FakeStages(), []
 
-    def stages(film: str, settings: Any, make_client: Any) -> Any:
-        made.append((film, settings.films_dir, make_client()))
-        return fake.stages(film)
+    def stages(film: str, trailer: str, settings: Any, make_client: Any) -> Any:
+        made.append((film, trailer, settings.films_dir, make_client()))
+        return fake.stages(evals.EvalFilm(film, None, trailer))
 
     monkeypatch.setattr(evals, "real_stages", stages)
     monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
     monkeypatch.setattr(cli, "_at_a_terminal", lambda: False)  # piped stdin is fine: nothing asks for Approval
     argv = ["eval", "--eval-dir", str(eval_dir), "--runs-dir", str(tmp_path / "runs")]
     assert main(argv, env={"ANTHROPIC_API_KEY": "sk-test"}) == 0
-    assert made == [("alpha", eval_dir / "films", "client for sk-test")]
+    assert made == [("alpha", "https://www.youtube.com/watch?v=abc123", eval_dir / "films", "client for sk-test")]
     out = capsys.readouterr().out
     assert "Planted Drafts: caught 1 of 2" in out
     assert "song-lang" in out and "skipped" in out

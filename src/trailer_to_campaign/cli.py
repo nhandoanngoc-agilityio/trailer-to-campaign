@@ -298,7 +298,10 @@ def run_eval_set(eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Sett
         return 2
     settings = replace(settings, films_dir=eval_dir / "films")
     return evals.run_eval(
-        films, budget, runs_dir, lambda film: evals.real_stages(film, settings, lambda: make_client(api_key))
+        films,
+        budget,
+        runs_dir,
+        lambda film: evals.real_stages(film.slug, film.trailer, settings, lambda: make_client(api_key)),
     )
 
 

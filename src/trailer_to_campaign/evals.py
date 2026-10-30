@@ -99,6 +99,7 @@ class AnswerKey:
 class EvalFilm:
     slug: str
     key: AnswerKey | None  # None: the Film's folder isn't on this clone, so it is skipped
+    trailer: str = ""  # read once, here: the Run watches what prepare() checked
 
 
 def prepare(eval_dir: Path) -> list[EvalFilm]:
@@ -108,7 +109,12 @@ def prepare(eval_dir: Path) -> list[EvalFilm]:
         slugs = tomllib.loads(path.read_text(encoding="utf-8"))["films"]
     except (OSError, tomllib.TOMLDecodeError, KeyError) as err:
         raise AnswerKeyError(f'{path} must list the Eval Set\'s Films: films = ["slug", ...]') from err
-    if not isinstance(slugs, list) or not slugs or len(set(slugs)) != len(slugs):
+    if (
+        not isinstance(slugs, list)
+        or not slugs
+        or not all(isinstance(s, str) for s in slugs)
+        or len(set(slugs)) != len(slugs)
+    ):
         raise AnswerKeyError(f"{path}: films must be a non-empty list of distinct slugs")
     films = []
     for slug in slugs:
@@ -119,7 +125,8 @@ def prepare(eval_dir: Path) -> list[EvalFilm]:
         film = load_film(eval_dir / "films", slug)
         if not film.catalog.trailer:
             raise AnswerKeyError(f"{slug} has no trailer link in its film.toml; the Eval Set watches the trailer")
-        films.append(EvalFilm(slug, load_answer_key(eval_dir, slug, {s.id for s in film.spoilers})))
+        key = load_answer_key(eval_dir, slug, {s.id for s in film.spoilers})
+        films.append(EvalFilm(slug, key, film.catalog.trailer))
     return films
 
 
@@ -148,6 +155,9 @@ def load_answer_key(eval_dir: Path, film: str, spoiler_ids: set[str]) -> AnswerK
         trap = _text(t, "trap", where)
         if trap not in TRAPS:
             raise AnswerKeyError(f"{where} trap must be one of {', '.join(TRAPS)}, got {trap!r}")
+        other = "wrong_name" if trap == "spoiler" else "spoiler_id"
+        if other in t:  # it would be dropped unread: likely the wrong trap
+            raise AnswerKeyError(f"{where}: a {trap} Trap has no {other}; is trap set to the right kind?")
         draft_id, platform, language, text = _draft(t, where)
         planted.append(
             PlantedDraft(
@@ -162,6 +172,8 @@ def load_answer_key(eval_dir: Path, film: str, spoiler_ids: set[str]) -> AnswerK
         )
     clean = [CleanDraft(*_draft(t, where)) for where, t in tables["clean_drafts"]]
     traps = [listed(_text(t, "spoiler_id", where), where) for where, t in tables["input_traps"]]
+    if twice := sorted({t for t in traps if traps.count(t) > 1}):
+        raise AnswerKeyError(f"{path.name}: input Trap {', '.join(twice)} is listed twice")
 
     ids = [d.id for d in planted] + [d.id for d in clean]
     if twice := sorted({i for i in ids if ids.count(i) > 1}):
@@ -209,6 +221,9 @@ def _draft(table: dict[str, Any], where: str) -> tuple[str, str, str, str]:
         raise AnswerKeyError(f"{where} platform must be one of {', '.join(PLATFORM_LIMITS)}, got {platform!r}")
     if language not in LANGUAGES:
         raise AnswerKeyError(f"{where} language must be one of {', '.join(LANGUAGES)}, got {language!r}")
+    limit, length = PLATFORM_LIMITS[platform], len(nfc(text))
+    if length > limit:
+        raise AnswerKeyError(f"{where}: {platform} posts are at most {limit} characters; this one is {length}")
     return draft_id, platform, language, text
 
 
@@ -223,13 +238,12 @@ class EvalStages:
     write_and_check: Callable[[list[KeyMoment], FilmMeter, list[Verdict]], Awaitable[list[CheckedPost]]]
 
 
-def real_stages(film: str, settings: Settings, make_client: Callable[[], Any]) -> EvalStages:
-    """The real agents on the Eval Set's own films folder (settings.films_dir), each stage with its own client."""
+def real_stages(film: str, trailer: str, settings: Settings, make_client: Callable[[], Any]) -> EvalStages:
+    """The real agents on the Eval Set's own films folder (settings.films_dir), each stage with its own client.
+
+    trailer is the link prepare() read and checked, so film.toml is not read again here."""
     from trailer_to_campaign.agents import checker, review, watcher
     from trailer_to_campaign.pipeline import stage_client
-
-    trailer = load_film(settings.films_dir, film).catalog.trailer
-    assert trailer, "prepare() refuses an Eval Set Film without a trailer link"
 
     async def check(posts: list[SocialPost], meter: FilmMeter) -> list[Verdict]:
         async with stage_client(make_client) as client:
@@ -262,6 +276,7 @@ class FilmResult:
     stop: str = "skipped"
     cost: Decimal = Decimal(0)
     caught: dict[str, bool] = field(default_factory=dict)  # Planted Draft id -> caught
+    drafts_reviewed: bool = False  # did the Checker give verdicts on the Planted and Clean Drafts?
     false_alarms: list[str] = field(default_factory=list)  # Clean Draft ids the Checker rejected
     pipeline_verdicts: list[Verdict] = field(default_factory=list)
     posts: list[CheckedPost] = field(default_factory=list)
@@ -275,20 +290,24 @@ class FilmResult:
 
 
 def caught(draft: PlantedDraft, verdict: Verdict) -> bool:
-    """A spoiler Trap is caught when the Checker names its Spoiler List item; a wrong name, when it points at it."""
+    """A spoiler Trap is caught when the Checker names its Spoiler List item. A wrong name is caught when the
+    Checker calls it an invented detail and points at it: a rejection for tone or clickbait whose quoted words
+    happen to include the name never questioned it."""
     if verdict.passed:
         return False
     if draft.trap == "spoiler":
         return any(p.kind == "spoiler" and p.spoiler_id == draft.spoiler_id for p in verdict.problems)
     name = nfc(draft.wrong_name or "").casefold()
-    return any(name in nfc(p.offending_text).casefold() for p in verdict.problems)
+    return any(
+        p.kind == "brand" and p.rule == "invented_detail" and name in nfc(p.offending_text).casefold()
+        for p in verdict.problems
+    )
 
 
 def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, stages: EvalStages) -> FilmResult:
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     result = FilmResult(film, key, run_log=run_log.path)
-    result.caught = {d.id: False for d in key.planted_drafts}
     meter.event(
         "eval_run",
         planted_drafts=len(key.planted_drafts),
@@ -304,6 +323,7 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
         except AgentFailed as err:  # fail closed: drafts the Checker couldn't review are not caught
             result.errors.append(f"the Checker could not review the drafts: {err}")
         else:
+            result.drafts_reviewed = True
             for draft, verdict in zip(drafts, verdicts, strict=True):
                 if isinstance(draft, PlantedDraft):
                     result.caught[draft.id] = caught(draft, verdict)
@@ -337,7 +357,7 @@ def run_eval(
     films: list[EvalFilm],
     budget: Decimal,
     runs_dir: Path,
-    make_stages: Callable[[str], EvalStages],
+    make_stages: Callable[[EvalFilm], EvalStages],
     out: TextIO | None = None,
 ) -> int:
     """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly."""
@@ -350,7 +370,9 @@ def run_eval(
         else:
             print(f"{film.slug:20} running...", file=out, flush=True)
             try:
-                result = evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film.slug))
+                result = evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film))
+            except Exception as err:  # the Run couldn't start (its stages or Run Log): only this Film is lost
+                result = FilmResult(film.slug, film.key, stop="error", errors=[f"{type(err).__name__}: {err}"])
             except BaseException:  # Ctrl-C: the Films already run were paid for, so their report is still written
                 _write_report(results, runs_dir, out, interrupted=film.slug)
                 raise
@@ -392,11 +414,12 @@ def _film_line(r: FilmResult) -> str:
 def _film_summary(r: FilmResult) -> dict[str, Any]:
     if r.key is None:
         return {"film": r.film, "stop": "skipped"}
+    # Fail closed both ways: a Planted Draft the Checker never reviewed is not caught, and a Clean Draft it never
+    # reviewed is not clean, so it is left out of the false alarms rather than counted as a pass.
+    planted = r.key.planted_drafts
+    hit = {d.id: r.caught.get(d.id, False) for d in planted}
     by_trap = {
-        trap: [
-            sum(r.caught[d.id] for d in r.key.planted_drafts if d.trap == trap),
-            sum(d.trap == trap for d in r.key.planted_drafts),
-        ]
+        trap: [sum(hit[d.id] for d in planted if d.trap == trap), sum(d.trap == trap for d in planted)]
         for trap in TRAPS
     }
     return {
@@ -404,12 +427,17 @@ def _film_summary(r: FilmResult) -> dict[str, Any]:
         "stop": r.stop,
         "cost_usd": str(r.cost),
         "planted": {
-            "caught": sum(r.caught.values()),
-            "total": len(r.caught),
+            "caught": sum(hit.values()),
+            "total": len(planted),
             "by_trap": by_trap,
-            "missed": [i for i, c in r.caught.items() if not c],
+            "missed": [i for i, c in hit.items() if not c],
+            "not_reviewed": 0 if r.drafts_reviewed else len(planted),
         },
-        "false_alarms": {"count": len(r.false_alarms), "total": len(r.key.clean_drafts), "ids": r.false_alarms},
+        "false_alarms": {
+            "count": len(r.false_alarms),
+            "total": len(r.key.clean_drafts) if r.drafts_reviewed else 0,
+            "ids": r.false_alarms,
+        },
         "input_traps": {
             "caught": sum(r.input_caught(t) for t in r.key.input_traps),
             "total": len(r.key.input_traps),
@@ -432,7 +460,10 @@ def _summary(results: list[FilmResult]) -> dict[str, Any]:
         "films": films,
         "skipped": [f["film"] for f in films if f["stop"] == "skipped"],
         "totals": {
-            "planted": total("planted", "caught", "total"),
+            "planted": {
+                **total("planted", "caught", "total"),
+                "not_reviewed": sum(f["planted"]["not_reviewed"] for f in ran),
+            },
             "false_alarms": total("false_alarms", "count", "total"),
             "input_traps": total("input_traps", "caught", "total"),
             "cost_usd": str(sum((Decimal(f["cost_usd"]) for f in ran), Decimal(0))),
@@ -443,8 +474,10 @@ def _summary(results: list[FilmResult]) -> dict[str, Any]:
 def _totals_lines(summary: dict[str, Any]) -> list[str]:
     t = summary["totals"]
     ran = len(summary["films"]) - len(summary["skipped"])
+    unreviewed = t["planted"]["not_reviewed"]
     return [
-        f"Planted Drafts: caught {t['planted']['caught']} of {t['planted']['total']}",
+        f"Planted Drafts: caught {t['planted']['caught']} of {t['planted']['total']}"
+        + (f" ({unreviewed} not reviewed: the Checker failed on them)" if unreviewed else ""),
         f"Input Traps: caught {t['input_traps']['caught']} of {t['input_traps']['total']}",
         f"Clean Drafts: false alarms {t['false_alarms']['count']} of {t['false_alarms']['total']}",
         f"Cost: ${Decimal(t['cost_usd']):.4f} over {ran} Films"
@@ -477,7 +510,7 @@ def _report(summary: dict[str, Any], results: list[FilmResult]) -> str:
             continue
         lines += [f"- {_film_line(r)}", f"- Run Log: `{r.run_log}`"]
         lines += [f"- Error: {e}" for e in r.errors]
-        missed = [d for d in r.key.planted_drafts if not r.caught[d.id]]
+        missed = [d for d in r.key.planted_drafts if not r.caught.get(d.id, False)]
         if missed:
             lines += ["", "### Planted Drafts the Checker missed", ""]
             lines += [f"- `{d.id}` ({d.trap}): {d.text}" for d in missed]

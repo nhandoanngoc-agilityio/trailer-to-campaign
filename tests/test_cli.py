@@ -686,6 +686,26 @@ def test_eval_runs_unattended_on_the_eval_sets_own_films(
     assert list((tmp_path / "runs").glob("alpha/*/run.jsonl"))
 
 
+@pytest.mark.parametrize(("flag", "expected"), [([], None), (["--parallel", "2"], 2)])
+def test_eval_passes_how_many_films_run_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str], expected: int | None
+) -> None:
+    from trailer_to_campaign import evals
+
+    seen: list[Any] = []
+    monkeypatch.setattr(evals, "run_eval", lambda *args, **kwargs: seen.append(kwargs.get("parallel")) or 0)
+    argv = ["eval", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs"), *flag]
+    assert main(argv, env={"ANTHROPIC_API_KEY": "sk-test"}) == 0
+    assert seen == [expected]
+
+
+def test_eval_refuses_running_no_films_at_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = ["eval", "--eval-dir", str(an_eval_set(tmp_path)), "--parallel", "0"]
+    with pytest.raises(SystemExit):
+        main(argv, env={"ANTHROPIC_API_KEY": "sk-test"})
+    assert "--parallel" in capsys.readouterr().err
+
+
 # T11: --watcher picks the Watcher's harness for every command that watches a trailer.
 
 WATCHER_CHOICES = [

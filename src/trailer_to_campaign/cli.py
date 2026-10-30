@@ -73,6 +73,12 @@ def _budget_arg(value: str) -> Decimal:
         raise argparse.ArgumentTypeError(str(err)) from err
 
 
+def _parallel_arg(value: str) -> int:
+    if not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError(f"--parallel must be a whole number of Films, at least 1 (got {value!r})")
+    return int(value)
+
+
 def _film_arg(value: str) -> str:
     try:
         return check_film_slug(value)
@@ -113,6 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--eval-dir", type=Path, default=Path("evals"), help="the Eval Set (default: evals/)")
     evaluate.add_argument("--budget", type=_budget_arg, help="Film Budget per Run (default: FILM_BUDGET_USD or 2.00)")
     evaluate.add_argument("--runs-dir", type=Path, help="where run logs and the report go (default: runs/)")
+    evaluate.add_argument(
+        "--parallel", type=_parallel_arg, help="how many Films run at once (default: all; 1 runs them in turn)"
+    )
 
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
@@ -315,7 +324,9 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
     return code
 
 
-def run_eval_set(eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+def run_eval_set(
+    eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Settings, parallel: int | None = None
+) -> int:
     from trailer_to_campaign import evals
 
     try:
@@ -331,6 +342,7 @@ def run_eval_set(eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Sett
         runs_dir,
         lambda film: evals.real_stages(film.slug, film.trailer, settings, lambda: make_client(api_key)),
         watcher=settings.watcher,
+        parallel=parallel,
     )
 
 
@@ -482,6 +494,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             budget=args.budget or settings.film_budget_usd,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
+            parallel=args.parallel,
         )
     if (args.command.startswith("serve-") or args.command == "slack") and not settings.films_dir.is_dir():
         # An MCP host may start the server in / or $HOME, where there is no films/ folder.

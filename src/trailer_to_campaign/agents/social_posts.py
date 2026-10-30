@@ -6,6 +6,7 @@ SocialPost records or refuses the whole set with every problem it found. Traced 
 - one post per platform and language: Facebook, Instagram, TikTok, each in en and vi
 - each within its platform's limits, naming the Film exactly as the catalog does
 - a vi post is written in Vietnamese
+- no control characters but a newline: junk a reader can't see, like a form feed where an emoji was meant
 - every claim cites a Key Moment (key_moment:N) or a Catalog Metadata field (catalog:title)
 - every quoted line is a Key Moment's quote, word for word and cited to that moment;
   in a vi post too, where the English line stays as heard and a gloss may follow unquoted
@@ -125,6 +126,7 @@ def _problems(post: SocialPost, title: str, catalog_words: set[str], key_moments
     limit = PLATFORM_LIMITS[platform]
     if len(text) > limit:
         problems.append(f"{platform} posts are at most {limit} characters; this one is {len(text)}")
+    problems += _control_problems(text)
     hashtags = len(HASHTAG.findall(text))
     if platform in MAX_HASHTAGS and hashtags > MAX_HASHTAGS[platform]:
         problems.append(f"{platform} posts have at most {MAX_HASHTAGS[platform]} hashtags; this one has {hashtags}")
@@ -144,6 +146,23 @@ def _problems(post: SocialPost, title: str, catalog_words: set[str], key_moments
             )
     problems += _quote_problems(text, title, claims, key_moments)
     return problems
+
+
+def _control_problems(text: str) -> list[str]:
+    """Control characters (Cc) other than a newline, and lone surrogates (Cs): half an emoji escaped by hand."""
+    at = [i for i, c in enumerate(text) if c != "\n" and unicodedata.category(c) in ("Cc", "Cs")]
+    if not at:
+        return []
+    found = dict.fromkeys(text[i] for i in at)
+    codes = ", ".join(
+        f"U+{ord(c):04X}" + (" (half an emoji)" if unicodedata.category(c) == "Cs" else "") for c in found
+    )
+    near = text[max(0, at[0] - 12) : at[0] + 16]  # shown escaped, so the letters left from an escape show too
+    return [
+        f"remove the control character{'s' if len(found) > 1 else ''} {codes}, first at {near!r}, "
+        "and any letters left from an escape around it: write an emoji as the emoji itself, "
+        "and lay out the post with line breaks only"
+    ]
 
 
 def _source_exists(source: str, moments: int) -> bool:

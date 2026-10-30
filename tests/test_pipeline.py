@@ -490,3 +490,32 @@ def test_the_watcher_stage_runs_the_harness_the_settings_name(
     meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path, "sample"))
     assert anyio.run(watch_stage("sample", "trailer.mp4", settings, Client), meter) == [moment(1)]
     assert ran == ([("v0", "client")] if harness == "v0" else [("sdk", "sk-test")])
+
+
+# T17: a model call that never answers ends the Run in an error, with the Run Log finished and the spend kept.
+
+
+def test_a_model_call_that_never_answers_ends_the_run_in_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fake_claude import HangingClient
+
+    from trailer_to_campaign.agents import loop
+
+    monkeypatch.setattr(loop, "MODEL_CALL_TIMEOUT_S", 0.05)
+
+    class HungWatcher(FakeStages):
+        async def watch(self, meter: FilmMeter) -> list[KeyMoment]:
+            spend(meter, "watcher")  # a first call answers; the next one never does
+            agent = loop.AgentLoop(HangingClient(), meter, "watcher", MODEL, "medium", "", [], 3, "Go on.")
+            await agent.run([{"role": "user", "content": "Watch."}], call_tool=None, is_done=lambda: False)  # type: ignore[arg-type]
+            return []
+
+    approver = marketer()
+    code, lines, _ = run(tmp_path, HungWatcher(), approver)
+    assert code == 1 and lines[-1]["event"] == "run_finished" and lines[-1]["stop_reason"] == "error"
+    answered, hung = events(lines, "model_call")
+    assert hung["error"] == "TimeoutError" and hung["charged"] == "worst_case"
+    assert Decimal(lines[-1]["total_usd"]) == Decimal(answered["cost_usd"]) + Decimal(hung["cost_usd"])
+    assert "did not answer within" in run.out  # type: ignore[attr-defined]
+    assert approver.asked == []  # nothing reaches Approval

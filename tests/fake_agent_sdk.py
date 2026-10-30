@@ -74,9 +74,10 @@ class FakeQuery:
         prompts: list[int] | None = None,  # each response's prompt tokens (default INPUT)
         model: str = MODEL,  # the model id the stream reports
         never_starts: bool = False,  # the CLI fails before sending anything (not installed, say)
+        stalls: bool = False,  # the last response starts, then nothing more ever comes (T17)
     ) -> None:
         self.turns = list(turns)
-        self.model, self.never_starts = model, never_starts
+        self.model, self.never_starts, self.stalls = model, never_starts, stalls
         self.end, self.extra_usage, self.crash_after, self.open_last = end, extra_usage or {}, crash_after, open_last
         self.prompts = prompts or []
         self.input_total = 0
@@ -100,6 +101,10 @@ class FakeQuery:
                     return  # the CLI died: no result
                 self.responses += 1
                 yield self._event({"type": "message_start", "message": self._message()})
+                if self.stalls and self.responses == len(self.turns):
+                    import anyio
+
+                    await anyio.sleep_forever()
                 if self.open_last and self.responses == len(self.turns):
                     if self.end != "error_during_execution":
                         return  # the CLI died mid-response: no result

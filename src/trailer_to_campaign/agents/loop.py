@@ -2,7 +2,8 @@
 
 Each turn:
 1. count the whole prompt's tokens (count_tokens is free and exact),
-2. send it inside meter.call(), which reserves the worst case first and charges the actual usage,
+2. send it inside meter.call(), which reserves the worst case first and charges the actual usage
+   (both calls must answer within MODEL_CALL_TIMEOUT_S, or the agent fails),
 3. append the reply unchanged (thinking blocks must be passed back as they came),
 4. run every tool the reply asks for and send all the results back in one message.
 
@@ -22,6 +23,8 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+import anthropic
+import anyio
 from mcp import Client
 from mcp.types import ImageContent, TextContent
 
@@ -30,6 +33,11 @@ from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.pricing import Usage
 
 MAX_TOKENS = 16_000
+# A model call's whole time, end to end (T17). The client's own timeout is per read, so a
+# connection that stays open hung a Copywriter call for 25+ minutes (#34). 600 s is the most
+# the SDK allows a non-streaming call; it expects up to 450 s for a full MAX_TOKENS reply,
+# and the slowest real call so far took 37 s.
+MODEL_CALL_TIMEOUT_S = 600
 
 log = logging.getLogger(__name__)
 
@@ -184,10 +192,21 @@ class AgentLoop:
                 "output_config": {"effort": self.effort},
                 "cache_control": {"type": "ephemeral"},  # the history is re-sent every turn
             }
-            counted = await self.client.messages.count_tokens(**{k: v for k, v in params.items() if k != "max_tokens"})
-            with self.meter.call(self.model, counted.input_tokens, MAX_TOKENS, agent=self.agent) as call:
-                response = await self.client.messages.create(**params)
-                call.record(Usage.from_api(response.usage))
+            try:
+                with anyio.fail_after(MODEL_CALL_TIMEOUT_S):
+                    counted = await self.client.messages.count_tokens(
+                        **{k: v for k, v in params.items() if k != "max_tokens"}
+                    )
+                with self.meter.call(self.model, counted.input_tokens, MAX_TOKENS, agent=self.agent) as call:
+                    with anyio.fail_after(MODEL_CALL_TIMEOUT_S):  # inside: a call cut off is charged its worst case
+                        response = await self.client.messages.create(**params)
+                    call.record(Usage.from_api(response.usage))
+            except TimeoutError as err:
+                raise AgentFailed(
+                    f"the {self.agent}'s call to {self.model} did not answer within {MODEL_CALL_TIMEOUT_S} s"
+                ) from err
+            except anthropic.APITimeoutError as err:  # the client's own timeout fired first
+                raise AgentFailed(f"the {self.agent}'s call to {self.model} timed out: {err}") from err
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "tool_use":

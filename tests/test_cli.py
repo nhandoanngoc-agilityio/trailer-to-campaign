@@ -282,6 +282,15 @@ def test_the_watchers_client_never_retries_a_call_on_its_own() -> None:
     assert client.max_retries == 0  # a retried call could be billed twice but metered once
 
 
+def test_the_client_waits_no_longer_than_a_model_calls_deadline() -> None:
+    from trailer_to_campaign.agents.loop import MODEL_CALL_TIMEOUT_S
+    from trailer_to_campaign.cli import make_client
+
+    timeout = make_client("sk-test").timeout
+    assert timeout.read == MODEL_CALL_TIMEOUT_S
+    assert timeout.connect == 5.0  # an unreachable API still fails at once, not after the deadline
+
+
 def test_key_moments_that_cannot_be_saved_are_printed_not_lost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

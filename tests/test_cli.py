@@ -730,3 +730,62 @@ def test_an_unknown_watcher_flag_is_refused(capsys: pytest.CaptureFixture[str]) 
     with pytest.raises(SystemExit):
         main(["watch", "--film", "agent-327", "--watcher", "v2"])
     assert "invalid choice" in capsys.readouterr().err
+
+
+# T12: the side-by-side result, from the Film's Run Logs and the two stopwatch times.
+
+
+def test_result_writes_the_page_without_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from test_result import FILM, FILM_TOML, trial
+
+    films = tmp_path / "films"
+    (films / FILM).mkdir(parents=True)
+    (films / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
+    trial(tmp_path / "runs")
+    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={"T2C_FILMS_DIR": str(films)}) == 0
+    out = capsys.readouterr().out
+    assert "Time Saved: 180 min (75%)" in out and f"{FILM}/result.md and result.json under the --runs-dir" in out
+    assert str(tmp_path) not in out  # no local paths printed
+    assert (tmp_path / "runs" / FILM / "result.md").is_file()
+
+
+def test_result_names_a_relative_runs_folder_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_result import FILM, FILM_TOML, trial
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "films" / FILM).mkdir(parents=True)
+    (tmp_path / "films" / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
+    trial(tmp_path / "runs")
+    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", "runs"]
+    assert main(argv, env={"T2C_FILMS_DIR": "films"}) == 0
+    assert f"runs/{FILM}/result.md and result.json" in capsys.readouterr().out
+
+
+def test_result_that_cannot_be_written_says_so_without_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_result import FILM, FILM_TOML, trial
+
+    from trailer_to_campaign import result
+
+    def read_only(*args: Any) -> Any:
+        raise PermissionError(13, "Permission denied", str(tmp_path / "runs" / FILM / "result.md"))
+
+    monkeypatch.setattr(result, "write_result", read_only)
+    (tmp_path / "films" / FILM).mkdir(parents=True)
+    (tmp_path / "films" / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
+    trial(tmp_path / "runs")
+    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={"T2C_FILMS_DIR": str(tmp_path / "films")}) == 2
+    err = capsys.readouterr().err
+    assert "PermissionError" in err and str(tmp_path) not in err
+
+
+@pytest.mark.parametrize("old", ["0", "soon"])
+def test_result_refuses_bad_minutes(tmp_path: Path, old: str, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = ["result", "--film", "agent-327", "--old-way", old, "--new-way", "60", "--runs-dir", str(tmp_path)]
+    assert main(argv, env={"T2C_FILMS_DIR": str(FILMS)}) == 2
+    assert "old-way" in capsys.readouterr().err

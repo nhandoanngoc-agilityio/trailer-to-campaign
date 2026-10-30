@@ -20,6 +20,8 @@ eval runs the Eval Set (ADR 0008): one Eval Set Run per Film, scored against its
 Answer Key, with no Approval, so it needs no person and runs unattended.
 run, watch, eval and slack take --watcher v0|sdk: the Watcher on its own loop (the
 default) or on the Claude Agent SDK (T11).
+result writes a real Film's side-by-side page (T12): Time Saved from the two
+marketers' stopwatch times, and the Approval Rate and cost per Film from its Run Logs.
 """
 
 from __future__ import annotations
@@ -115,6 +117,15 @@ def build_parser() -> argparse.ArgumentParser:
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
     slack.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    result = commands.add_parser("result", help="the side-by-side result for a real Film: Time Saved, Approval, cost")
+    result.add_argument("--film", type=_film_arg, required=True)
+    result.add_argument("--old-way", required=True, help="minutes the old way took, from that marketer's stopwatch")
+    result.add_argument("--new-way", required=True, help="minutes Trailer-to-Campaign took, timed the same way")
+    result.add_argument("--runs-dir", type=Path, help="where the Film's Run Logs are (default: runs/)")
+    result.add_argument(
+        "--run", help="the Run whose Campaign was used, by its folder (default: the last to finish that gave one)"
+    )
 
     for watching in (run, watch, evaluate, slack):
         watching.add_argument(
@@ -354,6 +365,39 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     return 0
 
 
+def side_by_side(
+    film: str, old_way: str, new_way: str, runs_dir: Path, settings: Settings, used_run: str | None = None
+) -> int:
+    """T12's one-page result from the Film's Run Logs and the two stopwatch times. Reads files only."""
+    from trailer_to_campaign.result import film_result, write_result
+
+    try:
+        result = film_result(
+            film, runs_dir, settings.films_dir, old_minutes=old_way, new_minutes=new_way, used_run=used_run
+        )
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        return 2
+    try:
+        page = write_result(result, runs_dir)
+    except OSError as err:  # never pass the OS message on: it holds the local path
+        print(f"could not write the result for {film} ({type(err).__name__})", file=sys.stderr)
+        return 2
+    print(page.read_text(encoding="utf-8"))
+    print(f"Written: {_where(runs_dir, film)} (gitignored: share the numbers once the team agrees)")
+    return 0
+
+
+def _where(runs_dir: Path, film: str) -> str:
+    """Where the result went, without printing a local path the person didn't type."""
+    if not runs_dir.is_absolute():
+        return f"{runs_dir / film / 'result.md'} and result.json"
+    try:
+        return f"{runs_dir.relative_to(Path.cwd()) / film / 'result.md'} and result.json"
+    except ValueError:
+        return f"{film}/result.md and result.json under the --runs-dir folder"
+
+
 def serve_footage(settings: Settings) -> int:
     from trailer_to_campaign.footage.sources import YtDlpDownloader
     from trailer_to_campaign.footage.transcript import FasterWhisperTranscriber
@@ -416,6 +460,15 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             budget=args.budget or settings.film_budget_usd,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
+        )
+    if args.command == "result":
+        return side_by_side(
+            film=args.film,
+            old_way=args.old_way,
+            new_way=args.new_way,
+            runs_dir=args.runs_dir or settings.runs_dir,
+            settings=settings,
+            used_run=args.run,
         )
     if args.command == "eval":
         return run_eval_set(

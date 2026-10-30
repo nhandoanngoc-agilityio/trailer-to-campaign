@@ -279,6 +279,7 @@ class FilmResult:
     posts: list[CheckedPost] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     run_log: Path | None = None
+    key_moments: int = 0  # what the Watcher handed on
 
     def input_caught(self, spoiler_id: str) -> bool:
         return any(
@@ -327,6 +328,7 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
                 elif not verdict.passed:
                     result.false_alarms.append(draft.id)
         moments = anyio.run(stages.watch, meter)
+        result.key_moments = len(moments)
         if moments:
             result.posts = anyio.run(stages.write_and_check, moments, meter, result.pipeline_verdicts)
         else:
@@ -356,8 +358,11 @@ def run_eval(
     runs_dir: Path,
     make_stages: Callable[[EvalFilm], EvalStages],
     out: TextIO | None = None,
+    watcher: str = "v0",
 ) -> int:
-    """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly."""
+    """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly.
+
+    watcher names the Watcher the stages run (v0 or sdk), so two reports can be compared."""
     out = out or sys.stdout  # looked up now, not at import, so a redirected stdout is the one written to
     results: list[FilmResult] = []
     for film in films:
@@ -371,11 +376,11 @@ def run_eval(
             except Exception as err:  # the Run couldn't start (its stages or Run Log): only this Film is lost
                 result = FilmResult(film.slug, film.key, stop="error", errors=[f"{type(err).__name__}: {err}"])
             except BaseException:  # Ctrl-C: the Films already run were paid for, so their report is still written
-                _write_report(results, runs_dir, out, interrupted=film.slug)
+                _write_report(results, runs_dir, out, interrupted=film.slug, watcher=watcher)
                 raise
             print(f"{film.slug:20} {_film_line(result)}", file=out, flush=True)
         results.append(result)
-    _write_report(results, runs_dir, out)
+    _write_report(results, runs_dir, out, watcher=watcher)
 
     ran = [r for r in results if r.key is not None]
     if any(r.stop == "film_budget_reached" for r in ran):
@@ -385,8 +390,10 @@ def run_eval(
     return 0
 
 
-def _write_report(results: list[FilmResult], runs_dir: Path, out: TextIO, interrupted: str | None = None) -> None:
-    summary = _summary(results)
+def _write_report(
+    results: list[FilmResult], runs_dir: Path, out: TextIO, interrupted: str | None = None, watcher: str = "v0"
+) -> None:
+    summary = _summary(results, watcher)
     if interrupted:
         summary["interrupted"] = interrupted  # this Film and the ones after it were not run
     report_dir = _report_dir(runs_dir)
@@ -440,20 +447,39 @@ def _film_summary(r: FilmResult) -> dict[str, Any]:
             "total": len(r.key.input_traps),
             "not_caught": [t for t in r.key.input_traps if not r.input_caught(t)],
         },
+        "watcher": _watcher_numbers(r),
         "errors": r.errors,
         "run_log": str(r.run_log),
     }
 
 
-def _summary(results: list[FilmResult]) -> dict[str, Any]:
+def _watcher_numbers(r: FilmResult) -> dict[str, Any]:
+    """The Watcher's own share of a Film's Run, read from its Run Log: what v0 and the SDK Watcher are compared on."""
+    events = []
+    if r.run_log is not None and r.run_log.exists():
+        events = [json.loads(line) for line in r.run_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    mine = [e for e in events if e.get("agent") == "watcher"]
+    calls = [e for e in mine if e["event"] == "model_call"]
+    return {
+        "cost_usd": str(sum((Decimal(e["cost_usd"]) for e in calls), Decimal(0))),
+        "model_calls": len(calls),
+        "tool_calls": sum(e["event"] == "tool_call" for e in mine),
+        "grounding_rejections": sum(e["event"] == "key_moments_rejected" for e in mine),
+        "key_moments": r.key_moments,
+    }
+
+
+def _summary(results: list[FilmResult], watcher: str = "v0") -> dict[str, Any]:
     films = [_film_summary(r) for r in results]
     ran = [f for f in films if f["stop"] != "skipped"]
 
     def total(part: str, a: str, b: str) -> dict[str, int]:
         return {a: sum(f[part][a] for f in ran), b: sum(f[part][b] for f in ran)}
 
+    counts = ("model_calls", "tool_calls", "grounding_rejections", "key_moments")
     return {
         "at": datetime.now(UTC).isoformat(),
+        "watcher": watcher,
         "films": films,
         "skipped": [f["film"] for f in films if f["stop"] == "skipped"],
         "totals": {
@@ -464,6 +490,10 @@ def _summary(results: list[FilmResult]) -> dict[str, Any]:
             "false_alarms": total("false_alarms", "count", "total"),
             "input_traps": total("input_traps", "caught", "total"),
             "cost_usd": str(sum((Decimal(f["cost_usd"]) for f in ran), Decimal(0))),
+            "watcher": {
+                "cost_usd": str(sum((Decimal(f["watcher"]["cost_usd"]) for f in ran), Decimal(0))),
+                **{n: sum(f["watcher"][n] for f in ran) for n in counts},
+            },
         },
     }
 
@@ -479,6 +509,8 @@ def _totals_lines(summary: dict[str, Any]) -> list[str]:
         f"Clean Drafts: false alarms {t['false_alarms']['count']} of {t['false_alarms']['total']}",
         f"Cost: ${Decimal(t['cost_usd']):.4f} over {ran} Films"
         + (f" ({len(summary['skipped'])} skipped)" if summary["skipped"] else ""),
+        f"Watcher: {summary['watcher']}, ${Decimal(t['watcher']['cost_usd']):.4f}, "
+        f"{t['watcher']['grounding_rejections']} grounding rejections, {t['watcher']['key_moments']} Key Moments",
     ]
 
 

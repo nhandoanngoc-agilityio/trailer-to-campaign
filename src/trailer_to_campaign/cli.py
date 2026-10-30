@@ -313,6 +313,7 @@ def run_eval_set(eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Sett
         budget,
         runs_dir,
         lambda film: evals.real_stages(film.slug, film.trailer, settings, lambda: make_client(api_key)),
+        watcher=settings.watcher,
     )
 
 

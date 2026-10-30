@@ -10,5 +10,6 @@ The Eval Set (T8) uses four Blender Studio open movies (Sprite Fright, Cosmos La
 
 ## Consequences
 
+- Blender Studio publishes few trailers. For an Eval Set Film with no official trailer, the studio's official showreel stands in, or the whole short when it runs under five minutes (as the sample, Agent 327, already does). This keeps the footage trailer-shaped and the cost near a trailer's, at the price of less dialogue in Sprite Fright and Spring.
 - `films/README.md`'s rule that only the sample Film is in git does not apply to the Eval Set's Blender Films: their spoilers are already public.
 - Traps are planted two ways (see `CONTEXT.md`): Planted Drafts give the deterministic "caught X of Y" that blocks a PR, while input Traps are reported as "caught M of N", with the posts for any not caught shown to a person, since only a reader can tell a Trap no post touched from a miss. Clean Drafts guard the other side: a Checker that rejects everything shows up as false alarms.

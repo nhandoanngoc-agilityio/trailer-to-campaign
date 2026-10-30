@@ -451,3 +451,42 @@ def test_the_film_budget_mid_review_keeps_the_key_moment_decisions(tmp_path: Pat
     _, _, run_dir = run(tmp_path, stages, marketer())
     campaign = json.loads((run_dir / "campaign.json").read_text())
     assert campaign["stop_reason"] == "film_budget_reached" and len(campaign["key_moments"]) == 5
+
+
+# T11: the Watcher stage runs on the harness the settings name.
+
+
+@pytest.mark.parametrize("harness", ["v0", "sdk"])
+def test_the_watcher_stage_runs_the_harness_the_settings_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str
+) -> None:
+    import anyio
+
+    from trailer_to_campaign.agents import watcher, watcher_sdk
+    from trailer_to_campaign.config import Settings
+    from trailer_to_campaign.pipeline import watch_stage
+    from trailer_to_campaign.run_log import RunLog
+
+    ran: list[tuple[str, Any]] = []
+
+    async def v0(film: str, source: str, *, servers: Any, client: Any, meter: Any) -> list[KeyMoment]:
+        ran.append(("v0", client.name))
+        return [moment(1)]
+
+    async def sdk(film: str, source: str, *, servers: Any, meter: Any, api_key: str) -> list[KeyMoment]:
+        ran.append(("sdk", api_key))
+        return [moment(1)]
+
+    class Client:
+        name = "client"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(watcher, "watch_trailer", v0)
+    monkeypatch.setattr(watcher_sdk, "watch_trailer_sdk", sdk)
+    monkeypatch.setattr(watcher, "watcher_servers", lambda settings: ["footage", "catalog"])
+    settings = Settings(watcher=harness, _api_key="sk-test")
+    meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path, "sample"))
+    assert anyio.run(watch_stage("sample", "trailer.mp4", settings, Client), meter) == [moment(1)]
+    assert ran == ([("v0", "client")] if harness == "v0" else [("sdk", "sk-test")])

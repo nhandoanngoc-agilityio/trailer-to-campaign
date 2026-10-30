@@ -75,3 +75,16 @@ def test_the_slack_app_needs_both_tokens_and_a_marketer(missing: str) -> None:
 
 def test_films_folder_can_be_set() -> None:
     assert load_settings({"T2C_FILMS_DIR": "/srv/films"}).films_dir == Path("/srv/films")
+
+
+# T11: which Watcher runs: v0's own loop, or the Agent SDK.
+
+
+def test_the_watcher_is_v0_unless_set() -> None:
+    assert load_settings({}).watcher == "v0"
+    assert load_settings({"T2C_WATCHER": "sdk"}).watcher == "sdk"
+
+
+def test_an_unknown_watcher_is_rejected() -> None:
+    with pytest.raises(ValueError, match="T2C_WATCHER"):
+        load_settings({"T2C_WATCHER": "v2"})

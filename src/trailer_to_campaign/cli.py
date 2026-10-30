@@ -18,6 +18,8 @@ same way: no post leaves it unchecked. watch and write are single stages, each a
 Run of its own, for trying one agent; run is the Run a marketer uses.
 eval runs the Eval Set (ADR 0008): one Eval Set Run per Film, scored against its
 Answer Key, with no Approval, so it needs no person and runs unattended.
+run, watch, eval and slack take --watcher v0|sdk: the Watcher on its own loop (the
+default) or on the Claude Agent SDK (T11).
 """
 
 from __future__ import annotations
@@ -35,7 +37,14 @@ from typing import Any
 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
-from trailer_to_campaign.config import MissingApiKey, MissingSlackSettings, Settings, load_settings, parse_film_budget
+from trailer_to_campaign.config import (
+    WATCHERS,
+    MissingApiKey,
+    MissingSlackSettings,
+    Settings,
+    load_settings,
+    parse_film_budget,
+)
 from trailer_to_campaign.pricing import Usage
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
@@ -106,6 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
     slack.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    for watching in (run, watch, evaluate, slack):
+        watching.add_argument(
+            "--watcher", choices=WATCHERS, help="v0 (its own loop) or sdk (the Agent SDK); default: T2C_WATCHER or v0"
+        )
 
     commands.add_parser("serve-footage", help="run the footage MCP server on stdio (ADR 0002)")
     commands.add_parser("serve-catalog", help="run the Catalog Metadata MCP server on stdio")
@@ -231,20 +245,13 @@ def run(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings
 
 
 def watch(film: str, source: str | None, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
-    from trailer_to_campaign.agents import watcher
+    from trailer_to_campaign.pipeline import watch_stage
 
     checked = _key_and_trailer(film, source, settings)
     if checked is None:
         return 2
     api_key, source = checked
-
-    async def start(meter: FilmMeter) -> list[Any]:
-        from trailer_to_campaign.pipeline import stage_client
-
-        async with stage_client(lambda: make_client(api_key)) as client:
-            servers = watcher.watcher_servers(settings)
-            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
-
+    start = watch_stage(film, source, settings, lambda: make_client(api_key))
     code, moments = run_agent(film, budget, runs_dir, "watcher", start, "key_moments.json", "Key Moments")
     for m in moments:
         line = f"  {m.start:7.1f}-{m.end:<7.1f} {m.mood}: {m.what_happens}"
@@ -381,6 +388,8 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         settings = load_settings(env)
     except ValueError as err:
         parser.error(str(err))
+    if getattr(args, "watcher", None):
+        settings = replace(settings, watcher=args.watcher)  # --watcher wins over T2C_WATCHER
     if args.command == "dummy-run":
         return dummy_run(
             film=args.film,

@@ -62,7 +62,7 @@ class Stages:
 def real_stages(film: str, source: str, settings: Settings, make_client: Callable[[], Any]) -> Stages:
     """The real agents. Each stage runs in its own event loop (anyio.run), and an async client is bound
     to the loop it first ran in, so every stage makes its own client and closes it."""
-    from trailer_to_campaign.agents import checker, review, watcher
+    from trailer_to_campaign.agents import checker, review
     from trailer_to_campaign.agents.social_posts import NotTraced, trace
     from trailer_to_campaign.catalog import load_film
 
@@ -70,10 +70,7 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
     def catalog() -> dict[str, Any]:  # read once per Run: it can't change mid-Run
         return asdict(load_film(settings.films_dir, film).catalog)
 
-    async def watch(meter: FilmMeter) -> list[KeyMoment]:
-        async with stage_client(make_client) as client:
-            servers = watcher.watcher_servers(settings)
-            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
+    watch = watch_stage(film, source, settings, make_client)
 
     async def write_and_check(key_moments: list[KeyMoment], meter: FilmMeter) -> list[CheckedPost]:
         async with stage_client(make_client) as client:
@@ -93,6 +90,27 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
         return Recheck(problems, verdict, note=UNTRACED_EDIT)
 
     return Stages(watch=watch, write_and_check=write_and_check, recheck=recheck)
+
+
+def watch_stage(
+    film: str, source: str, settings: Settings, make_client: Callable[[], Any]
+) -> Callable[[FilmMeter], Awaitable[list[KeyMoment]]]:
+    """The Watcher stage, on the harness settings.watcher names: v0's own loop, or the Agent SDK (T11)."""
+    from trailer_to_campaign.agents import watcher
+
+    async def watch(meter: FilmMeter) -> list[KeyMoment]:
+        if settings.watcher == "sdk":
+            from trailer_to_campaign.agents import watcher_sdk
+
+            servers = watcher.watcher_servers(settings)
+            return await watcher_sdk.watch_trailer_sdk(
+                film, source, servers=servers, meter=meter, api_key=settings.require_api_key()
+            )
+        async with stage_client(make_client) as client:
+            servers = watcher.watcher_servers(settings)
+            return await watcher.watch_trailer(film, source, servers=servers, client=client, meter=meter)
+
+    return watch
 
 
 @asynccontextmanager

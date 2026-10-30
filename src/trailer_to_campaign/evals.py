@@ -242,18 +242,15 @@ def real_stages(film: str, trailer: str, settings: Settings, make_client: Callab
     """The real agents on the Eval Set's own films folder (settings.films_dir), each stage with its own client.
 
     trailer is the link prepare() read and checked, so film.toml is not read again here."""
-    from trailer_to_campaign.agents import checker, review, watcher
-    from trailer_to_campaign.pipeline import stage_client
+    from trailer_to_campaign.agents import checker, review
+    from trailer_to_campaign.pipeline import stage_client, watch_stage
 
     async def check(posts: list[SocialPost], meter: FilmMeter) -> list[Verdict]:
         async with stage_client(make_client) as client:
             servers = checker.checker_servers(settings)
             return await checker.check_posts(film, posts, servers=servers, client=client, meter=meter)
 
-    async def watch(meter: FilmMeter) -> list[KeyMoment]:
-        async with stage_client(make_client) as client:
-            servers = watcher.watcher_servers(settings)
-            return await watcher.watch_trailer(film, trailer, servers=servers, client=client, meter=meter)
+    watch = watch_stage(film, trailer, settings, make_client)
 
     async def write_and_check(moments: list[KeyMoment], meter: FilmMeter, seen: list[Verdict]) -> list[CheckedPost]:
         async with stage_client(make_client) as client:

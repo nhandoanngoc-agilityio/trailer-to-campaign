@@ -335,9 +335,10 @@ def run_eval(
     budget: Decimal,
     runs_dir: Path,
     make_stages: Callable[[str], EvalStages],
-    out: TextIO = sys.stdout,
+    out: TextIO | None = None,
 ) -> int:
     """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly."""
+    out = out or sys.stdout  # looked up now, not at import, so a redirected stdout is the one written to
     results = []
     for film in films:
         if film.key is None:

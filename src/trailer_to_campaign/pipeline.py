@@ -42,10 +42,10 @@ from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.config import Settings
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog
 
-# Code traces the Copywriter's claims because it lists them; a person's edit lists none.
 # A Light Edit that changed more of the words than this is listed for a second look (never overridden).
 LIGHT_EDIT_FLAG = 0.30
 
+# Code traces the Copywriter's claims because it lists them; a person's edit lists none.
 UNTRACED_EDIT = (
     "Facts you added aren't traced: code checked the quotes, title, limits and brand rules, "
     "and the Checker judged spoilers and invented details. Check new facts yourself."
@@ -159,8 +159,8 @@ class _Run:
         for i, moment in enumerate(moments, start=1):
             decision = approver.key_moment(i, len(moments), moment)
             kept = _apply(moment, decision)
-            changed = None
-            if decision.decision == "edit" and kept:
+            changed = decision.changed  # the measured change the Marketer was shown when marking it
+            if changed is None and decision.decision == "edit" and kept:  # an approver that didn't measure it
                 before, after = (key_moment_text(m.what_happens, m.mood) for m in (moment, kept))
                 changed = measured_change(before, after)
             self._record(
@@ -170,6 +170,7 @@ class _Run:
                 decision.by,
                 changed,
                 where=f"key moment {i}",
+                edited_by=decision.edited_by,
                 item=i,
                 **_km_fields(decision),
             )
@@ -186,14 +187,17 @@ class _Run:
             self.say(f"\nApproval of {len(checked)} Social Posts")
             for i, c in enumerate(checked, start=1):
                 decision = approver.social_post(i, len(checked), c, self._rechecker(stages, c, approved))
-                edited = decision.decision == "edit" and decision.text is not None
+                changed = decision.changed  # as shown to the Marketer; measured here only if the approver didn't
+                if changed is None and decision.decision == "edit" and decision.text is not None:
+                    changed = measured_change(c.post.text, decision.text)
                 self._record(
                     "social_posts",
                     decision.decision,
                     decision.light,
                     decision.by,
-                    measured_change(c.post.text, decision.text or "") if edited else None,
+                    changed,
                     where=f"{c.post.platform} {c.post.language}",
+                    edited_by=decision.edited_by,
                     platform=c.post.platform,
                     language=c.post.language,
                     status=c.status,
@@ -229,10 +233,13 @@ class _Run:
         by: str | None,
         changed: float | None,
         where: str,
+        edited_by: str | None = None,
         **fields: Any,
     ) -> None:
         if by is not None:  # the Marketer who decided, when the surface knows (Slack does; a terminal doesn't)
             fields["by"] = by
+        if edited_by is not None:  # the Marketer who wrote the edit (in Slack, maybe not the one who approved it)
+            fields["edited_by"] = edited_by
         if changed is not None:  # an edit: how much it changed, beside the Marketer's Light/heavy mark
             fields["changed"] = changed
             self.edits.append({"where": where, "light": light is True, "changed": changed})
@@ -258,7 +265,8 @@ class _Run:
                 **rates,
                 light_edit_change=_mean(light),
                 heavy_edit_change=_mean(heavy),
-                light_edits_over_30pct=outliers,
+                light_edit_flag=LIGHT_EDIT_FLAG,
+                light_edits_over_flag=outliers,
             )
         self.run_log.finish(self.meter.spent, stop)
         self.say(f"\nRun {stop}: spent ${self.meter.spent:.4f} of ${self.meter.limit}.")

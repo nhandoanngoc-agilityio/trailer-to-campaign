@@ -374,7 +374,8 @@ def test_the_approval_rate_comes_with_the_measured_change_and_light_edits_that_c
     assert rate["light_edit_change"]["count"] == 2
     assert rate["light_edit_change"]["mean"] == pytest.approx((0.818 + 0.333) / 2, abs=0.01)
     assert rate["heavy_edit_change"] == {"count": 1, "mean": pytest.approx(0.455, abs=0.01)}
-    flagged = [(f["where"], f["changed"]) for f in rate["light_edits_over_30pct"]]
+    assert rate["light_edit_flag"] == 0.3  # the record names the threshold it used
+    flagged = [(f["where"], f["changed"]) for f in rate["light_edits_over_flag"]]
     assert flagged == [
         ("key moment 2", pytest.approx(0.818, abs=0.01)),
         ("facebook en", pytest.approx(0.333, abs=0.01)),
@@ -387,7 +388,16 @@ def test_a_run_with_no_edits_has_no_measured_change_to_report(tmp_path: Path) ->
     approver = ScriptedApprover([APPROVE_KM] * 5, [APPROVE_POST] * 6)
     _, lines, _ = run(tmp_path, FakeStages(), approver)
     [rate] = events(lines, "approval_rate")
-    assert rate["light_edit_change"] == {"count": 0, "mean": None} and rate["light_edits_over_30pct"] == []
+    assert rate["light_edit_change"] == {"count": 0, "mean": None} and rate["light_edits_over_flag"] == []
+
+
+def test_the_record_keeps_the_change_the_marketer_was_shown_and_who_wrote_the_edit(tmp_path: Path) -> None:
+    shown = KeyMomentDecision("edit", what_happens="Moment 1, retold.", mood="tense", light=True, by="U07A")
+    shown = replace(shown, edited_by="U07B", changed=0.42)  # what the approver measured and showed
+    approver = ScriptedApprover([shown] + [APPROVE_KM] * 4, [APPROVE_POST] * 6)
+    _, lines, _ = run(tmp_path, FakeStages(), approver)
+    [edit] = [a for a in events(lines, "approval") if a["decision"] == "edit"]
+    assert edit["changed"] == 0.42 and edit["edited_by"] == "U07B" and edit["by"] == "U07A"
 
 
 def test_what_a_run_says_names_its_run_but_no_local_path(tmp_path: Path) -> None:

@@ -15,6 +15,10 @@ prompt and max_tokens is the one sent. A call that costs more than it reserved
 is still charged in full (that money is spent) and logged as
 reservation_exceeded, and the next call is refused once spend is over.
 
+One harness can't be metered call by call: the Agent SDK runs its own loop. Its
+spend is capped from remaining() before it starts and charged with charge_after()
+once it is known (ADR 0009).
+
 The pipeline is a fixed sequence (ADR 0004), so the meter is not thread-safe.
 Open calls still count against the budget, so nested calls can't overspend.
 """
@@ -66,6 +70,50 @@ class FilmMeter:
     def call(self, model: str, input_tokens: int, max_tokens: int, agent: str | None = None) -> MeteredCall:
         """Meter one model call. input_tokens is the whole prompt, as counted before sending."""
         return MeteredCall(self, model, input_tokens, max_tokens, agent)
+
+    def remaining(self) -> Decimal:
+        """What is left of the Film Budget, after spend and the calls still open."""
+        return max(Decimal(0), self.limit - self.spent - self._reserved)
+
+    def charge_after(
+        self,
+        model: str,
+        *,
+        agent: str,
+        usage: Usage | None = None,
+        cost: Decimal | None = None,
+        charged: str = "after",
+    ) -> None:
+        """Charge model spend that already happened, for a harness that can't be metered call by call (ADR 0009).
+
+        usage is charged at our prices; cost (an estimate, or a fail-closed worst case) is
+        charged as given, labelled by charged. The money is spent either way, so spend past
+        the limit is charged in full, logged, and refuses the next metered call.
+        """
+        if usage is None and cost is None:
+            raise ValueError("charge_after needs the usage or the cost")
+        charge = cost_usd(model, usage) if usage is not None else cost
+        assert charge is not None
+        self.spent += charge
+        usage = usage or Usage()
+        self._log(
+            "model_call",
+            model=model,
+            agent=agent,
+            input_tokens=usage.input,
+            output_tokens=usage.output,
+            cache_read_tokens=usage.cache_read,
+            cache_write_5m_tokens=usage.cache_write_5m,
+            cache_write_1h_tokens=usage.cache_write_1h,
+            reserved_usd=Decimal(0),
+            cost_usd=charge,
+            charged=charged,
+            error=None,
+            spent_usd=self.spent,
+        )
+        if self.spent > self.limit:
+            log.warning("spend charged after the fact went past the Film Budget: $%s of $%s", self.spent, self.limit)
+            self._log("film_budget_exceeded", model=model, agent=agent, spent_usd=self.spent, limit_usd=self.limit)
 
     def _reserve(self, model: str, worst: Decimal) -> None:
         if self.spent + self._reserved + worst > self.limit:

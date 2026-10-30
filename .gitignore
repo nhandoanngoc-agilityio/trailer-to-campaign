@@ -12,3 +12,10 @@ films/*/
 !films/agent-327/
 films/*/source/
 films/*/frames/
+# The Eval Set's Blender Films are released, so their film.toml and Answer Key are tracked (ADR 0008);
+# their footage isn't. Song Lang is a real Film, so none of its files are, and Claude's drafts stay local.
+evals/films/*/source/
+evals/films/*/frames/
+evals/films/song-lang/
+evals/expected/song-lang.toml
+evals/drafts/

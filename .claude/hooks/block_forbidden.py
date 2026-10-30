@@ -15,6 +15,11 @@ Blocked:
   --continue, --quit, --skip, and merge --ff-only)
 - git reset --hard
 - git add of a .env file (secrets come from the environment, never the repo)
+- shell writes into the Answer Key, evals/expected/ (human-owned): > and >> redirects,
+  rm, touch, tee, sed -i, cp or mv into it (cp out of it is reading), mv out of it, and
+  git checkout / restore / rm / mv of paths in it. Paths count with ./, absolute, or
+  after a cd earlier in the command. A tripwire for accidents, not a sandbox: a script
+  or python -c that writes the file is out of reach (T14).
 
 Ported from the claude-training repo, where this hook is battle-tested.
 
@@ -29,6 +34,7 @@ Uses only the standard library, so no jq or extra dependency is needed.
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import shlex
 import subprocess
@@ -40,6 +46,12 @@ SHELLS = {"bash", "sh", "zsh"}
 PROTECTED_BRANCH = "main"
 HISTORY_COMMANDS = {"merge", "cherry-pick", "revert", "rebase"}
 FINISH_FLAGS = {"--abort", "--continue", "--quit", "--skip"}
+ANSWER_KEY = "evals/expected"
+ANSWER_KEY_REASON = (
+    "the Answer Key (evals/expected/) is human-owned: change the code or the prompt, never the expected answers"
+)
+REDIRECT = re.compile(r"^(?:\d*|&)>>?(.*)$")  # >, >>, 2>, &> with the target attached or as the next token
+GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
 UV_VALUE_OPTIONS = {
     "--directory",
     "--project",
@@ -63,7 +75,7 @@ def split_segments(command: str) -> list[list[str]]:
 
     segments, current = [], []
     for tok in tokens:
-        if tok in SEPARATORS or set(tok) <= set(";&|"):
+        if tok in SEPARATORS or (tok and set(tok) <= set(";&|")):  # '' is an empty argument, not a separator
             if current:
                 segments.append(current)
             current = []
@@ -166,6 +178,80 @@ def check_dependency(prog: str, args: list[str]) -> str | None:
     return None
 
 
+def in_answer_key(path: str, state: dict) -> bool:
+    """True if a path, read from where the command has cd'd to, is in evals/expected/. By its text only."""
+    if not path:
+        return False
+    full = path if path.startswith("/") else posixpath.join(state.get("cwd", ""), path)
+    full = posixpath.normpath(full)
+    return (
+        full == ANSWER_KEY
+        or full.startswith(ANSWER_KEY + "/")
+        or full.endswith("/" + ANSWER_KEY)
+        or f"/{ANSWER_KEY}/" in full
+    )
+
+
+def redirect_targets(tokens: list[str]) -> list[str]:
+    """Where a command's > and >> redirects write to."""
+    targets = []
+    for i, tok in enumerate(tokens):
+        match = REDIRECT.match(tok)
+        if match:
+            target = match.group(1) or (tokens[i + 1] if i + 1 < len(tokens) else "")
+            if not target.startswith("&"):  # 2>&1 duplicates a stream, it writes no file
+                targets.append(target)
+    return targets
+
+
+def positionals(args: list[str]) -> list[str]:
+    """The arguments that aren't options (everything after -- counts)."""
+    out, ended = [], False
+    for arg in args:
+        if ended or not arg.startswith("-") or arg == "-":
+            out.append(arg)
+        elif arg == "--":
+            ended = True
+    return out
+
+
+def copy_destination(args: list[str]) -> list[str]:
+    """Where cp/mv write: -t DIR / --target-directory=DIR, else the last positional."""
+    for i, arg in enumerate(args):
+        if arg == "-t" and i + 1 < len(args):
+            return [args[i + 1]]
+        if arg.startswith("--target-directory="):
+            return [arg.split("=", 1)[1]]
+    found = positionals(args)
+    return found[-1:] if len(found) > 1 else []
+
+
+def check_answer_key(prog: str, args: list[str], state: dict) -> str | None:
+    if prog == "cd":  # later segments in this command run from there
+        target = positionals(args)[:1]
+        here = state.get("cwd", "")
+        state["cwd"] = "" if not target else posixpath.normpath(posixpath.join(here, target[0]))
+        return None
+    written: list[str] = []
+    if prog in ("rm", "touch", "tee"):
+        written = positionals(args)
+    elif prog == "cp":
+        written = copy_destination(args)
+    elif prog == "mv":  # moving out of the Answer Key changes it too
+        written = positionals(args) + copy_destination(args)
+    elif prog == "sed" and any(a.startswith("-i") or a.startswith("--in-place") for a in args):
+        written = positionals(args)
+    elif prog == "git":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in ("-C", "-c") else 1
+        if i < len(args) and args[i] in GIT_PATH_WRITERS:
+            written = positionals(args[i + 1 :])
+    if any(in_answer_key(path, state) for path in written):
+        return ANSWER_KEY_REASON
+    return None
+
+
 def is_secret_file(arg: str) -> bool:
     """True for .env, .env.local, config/.env.prod ... but not .env.example."""
     name = arg.rsplit("/", 1)[-1]
@@ -223,10 +309,15 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
     if depth > 3:
         return None
     for segment in split_segments(command):
+        if any(in_answer_key(target, state) for target in redirect_targets(segment)):
+            return ANSWER_KEY_REASON
         tokens = unwrap(segment)
         if not tokens:
             continue
         prog = tokens[0].rsplit("/", 1)[-1]
+        reason = check_answer_key(prog, tokens[1:], state)
+        if reason:
+            return reason
         if prog in SHELLS and "-c" in tokens:
             idx = tokens.index("-c")
             if idx + 1 < len(tokens):

@@ -52,6 +52,7 @@ def git_switch_main(repo: Path) -> None:
         "git add .env",
         "git add config/.env.local",
         "bash -c 'git push -f'",
+        "rm -r '' -f build",  # an empty argument is not a separator (found in T14)
     ],
 )
 def test_blocks_forbidden_commands(repo: Path, command: str) -> None:
@@ -75,6 +76,70 @@ def test_allows_normal_commands(repo: Path, command: str) -> None:
     result = run_hook("block_forbidden.py", {"command": command}, repo)
     assert result.returncode == 0, result.stderr
     assert "permissionDecision" not in result.stdout
+
+
+# T14: the Answer Key (evals/expected/) is human-owned. A tripwire for obvious shell writes, not a sandbox.
+
+ANSWER_KEY_WRITES = [
+    "echo x > evals/expected/charge.toml",
+    "echo x >evals/expected/charge.toml",
+    "echo x >> evals/expected/charge.toml",
+    "uv run t2c eval 2> evals/expected/log.txt",
+    "uv run t2c eval &> evals/expected/log.txt",
+    "cp notes.toml evals/expected/charge.toml",
+    "cp notes.toml evals/expected/",
+    "cp -t evals/expected notes.toml",
+    "cp --target-directory=evals/expected notes.toml",
+    "mv evals/expected/charge.toml /tmp/",
+    "mv notes.toml evals/expected/",
+    "cat notes.toml | tee evals/expected/charge.toml",
+    "tee -a evals/expected/charge.toml < notes.toml",
+    "rm evals/expected/charge.toml",
+    "touch evals/expected/new.toml",
+    "sed -i 's/a/b/' evals/expected/charge.toml",
+    "sed -i.bak 's/a/b/' evals/expected/charge.toml",
+    "sed -i '' 's/a/b/' evals/expected/charge.toml",
+    "sed --in-place 's/a/b/' evals/expected/charge.toml",
+    "git checkout -- evals/expected/charge.toml",
+    "git checkout main evals/expected/",
+    "git restore evals/expected/charge.toml",
+    "git rm evals/expected/charge.toml",
+    "git mv evals/expected/charge.toml evals/expected/old.toml",
+    # the same writes, spelled differently
+    "touch ./evals/expected/new.toml",
+    "touch /Users/someone/trailer-to-campaign/evals/expected/new.toml",
+    "cd evals/expected && touch new.toml",
+    "cd evals && sed -i 's/a/b/' expected/charge.toml",
+    "bash -c 'cp notes.toml evals/expected/charge.toml'",
+    "sudo rm evals/expected/charge.toml",
+]
+
+ANSWER_KEY_READS = [
+    "cat evals/expected/charge.toml",
+    "ls evals/expected/",
+    "diff evals/expected/charge.toml /tmp/charge.toml",
+    "grep spoiler evals/expected/charge.toml",
+    "cp evals/expected/charge.toml /tmp/",
+    "sed -n 1,5p evals/expected/charge.toml",
+    "git diff -- evals/expected/",
+    "git log -- evals/expected/",
+    "git show HEAD:evals/expected/charge.toml > /tmp/charge.toml",
+    "echo hi > evals/drafts/charge.toml",
+    "cd evals/expected && cat charge.toml",
+]
+
+
+@pytest.mark.parametrize("command", ANSWER_KEY_WRITES)
+def test_blocks_shell_writes_to_the_answer_key(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
+@pytest.mark.parametrize("command", ANSWER_KEY_READS)
+def test_allows_reading_the_answer_key(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
 
 
 def test_blocks_commit_on_main(repo: Path) -> None:

@@ -440,6 +440,52 @@ def test_the_report_and_summary_hold_costs_and_posts_side_by_side(eval_dir: Path
     assert "Alpha. Stream it now." in text  # generated, beside it
 
 
+# T11: the Watcher's own numbers, so v0 and the SDK Watcher can be compared Film by Film.
+
+
+class RejectedOnce(FakeStages):
+    async def watch(self, meter: FilmMeter) -> list[KeyMoment]:
+        meter.event("tool_call", agent="watcher", tool="get_catalog", is_error=False)
+        meter.event("key_moments_rejected", agent="watcher", attempt=1, problems=["frame 999 was not seen"])
+        spend(meter, "watcher")
+        return await super().watch(meter)
+
+
+def test_the_summary_has_the_watchers_own_numbers(eval_dir: Path, tmp_path: Path) -> None:
+    run(eval_dir, tmp_path, RejectedOnce())
+    data = summary(tmp_path)
+    watcher_calls = [e for e in run_log(tmp_path, "alpha") if e["event"] == "model_call" and e["agent"] == "watcher"]
+    assert data["films"][0]["watcher"] == {
+        "cost_usd": str(sum(Decimal(e["cost_usd"]) for e in watcher_calls)),
+        "model_calls": 2,
+        "tool_calls": 1,
+        "grounding_rejections": 1,
+        "key_moments": 1,
+    }
+    totals = data["totals"]["watcher"]
+    assert (totals["grounding_rejections"], totals["key_moments"], totals["model_calls"]) == (2, 2, 4)
+    assert Decimal(totals["cost_usd"]) == 2 * Decimal(data["films"][0]["watcher"]["cost_usd"])
+
+
+def test_a_half_written_run_log_line_never_loses_the_report(tmp_path: Path) -> None:
+    from trailer_to_campaign.evals import FilmResult, _watcher_numbers
+
+    log = tmp_path / "run.jsonl"
+    whole = '{"event": "model_call", "agent": "watcher", "cost_usd": "0.01"}'
+    log.write_text(whole + '\n{"event": "model_ca', encoding="utf-8")  # Ctrl-C mid-write
+    numbers = _watcher_numbers(FilmResult("alpha", None, run_log=log))
+    assert (numbers["model_calls"], numbers["cost_usd"]) == (1, "0.01")
+
+
+def test_the_report_names_the_watcher_that_ran(eval_dir: Path, tmp_path: Path) -> None:
+    out = io.StringIO()
+    run_eval(prepare(eval_dir), Decimal("2"), tmp_path / "runs", FakeStages().stages, out=out, watcher="sdk")
+    assert summary(tmp_path)["watcher"] == "sdk"
+    assert "Watcher: sdk" in out.getvalue()
+    [report] = (tmp_path / "runs" / "_eval").glob("*/report.md")
+    assert "Watcher: sdk" in report.read_text()
+
+
 # The real stages
 
 

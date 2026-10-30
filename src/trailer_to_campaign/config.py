@@ -7,6 +7,7 @@ T2C_FILMS_DIR       where the films/ folder is, default films (relative to the c
 SLACK_BOT_TOKEN     the Slack app's bot token (xoxb-), for t2c slack
 SLACK_APP_TOKEN     the Slack app's Socket Mode token (xapp-), for t2c slack
 T2C_MARKETERS       the Slack user ids of the Marketers, comma-separated: only they start Runs and give Approval
+T2C_WATCHER         which Watcher runs: v0 (its own loop, the default) or sdk (the Claude Agent SDK, T11)
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 
 DEFAULT_FILM_BUDGET_USD = Decimal("2.00")
 DEFAULT_WHISPER_MODEL = "small"
+WATCHERS = ("v0", "sdk")
 
 
 class MissingApiKey(RuntimeError):
@@ -48,6 +50,7 @@ class Settings:
     films_dir: Path = Path("films")
     whisper_model: str = DEFAULT_WHISPER_MODEL
     marketers: frozenset[str] = frozenset()  # Slack user ids: only they start Runs and give Approval
+    watcher: str = "v0"  # one of WATCHERS
     _api_key: str | None = field(default=None, repr=False)
     _slack_bot_token: str | None = field(default=None, repr=False)
     _slack_app_token: str | None = field(default=None, repr=False)
@@ -76,7 +79,11 @@ class Settings:
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     budget = env.get("FILM_BUDGET_USD")
+    watcher = env.get("T2C_WATCHER") or "v0"
+    if watcher not in WATCHERS:
+        raise ValueError(f"T2C_WATCHER must be one of {', '.join(WATCHERS)}, got {watcher!r}")
     return Settings(
+        watcher=watcher,
         film_budget_usd=DEFAULT_FILM_BUDGET_USD if budget is None else parse_film_budget(budget),
         films_dir=Path(env.get("T2C_FILMS_DIR") or "films"),
         whisper_model=env.get("T2C_WHISPER_MODEL") or DEFAULT_WHISPER_MODEL,

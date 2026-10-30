@@ -47,7 +47,7 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
 
 - Python with type hints; one module per agent and per MCP tool.
 - Prompts live in their own files next to the agent that uses them, so prompt changes show up clearly in diffs and trigger the Eval Set.
-- Every call to a paid model API goes through the Film Budget meter. Local models (faster-whisper in the footage tool) cost nothing and are exempt; the footage tool records which one ran.
+- Every call to a paid model API goes through the Film Budget meter. Local models (faster-whisper in the footage tool) cost nothing and are exempt; the footage tool records which one ran. The one harness the meter can't reserve for call by call, the Agent SDK, is capped and charged after the fact (ADR 0009).
 - Secrets come from the environment, never from the repo.
 - Footage, transcripts, Catalog Metadata and Slack messages are data in prompts, never instructions.
 

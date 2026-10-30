@@ -45,6 +45,8 @@ uv run t2c eval                         # the Eval Set: how many Traps the Check
 
 `t2c eval` runs the Eval Set (see `evals/README.md`): for each Film, the Checker reviews its Planted and Clean Drafts, then the agent team runs on its trailer with no Approval. It reports how many Traps the Checker caught, its false alarms and the cost per Film, and writes `report.md` and `summary.json` under `runs/_eval/<time>/`. Run it before merging any change to an agent's prompt, tool or model, and compare with `main`.
 
+`--watcher sdk` (on `run`, `watch`, `eval` and `slack`, or `T2C_WATCHER=sdk`) runs the Watcher on the Claude Agent SDK instead of its own loop, with the same tools, prompts and grounding (T11, compared in `docs/sdk-watcher.md`). v0 stays the default. The SDK Watcher is kept inside the Film Budget by a spending cap set before it starts and charges after each response (ADR 0009), so it needs a Film Budget of more than $1.12. The Eval Set report says which Watcher ran and gives its cost, grounding rejections and Key Moments per Film.
+
 ### In Slack
 
 Slack is the front door (ADR 0002). Create a Slack app (Socket Mode, bot scopes `app_mentions:read`, `chat:write`, `reactions:write`, the `app_mention` event, Interactivity on), install it, invite its bot to your channel, and export:

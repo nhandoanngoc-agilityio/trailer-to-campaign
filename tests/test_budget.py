@@ -218,3 +218,51 @@ def test_a_failed_log_write_does_not_hide_the_original_error(log: RunLog) -> Non
         with meter.call(OPUS, input_tokens=1_000, max_tokens=1_000):
             raise TimeoutError
     assert meter.spent == worst_case_usd(OPUS, input_tokens=1_000, max_tokens=1_000)
+
+
+# T11: the SDK Watcher's spend is charged after the fact (ADR 0009), inside a cap set from what's left.
+
+
+def test_remaining_is_what_is_left_after_spend_and_open_calls(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    assert meter.remaining() == Decimal("2")
+    with meter.call(OPUS, input_tokens=1_000, max_tokens=1_000) as call:
+        assert meter.remaining() == Decimal("2") - call.worst
+        call.record(Usage(input=1_000, output=1_000))
+    assert meter.remaining() == Decimal("2") - meter.spent
+
+
+def test_usage_spent_already_is_charged_at_our_prices(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    usage = Usage(input=5_000, output=800, cache_read=20_000)
+    meter.charge_after(OPUS, agent="watcher", usage=usage)
+    assert meter.spent == cost_usd(OPUS, usage)
+    [line] = events(log, "model_call")
+    assert (line["agent"], line["charged"], Decimal(line["reserved_usd"])) == ("watcher", "after", 0)
+    assert (line["input_tokens"], line["output_tokens"], line["cache_read_tokens"]) == (5_000, 800, 20_000)
+
+
+def test_a_cost_without_usage_is_charged_as_given_and_labelled(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    meter.charge_after("claude-unknown-9", agent="watcher", cost=Decimal("0.05"), charged="sdk_estimate")
+    assert meter.spent == Decimal("0.05")
+    [line] = events(log, "model_call")
+    assert line["charged"] == "sdk_estimate" and line["model"] == "claude-unknown-9"
+
+
+def test_a_charge_after_must_have_usage_or_a_cost(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("2"), log)
+    with pytest.raises(ValueError):
+        meter.charge_after(OPUS, agent="watcher")
+    with pytest.raises(UnknownModel):
+        meter.charge_after("claude-unknown-9", agent="watcher", usage=Usage(input=1))
+
+
+def test_spend_charged_after_that_goes_past_the_limit_is_logged_and_stops_the_next_call(log: RunLog) -> None:
+    meter = FilmMeter(Decimal("0.01"), log)
+    meter.charge_after(OPUS, agent="watcher", usage=Usage(input=10_000))  # $0.04: already spent, so charged in full
+    assert meter.spent == Decimal("0.04") and meter.remaining() == 0
+    assert len(events(log, "film_budget_exceeded")) == 1
+    with pytest.raises(FilmBudgetReached):
+        with meter.call(OPUS, input_tokens=1, max_tokens=1):
+            pass

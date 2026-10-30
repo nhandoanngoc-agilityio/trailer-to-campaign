@@ -161,8 +161,13 @@ def dummy_run(film: str, budget: Decimal, calls: int, runs_dir: Path) -> int:
 def make_client(api_key: str) -> Any:
     import anthropic
 
+    from trailer_to_campaign.agents.loop import MODEL_CALL_TIMEOUT_S
+
     # No SDK retries: a retried call that timed out could be billed twice but metered once.
-    return anthropic.AsyncAnthropic(api_key=api_key, max_retries=0)
+    # Timeout 300 s (T17): the slowest real call took 37 s, and 300 s covers a full 16k-token
+    # reply at 54 tokens a second. The client's timeout is per read, so it alone let a call hang
+    # 25+ minutes (#34); the agent loop also gives each call this as a deadline end to end.
+    return anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=MODEL_CALL_TIMEOUT_S)
 
 
 def run_agent(

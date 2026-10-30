@@ -38,6 +38,7 @@ class KeyMomentDecision:
     what_happens: str | None = None  # set for an edit
     mood: str | None = None
     light: bool | None = None  # an edit only: True for a Light Edit, False for heavy
+    by: str | None = None  # the Marketer who decided, when the surface knows (a Slack user id)
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class PostDecision:
     decision: str  # approve, edit or reject
     text: str | None = None  # the edited text
     light: bool | None = None
+    by: str | None = None
 
 
 @dataclass(frozen=True)

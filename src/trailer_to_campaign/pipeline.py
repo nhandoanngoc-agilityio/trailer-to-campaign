@@ -144,7 +144,7 @@ class _Run:
         approved = []
         for i, moment in enumerate(moments, start=1):
             decision = approver.key_moment(i, len(moments), moment)
-            self._record("key_moments", decision.decision, decision.light, item=i, **_km_fields(decision))
+            self._record("key_moments", decision.decision, decision.light, decision.by, item=i, **_km_fields(decision))
             kept = _apply(moment, decision)
             self.km_record.append(
                 {"key_moment": asdict(kept or moment), "decision": decision.decision, "light": decision.light}
@@ -163,6 +163,7 @@ class _Run:
                     "social_posts",
                     decision.decision,
                     decision.light,
+                    decision.by,
                     platform=c.post.platform,
                     language=c.post.language,
                     status=c.status,
@@ -190,7 +191,9 @@ class _Run:
 
         return recheck
 
-    def _record(self, stage: str, decision: str, light: bool | None, **fields: Any) -> None:
+    def _record(self, stage: str, decision: str, light: bool | None, by: str | None = None, **fields: Any) -> None:
+        if by is not None:  # the Marketer who decided, when the surface knows (Slack does; a terminal doesn't)
+            fields["by"] = by
         self.meter.event("approval", stage=stage, decision=decision, light=light, **fields)
         self.decisions[stage].append(decision == "approve" or (decision == "edit" and light is True))
 

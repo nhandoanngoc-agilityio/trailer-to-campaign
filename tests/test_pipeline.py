@@ -357,6 +357,39 @@ def test_an_approval_records_who_decided_when_the_approver_knows(tmp_path: Path)
     assert [a["by"] for a in approvals] == ["U07A", "U07B", "U07B", "U07B", "U07B"] + ["U07A"] * 6
 
 
+# T10: every edit's measured change is recorded beside its Light/heavy mark, as a sanity check.
+
+
+def test_each_edit_records_its_measured_change_and_nothing_else_does(tmp_path: Path) -> None:
+    _, lines, _ = run(tmp_path, FakeStages(), marketer())
+    approvals = events(lines, "approval")
+    edits = [a for a in approvals if a["decision"] == "edit"]
+    assert [a["changed"] for a in edits] == pytest.approx([0.818, 0.333, 0.455], abs=0.01)
+    assert all("changed" not in a for a in approvals if a["decision"] != "edit")
+
+
+def test_the_approval_rate_comes_with_the_measured_change_and_light_edits_that_changed_a_lot(tmp_path: Path) -> None:
+    _, lines, _ = run(tmp_path, FakeStages(), marketer())
+    [rate] = events(lines, "approval_rate")
+    assert rate["light_edit_change"]["count"] == 2
+    assert rate["light_edit_change"]["mean"] == pytest.approx((0.818 + 0.333) / 2, abs=0.01)
+    assert rate["heavy_edit_change"] == {"count": 1, "mean": pytest.approx(0.455, abs=0.01)}
+    flagged = [(f["where"], f["changed"]) for f in rate["light_edits_over_30pct"]]
+    assert flagged == [
+        ("key moment 2", pytest.approx(0.818, abs=0.01)),
+        ("facebook en", pytest.approx(0.333, abs=0.01)),
+    ]
+    said = run.out  # type: ignore[attr-defined]
+    assert "Measured change" in said and "key moment 2" in said
+
+
+def test_a_run_with_no_edits_has_no_measured_change_to_report(tmp_path: Path) -> None:
+    approver = ScriptedApprover([APPROVE_KM] * 5, [APPROVE_POST] * 6)
+    _, lines, _ = run(tmp_path, FakeStages(), approver)
+    [rate] = events(lines, "approval_rate")
+    assert rate["light_edit_change"] == {"count": 0, "mean": None} and rate["light_edits_over_30pct"] == []
+
+
 def test_what_a_run_says_names_its_run_but_no_local_path(tmp_path: Path) -> None:
     """In Slack, everything the Run says is posted to the channel: no paths on the host machine."""
     run(tmp_path, FakeStages(), marketer())

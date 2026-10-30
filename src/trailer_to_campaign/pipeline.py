@@ -29,12 +29,23 @@ from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import AgentFailed
 from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview
 from trailer_to_campaign.agents.social_posts import SocialPost
-from trailer_to_campaign.approval import ApprovalAborted, Approver, KeyMomentDecision, PostDecision, Recheck
+from trailer_to_campaign.approval import (
+    ApprovalAborted,
+    Approver,
+    KeyMomentDecision,
+    PostDecision,
+    Recheck,
+    key_moment_text,
+    measured_change,
+)
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.config import Settings
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog
 
 # Code traces the Copywriter's claims because it lists them; a person's edit lists none.
+# A Light Edit that changed more of the words than this is listed for a second look (never overridden).
+LIGHT_EDIT_FLAG = 0.30
+
 UNTRACED_EDIT = (
     "Facts you added aren't traced: code checked the quotes, title, limits and brand rules, "
     "and the Checker judged spoilers and invented details. Check new facts yourself."
@@ -124,6 +135,7 @@ class _Run:
         self.decisions: dict[str, list[bool]] = {"key_moments": [], "social_posts": []}  # approved light or unedited?
         self.km_record: list[dict[str, Any]] = []  # what the marketer decided, kept however the Run ends
         self.posts_record: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []  # each edit's mark and measured change, for the summary
 
     def say(self, text: str) -> None:
         print(text, file=self.out, flush=True)
@@ -146,8 +158,21 @@ class _Run:
         approved = []
         for i, moment in enumerate(moments, start=1):
             decision = approver.key_moment(i, len(moments), moment)
-            self._record("key_moments", decision.decision, decision.light, decision.by, item=i, **_km_fields(decision))
             kept = _apply(moment, decision)
+            changed = None
+            if decision.decision == "edit" and kept:
+                before, after = (key_moment_text(m.what_happens, m.mood) for m in (moment, kept))
+                changed = measured_change(before, after)
+            self._record(
+                "key_moments",
+                decision.decision,
+                decision.light,
+                decision.by,
+                changed,
+                where=f"key moment {i}",
+                item=i,
+                **_km_fields(decision),
+            )
             self.km_record.append(
                 {"key_moment": asdict(kept or moment), "decision": decision.decision, "light": decision.light}
             )
@@ -161,11 +186,14 @@ class _Run:
             self.say(f"\nApproval of {len(checked)} Social Posts")
             for i, c in enumerate(checked, start=1):
                 decision = approver.social_post(i, len(checked), c, self._rechecker(stages, c, approved))
+                edited = decision.decision == "edit" and decision.text is not None
                 self._record(
                     "social_posts",
                     decision.decision,
                     decision.light,
                     decision.by,
+                    measured_change(c.post.text, decision.text or "") if edited else None,
+                    where=f"{c.post.platform} {c.post.language}",
                     platform=c.post.platform,
                     language=c.post.language,
                     status=c.status,
@@ -193,9 +221,21 @@ class _Run:
 
         return recheck
 
-    def _record(self, stage: str, decision: str, light: bool | None, by: str | None = None, **fields: Any) -> None:
+    def _record(
+        self,
+        stage: str,
+        decision: str,
+        light: bool | None,
+        by: str | None,
+        changed: float | None,
+        where: str,
+        **fields: Any,
+    ) -> None:
         if by is not None:  # the Marketer who decided, when the surface knows (Slack does; a terminal doesn't)
             fields["by"] = by
+        if changed is not None:  # an edit: how much it changed, beside the Marketer's Light/heavy mark
+            fields["changed"] = changed
+            self.edits.append({"where": where, "light": light is True, "changed": changed})
         self.meter.event("approval", stage=stage, decision=decision, light=light, **fields)
         self.decisions[stage].append(decision == "approve" or (decision == "edit" and light is True))
 
@@ -205,8 +245,21 @@ class _Run:
         self.save_campaign(stop)
         rates = {stage: _rate(d) for stage, d in self.decisions.items()}
         rates["overall"] = _rate([x for d in self.decisions.values() for x in d])
+        light = [e["changed"] for e in self.edits if e["light"]]
+        heavy = [e["changed"] for e in self.edits if not e["light"]]
+        outliers = [
+            {"where": e["where"], "changed": e["changed"]}
+            for e in self.edits
+            if e["light"] and e["changed"] > LIGHT_EDIT_FLAG
+        ]
         if any(self.decisions.values()):
-            self.meter.event("approval_rate", **rates)
+            self.meter.event(
+                "approval_rate",
+                **rates,
+                light_edit_change=_mean(light),
+                heavy_edit_change=_mean(heavy),
+                light_edits_over_30pct=outliers,
+            )
         self.run_log.finish(self.meter.spent, stop)
         self.say(f"\nRun {stop}: spent ${self.meter.spent:.4f} of ${self.meter.limit}.")
         if any(self.decisions.values()):
@@ -214,8 +267,26 @@ class _Run:
                 f"Approval Rate (approved unedited or with a Light Edit): Key Moments {rates['key_moments']}, "
                 f"Social Posts {rates['social_posts']}, overall {rates['overall']}."
             )
+        if self.edits:
+            self.say(
+                "Measured change (share of words an edit changed): "
+                f"Light Edits {_shown(light)}, heavy edits {_shown(heavy)}."
+            )
+        if outliers:
+            listed = ", ".join(f"{o['where']} ({o['changed']:.0%})" for o in outliers)
+            self.say(
+                f"Light Edits that changed over {LIGHT_EDIT_FLAG:.0%} of the words, worth a second look: {listed}."
+            )
         self.say(f"Files are next to the Run Log, in {self.where}/")
         return code
+
+
+def _mean(changes: list[float]) -> dict[str, Any]:
+    return {"count": len(changes), "mean": round(sum(changes) / len(changes), 3) if changes else None}
+
+
+def _shown(changes: list[float]) -> str:
+    return f"{sum(changes) / len(changes):.0%} on average ({len(changes)})" if changes else "none"
 
 
 def _km_fields(decision: KeyMomentDecision) -> dict[str, Any]:

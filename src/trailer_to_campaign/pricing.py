@@ -9,6 +9,7 @@ A model missing from PRICES is refused, never guessed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from decimal import Decimal
 from typing import Any
@@ -74,23 +75,31 @@ class Usage:
             if getattr(self, f.name) < 0:
                 raise ValueError(f"{f.name} tokens can't be negative")
 
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(*(getattr(self, f.name) + getattr(other, f.name) for f in fields(self)))
+
     @classmethod
     def from_api(cls, usage: Any) -> Usage:
-        """Map a Messages API `usage` object onto Usage, the same way for every agent.
+        """Map a Messages API `usage` onto Usage, the same way for every agent.
 
+        It may be the SDK's object or, from the Agent SDK's stream, a plain dict.
         The cache fields are nullable. When the 5m/1h split of cache writes is
         missing, the writes are charged at the dearer 1h price.
         """
-        split = getattr(usage, "cache_creation", None)
+
+        def get(source: Any, name: str) -> Any:
+            return source.get(name) if isinstance(source, Mapping) else getattr(source, name, None)
+
+        split = get(usage, "cache_creation")
         if split is not None:
-            write_5m = getattr(split, "ephemeral_5m_input_tokens", None) or 0
-            write_1h = getattr(split, "ephemeral_1h_input_tokens", None) or 0
+            write_5m = get(split, "ephemeral_5m_input_tokens") or 0
+            write_1h = get(split, "ephemeral_1h_input_tokens") or 0
         else:
-            write_5m, write_1h = 0, getattr(usage, "cache_creation_input_tokens", None) or 0
+            write_5m, write_1h = 0, get(usage, "cache_creation_input_tokens") or 0
         return cls(
-            input=usage.input_tokens or 0,
-            output=usage.output_tokens or 0,
-            cache_read=getattr(usage, "cache_read_input_tokens", None) or 0,
+            input=get(usage, "input_tokens") or 0,
+            output=get(usage, "output_tokens") or 0,
+            cache_read=get(usage, "cache_read_input_tokens") or 0,
             cache_write_5m=write_5m,
             cache_write_1h=write_1h,
         )

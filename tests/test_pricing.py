@@ -80,3 +80,15 @@ def test_usage_from_api_reads_the_cache_write_split() -> None:
 def test_usage_from_api_charges_an_unsplit_cache_write_at_the_1h_price() -> None:
     api = SimpleNamespace(input_tokens=0, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=50)
     assert Usage.from_api(api) == Usage(cache_write_1h=50)
+
+
+def test_usage_from_api_reads_a_stream_events_dict_the_same_way() -> None:
+    # The Agent SDK streams raw API events as dicts: one mapping for both harnesses (T11).
+    split = {"input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 30,
+             "cache_creation": {"ephemeral_5m_input_tokens": 40, "ephemeral_1h_input_tokens": 30}}  # fmt: skip
+    assert Usage.from_api(split) == Usage(input=10, output=20, cache_read=30, cache_write_5m=40, cache_write_1h=30)
+    assert Usage.from_api({"input_tokens": 5, "cache_creation_input_tokens": 50}) == Usage(5, 0, 0, 0, 50)
+
+
+def test_usages_add_field_by_field() -> None:
+    assert Usage(1, 2, 3, 4, 5) + Usage(10, 20, 30, 40, 50) == Usage(11, 22, 33, 44, 55)

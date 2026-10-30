@@ -15,7 +15,14 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultError, ResultMessage, StreamEvent
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    CLIConnectionError,
+    ResultError,
+    ResultMessage,
+    StreamEvent,
+    SystemMessage,
+)
 from mcp import Client
 
 MODEL = "claude-opus-5-5"
@@ -65,8 +72,11 @@ class FakeQuery:
         crash_after: int | None = None,  # stop after this many turns with no ResultMessage
         open_last: bool = False,  # the last response starts but never finishes (no message_delta)
         prompts: list[int] | None = None,  # each response's prompt tokens (default INPUT)
+        model: str = MODEL,  # the model id the stream reports
+        never_starts: bool = False,  # the CLI fails before sending anything (not installed, say)
     ) -> None:
         self.turns = list(turns)
+        self.model, self.never_starts = model, never_starts
         self.end, self.extra_usage, self.crash_after, self.open_last = end, extra_usage or {}, crash_after, open_last
         self.prompts = prompts or []
         self.input_total = 0
@@ -80,6 +90,9 @@ class FakeQuery:
         return self._run(options)
 
     async def _run(self, options: ClaudeAgentOptions) -> AsyncIterator[Any]:
+        if self.never_starts:
+            raise CLIConnectionError("Claude Code not found")
+        yield SystemMessage(subtype="init", data={"type": "system", "subtype": "init"})
         server = options.mcp_servers["watcher"]["instance"]  # type: ignore[index]
         async with Client(server) as client:
             for turn in self.turns:
@@ -88,7 +101,9 @@ class FakeQuery:
                 self.responses += 1
                 yield self._event({"type": "message_start", "message": self._message()})
                 if self.open_last and self.responses == len(self.turns):
-                    return
+                    if self.end != "error_during_execution":
+                        return  # the CLI died mid-response: no result
+                    break  # the CLI reports the crash, with the partial response's usage
                 yield self._event({"type": "message_delta", "usage": {"output_tokens": OUTPUT}})
                 stop = False
                 for call in turn(self.session):
@@ -114,7 +129,7 @@ class FakeQuery:
         self.input_total += tokens
         return {
             "id": f"msg_{self.responses}",
-            "model": MODEL,
+            "model": self.model,
             "usage": {"input_tokens": tokens, "output_tokens": 1, "cache_read_input_tokens": 0},
         }
 
@@ -133,18 +148,22 @@ class FakeQuery:
         return None
 
     async def _post(self, options: ClaudeAgentOptions, call: Call, seen: Seen) -> bool:
+        """PostToolUse after a tool that worked; PostToolUseFailure after an error result, as the CLI may."""
+        event = "PostToolUseFailure" if seen.is_error else "PostToolUse"
+        extra = {"error": json.dumps(seen.content)} if seen.is_error else {"tool_response": seen.content}
         stop = False
-        for matcher in (options.hooks or {}).get("PostToolUse", []):
+        for matcher in (options.hooks or {}).get(event, []):
             for hook in matcher.hooks:
-                out = await hook({**_hook_input("PostToolUse", call), "tool_response": seen.content}, "tu_1", {})
+                out = await hook({**_hook_input(event, call), **extra}, "tu_1", {})
                 stop = stop or out.get("continue_") is False
         return stop
 
     def _result(self) -> ResultMessage:
+        finished = self.responses - (1 if self.open_last else 0)  # a cut-off response reports no output
         usage = {
-            MODEL: {
+            self.model: {
                 "inputTokens": self.input_total,
-                "outputTokens": OUTPUT * self.responses,
+                "outputTokens": OUTPUT * finished,
                 "cacheReadInputTokens": 0,
                 "cacheCreationInputTokens": 0,
                 "webSearchRequests": 0,

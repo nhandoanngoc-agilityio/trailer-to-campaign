@@ -13,8 +13,9 @@ The SDK runs the agent loop; everything that makes the Watcher safe stays ours:
 
 The SDK can't be metered call by call (ADR 0009). Before it starts, its own spending
 cap is set to what's left of the Film Budget less one worst-case response, so it stops
-while the Run is still inside the Film Budget; a prompt past PROMPT_GUARD stops the Run, so
-no response can outgrow that margin. Each response is charged at our prices
+while the Run is still inside the Film Budget. Before each tool result goes back, the Run
+stops if the next prompt could outgrow that margin, or if what's left in our own prices is
+less than the margin (the SDK's cap counts in its own price table). Each response is charged at our prices
 from the usage it streams; usage the stream never showed is charged from the result;
 a response cut off, or a request in flight when the CLI dies, is charged its worst case.
 """
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -46,17 +47,23 @@ from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import MAX_TOKENS, AgentFailed, McpTools, ToolResult
 from trailer_to_campaign.agents.watcher import EFFORT, MAX_TURNS, MODEL, start_watching, submit_tool, tool_gate
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
-from trailer_to_campaign.pricing import PRICES, Usage, worst_case_usd
+from trailer_to_campaign.footage.settings import LONG_EDGE_PX
+from trailer_to_campaign.pricing import PRICES, Usage, cost_usd, worst_case_usd
 
 SERVER = "watcher"
 AGENT = "watcher"
 # The largest prompt the cap's margin allows for: one response at this size and MAX_TOKENS
-# can't take the Run past its Film Budget. The largest Watcher prompt seen (v0, the T8 Eval
-# Set) was about 26,000 tokens.
+# can't take the Run past its Film Budget. No request is sent that could be larger: the
+# next prompt is estimated from this one, a full reply and this turn's tool results. The
+# largest Watcher prompt seen (v0, the T8 Eval Set) was about 26,000 tokens.
 MAX_CONTEXT_TOKENS = 100_000
-# Once a response's prompt passes this, the Run stops before another request: the next
-# prompt adds at most one reply and one turn's tool results, so it stays inside the margin.
-PROMPT_GUARD = 50_000
+# The most image tokens one frame can cost: frames are at most LONG_EDGE_PX on a side,
+# and an image costs about (width x height) / 750 tokens.
+IMAGE_TOKENS = LONG_EDGE_PX * LONG_EDGE_PX // 750 + 1
+# Text tokens are estimated high: at most one per two characters (Vietnamese runs denser than English).
+CHARS_PER_TOKEN = 2
+# A model id with no price of ours is charged at the dearest one: never guessed low.
+DEAREST = max(PRICES, key=lambda m: PRICES[m].output)
 # Claude Code keeps a tool result inline up to a size, and past it saves the result to a
 # file the Watcher can't read (it has no file tools); the footage timeline must stay inline.
 RESULT_CHARS = 1_000_000
@@ -83,31 +90,58 @@ class _Session:
     """What the SDK session has done that the meter and the hooks need to know."""
 
     meter: FilmMeter
-    failure: BaseException | None = None  # the gate gave up, or the Film Budget was reached, inside a tool
+    margin: Decimal  # one worst-case response, held back from the SDK's cap
+    done: Callable[[], bool]  # the gate has accepted Key Moments
+    failure: BaseException | None = None  # the gate gave up, or a limit was reached, inside a tool
     finished: bool = False  # a hook ended the session: no request follows the last tool
-    in_flight: bool = True  # a request may be on its way (at the start, and after each tool result)
+    in_flight: bool = False  # a request may be on its way (once the CLI is up, and after each tool result)
+    started: bool = False  # the CLI has said anything at all
     open: tuple[str, Usage] | None = None  # the response streaming now: its model and prompt usage
-    seen: dict[str, Usage] = field(default_factory=dict)  # usage charged so far, by model
+    seen: dict[str, Usage] = field(default_factory=dict)  # usage charged so far, by model id
     last_prompt: int = 0  # the latest response's prompt tokens
+    turn_tokens: int = 0  # an estimate of the tool results returned since that response
+
+    def start(self) -> None:
+        """The CLI is up, so from now on a request may be sent before we see it."""
+        if not self.started:
+            self.started, self.in_flight = True, True
 
     def stream(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "message_start":
             message = event.get("message") or {}
-            self.open = (message.get("model") or MODEL, _usage(message.get("usage") or {}))
-            self.last_prompt = self.open[1].prompt_tokens
-            self.in_flight = False
+            self.open = (message.get("model") or MODEL, Usage.from_api(message.get("usage") or {}))
+            self.last_prompt, self.turn_tokens, self.in_flight = self.open[1].prompt_tokens, 0, False
         elif kind == "message_delta" and self.open is not None:
             model, prompt = self.open
-            output = int((event.get("usage") or {}).get("output_tokens") or 0)
             self.open = None
-            self._charge(model, Usage(prompt.input, output, prompt.cache_read, prompt.cache_write_5m,
-                                      prompt.cache_write_1h))  # fmt: skip
+            self._charge(model, replace(prompt, output=int((event.get("usage") or {}).get("output_tokens") or 0)))
+
+    def after_tool(self, result: ToolResult) -> None:
+        """Before a tool result goes back (and so before the next request): stop if that request could break a limit.
+
+        Never once the Key Moments are accepted: that work is done and paid for."""
+        self.turn_tokens += _tokens(result)
+        self.in_flight = True
+        if self.failure is not None or self.done():
+            return
+        next_prompt = self.last_prompt + MAX_TOKENS + self.turn_tokens
+        if next_prompt > MAX_CONTEXT_TOKENS:
+            self.failure = AgentFailed(
+                f"the {AGENT}'s next prompt could reach {next_prompt} tokens, past the {MAX_CONTEXT_TOKENS} "
+                "the Film Budget's margin covers"
+            )
+        elif self.meter.remaining() - self._open_worst() < self.margin:
+            # In our prices: the SDK's own cap counts in its bundled price table.
+            self.meter.event("film_budget_reached", model=MODEL, spent_usd=self.meter.spent,
+                             limit_usd=self.meter.limit, next_call_usd=self.margin)  # fmt: skip
+            self.failure = FilmBudgetReached(self.meter.spent, self.meter.limit, self.margin)
 
     def result(self, model_usage: dict[str, Any]) -> None:
-        """Charge what the result reports beyond what the stream showed (background calls, say)."""
+        """Charge what the result reports beyond what was already charged (background calls, say)."""
         for key, used in model_usage.items():
-            model = used.get("canonicalModel") or key
+            canonical = used.get("canonicalModel")
+            model = key if key in self.seen or canonical not in self.seen else canonical
             total = Usage(
                 input=int(used.get("inputTokens") or 0),
                 output=int(used.get("outputTokens") or 0),
@@ -115,50 +149,50 @@ class _Session:
                 cache_write_1h=int(used.get("cacheCreationInputTokens") or 0),  # no 5m/1h split: the dearer
             )
             left = _less(total, self.seen.get(model, Usage()))
-            if left == Usage():
-                continue
-            if model in PRICES:
-                self._charge(model, left)
-            else:
-                self.meter.charge_after(
-                    model, agent=AGENT, cost=Decimal(str(used.get("costUSD") or 0)), charged="sdk_estimate"
-                )
+            if left != Usage():
+                self._charge(canonical if model not in self.seen and canonical in PRICES else model, left)
 
     def unfinished(self) -> None:
-        """Fail closed: a response cut off, or a request that may have been sent, is charged its worst case."""
+        """Fail closed: a response cut off, or a request that may have been sent, is charged its worst case.
+
+        What is charged here is counted as seen, so the result's partial usage for it isn't charged again."""
         if self.open is not None:
             model, prompt = self.open
             self.open = None
-            worst = worst_case_usd(model, prompt.prompt_tokens, MAX_TOKENS)
-            self.meter.charge_after(model, agent=AGENT, cost=worst, charged="worst_case")
+            self._charge_worst(model, prompt.prompt_tokens)
         elif self.in_flight and not self.finished:
-            worst = worst_case_usd(MODEL, MAX_CONTEXT_TOKENS, MAX_TOKENS)
-            self.meter.charge_after(MODEL, agent=AGENT, cost=worst, charged="worst_case")
+            self._charge_worst(MODEL, MAX_CONTEXT_TOKENS)
         self.in_flight = False
 
+    def _open_worst(self) -> Decimal:
+        if self.open is None:
+            return Decimal(0)
+        model, prompt = self.open
+        return worst_case_usd(_priced(model), prompt.prompt_tokens, MAX_TOKENS)
+
     def _charge(self, model: str, usage: Usage) -> None:
-        self.seen[model] = _plus(self.seen.get(model, Usage()), usage)
-        self.meter.charge_after(model, agent=AGENT, usage=usage)
+        self.seen[model] = self.seen.get(model, Usage()) + usage
+        if model in PRICES:
+            self.meter.charge_after(model, agent=AGENT, usage=usage)
+        else:
+            self.meter.charge_after(model, agent=AGENT, usage=usage, cost=cost_usd(DEAREST, usage),
+                                    charged="dearest_price")  # fmt: skip
+
+    def _charge_worst(self, model: str, prompt_tokens: int) -> None:
+        self.seen[model] = self.seen.get(model, Usage()) + Usage(input=prompt_tokens, output=MAX_TOKENS)
+        worst = worst_case_usd(_priced(model), prompt_tokens, MAX_TOKENS)
+        self.meter.charge_after(model, agent=AGENT, cost=worst, charged="worst_case")
 
 
-def _usage(raw: dict[str, Any]) -> Usage:
-    split = raw.get("cache_creation") or {}
-    if split:
-        write_5m, write_1h = split.get("ephemeral_5m_input_tokens") or 0, split.get("ephemeral_1h_input_tokens") or 0
-    else:
-        write_5m, write_1h = 0, raw.get("cache_creation_input_tokens") or 0
-    return Usage(
-        input=raw.get("input_tokens") or 0,
-        output=raw.get("output_tokens") or 0,
-        cache_read=raw.get("cache_read_input_tokens") or 0,
-        cache_write_5m=write_5m,
-        cache_write_1h=write_1h,
-    )
+def _priced(model: str) -> str:
+    return model if model in PRICES else DEAREST
 
 
-def _plus(a: Usage, b: Usage) -> Usage:
-    return Usage(a.input + b.input, a.output + b.output, a.cache_read + b.cache_read,
-                 a.cache_write_5m + b.cache_write_5m, a.cache_write_1h + b.cache_write_1h)  # fmt: skip
+def _tokens(result: ToolResult) -> int:
+    """A high estimate of the prompt tokens a tool result adds."""
+    images = sum(block["type"] == "image" for block in result.content)
+    chars = sum(len(block.get("text", "")) for block in result.content if block["type"] != "image")
+    return images * IMAGE_TOKENS + chars // CHARS_PER_TOKEN + 1
 
 
 def _less(total: Usage, seen: Usage) -> Usage:
@@ -191,13 +225,8 @@ def sdk_tools(definitions: list[dict[str, Any]], call_tool: Any, session: _Sessi
                 # The SDK would only show an exception to the model; the Run must stop instead.
                 session.failure = err
                 result = ToolResult.error(f"Stopping: {err}")
-            if session.last_prompt > PROMPT_GUARD and session.failure is None:
-                session.failure = AgentFailed(
-                    f"the {AGENT}'s prompt grew past {PROMPT_GUARD} tokens ({session.last_prompt}); "
-                    "stopped so the Film Budget's margin holds"
-                )
             session.meter.event("tool_call", agent=AGENT, tool=name, is_error=result.is_error)
-            session.in_flight = True
+            session.after_tool(result)
             return _to_sdk(result)
 
         return handler
@@ -205,7 +234,7 @@ def sdk_tools(definitions: list[dict[str, Any]], call_tool: Any, session: _Sessi
     return [wrap(d["name"], d["description"], d["input_schema"]) for d in definitions]
 
 
-def sdk_hooks(allowed: list[str], session: _Session, done: Callable[[], bool]) -> dict[str, list[HookMatcher]]:
+def sdk_hooks(allowed: list[str], session: _Session) -> dict[str, list[HookMatcher]]:
     async def only_the_watchers_tools(hook: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         if hook.get("tool_name") in allowed:
             return {}
@@ -218,14 +247,16 @@ def sdk_hooks(allowed: list[str], session: _Session, done: Callable[[], bool]) -
         }
 
     async def stop_when_decided(hook: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
-        if session.failure is None and not done():
+        if session.failure is None and not session.done():
             return {}
         session.finished, session.in_flight = True, False
         return {"continue_": False, "stopReason": "the Watcher is done"}
 
     return {
         "PreToolUse": [HookMatcher(hooks=[only_the_watchers_tools])],
+        # A tool's error result may come back as PostToolUseFailure: a failure must stop the Run either way.
         "PostToolUse": [HookMatcher(hooks=[stop_when_decided])],
+        "PostToolUseFailure": [HookMatcher(hooks=[stop_when_decided])],
     }
 
 
@@ -261,13 +292,13 @@ async def watch_trailer_sdk(
                     next_call_usd=margin)  # fmt: skip
         raise FilmBudgetReached(meter.spent, meter.limit, margin)
     watching = start_watching(film, source, meter)
-    session = _Session(meter)
+    session = _Session(meter, margin, lambda: watching.gate.accepted is not None)
 
     async def watch(mcp: McpTools) -> list[KeyMoment]:
         definitions = sorted([*mcp.definitions, submit_tool()], key=lambda t: t["name"])
         allowed = [tool_name(d["name"]) for d in definitions]
         server = create_sdk_mcp_server(SERVER, tools=sdk_tools(definitions, tool_gate(watching, mcp), session))
-        hooks = sdk_hooks(allowed, session, lambda: watching.gate.accepted is not None)
+        hooks = sdk_hooks(allowed, session)
         task = load_prompt("watcher_task").format(film=film, source=source)
         result: ResultMessage | None = None
         error: ClaudeSDKError | None = None
@@ -275,6 +306,7 @@ async def watch_trailer_sdk(
             options = sdk_options(server=server, allowed=allowed, hooks=hooks, cap=cap, api_key=api_key, cwd=cwd)
             try:
                 async for message in query(prompt=task, options=options):
+                    session.start()
                     if isinstance(message, StreamEvent) and message.parent_tool_use_id is None:
                         session.stream(message.event)
                     elif isinstance(message, ResultMessage):
@@ -282,10 +314,10 @@ async def watch_trailer_sdk(
             except ClaudeSDKError as err:
                 error = err
             finally:
+                if result is None or result.subtype == "error_during_execution":
+                    session.unfinished()  # first, so the result's partial usage for it is netted out
                 if result is not None and result.model_usage:
                     session.result(dict(result.model_usage))
-                if result is None or result.subtype == "error_during_execution":
-                    session.unfinished()
         return _outcome(session, watching.gate.accepted, result, error, meter, margin)
 
     return await McpTools.using(servers, watch)

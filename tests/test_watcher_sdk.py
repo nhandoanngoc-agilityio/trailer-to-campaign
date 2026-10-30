@@ -22,7 +22,7 @@ from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.loop import MAX_TOKENS, AgentFailed
 from trailer_to_campaign.agents.watcher_sdk import MAX_CONTEXT_TOKENS, watch_trailer_sdk
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
-from trailer_to_campaign.pricing import Usage, cost_usd, worst_case_usd
+from trailer_to_campaign.pricing import PRICES, Usage, cost_usd, worst_case_usd
 from trailer_to_campaign.run_log import RunLog
 from trailer_to_campaign.tools.catalog import create_catalog_server
 from trailer_to_campaign.tools.footage import create_server
@@ -218,8 +218,10 @@ async def test_usage_the_stream_never_showed_is_charged_from_the_result(films: P
     await run.watch([look, see_every_frame, submit()], extra_usage=extra)
     by_model = {c["model"]: c for c in run.events("model_call")}
     assert by_model["claude-haiku-5-5"]["charged"] == "after" and by_model["claude-haiku-5-5"]["input_tokens"] == 1_000
-    assert by_model["claude-unknown-9"]["charged"] == "sdk_estimate"  # no price of ours: the SDK's estimate
-    assert Decimal(by_model["claude-unknown-9"]["cost_usd"]) == Decimal("0.02")
+    # No price of ours: our dearest, never the SDK's estimate (which could be $0 for a model it doesn't know).
+    unknown = by_model["claude-unknown-9"]
+    assert unknown["charged"] == "dearest_price" and unknown["input_tokens"] == 10
+    assert Decimal(unknown["cost_usd"]) == cost_usd(max(PRICES, key=lambda m: PRICES[m].output), Usage(input=10))
 
 
 async def test_a_crash_with_no_result_is_charged_a_worst_case_response(films: Path, tmp_path: Path) -> None:
@@ -231,6 +233,7 @@ async def test_a_crash_with_no_result_is_charged_a_worst_case_response(films: Pa
 
 
 async def test_a_response_cut_off_mid_stream_is_charged_its_worst_case(films: Path, tmp_path: Path) -> None:
+    # The CLI dies mid-response and reports nothing.
     run = Run(films, tmp_path)
     with pytest.raises(AgentFailed):
         await run.watch([look, see_every_frame], open_last=True)
@@ -252,14 +255,62 @@ async def test_reaching_the_cap_is_film_budget_reached(films: Path, tmp_path: Pa
     assert len(run.events("film_budget_reached")) == 1
 
 
-async def test_the_cap_margin_holds_because_a_prompt_past_the_guard_stops_the_run(films: Path, tmp_path: Path) -> None:
-    from trailer_to_campaign.agents.watcher_sdk import PROMPT_GUARD
-
-    assert PROMPT_GUARD < MAX_CONTEXT_TOKENS  # room for one more turn's reply and tool results
+async def test_a_next_prompt_that_could_outgrow_the_margin_is_never_sent(films: Path, tmp_path: Path) -> None:
+    # The next prompt is this one, plus a full reply, plus this turn's tool results (frames included).
     run = Run(films, tmp_path)
+    near = MAX_CONTEXT_TOKENS - MAX_TOKENS - 500  # the frames this turn returns push it over
     with pytest.raises(AgentFailed, match="prompt"):
-        await run.watch([look, see_every_frame, submit()], prompts=[2_000, PROMPT_GUARD + 1])
-    assert len(run.events("model_call")) == 2  # no request after the prompt passed the guard
+        await run.watch([look, see_every_frame, submit()], prompts=[2_000, near])
+    assert len(run.events("model_call")) == 2  # stopped before a third request
+
+
+async def test_a_large_prompt_whose_next_turn_still_fits_goes_on(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    moments, fake = await run.watch([look, see_every_frame, submit()], prompts=[2_000, 60_000, 70_000])
+    assert len(moments) >= 5 and fake.responses == 3
+
+
+async def test_the_guard_never_fails_the_call_that_accepted_the_key_moments(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    moments, _ = await run.watch([look, see_every_frame, submit()], prompts=[2_000, 3_000, MAX_CONTEXT_TOKENS - 1])
+    assert len(moments) >= 5  # accepted and paid for: kept
+
+
+async def test_the_film_budget_is_kept_in_our_prices_not_only_the_sdks(films: Path, tmp_path: Path) -> None:
+    # The fake CLI never enforces max_budget_usd, as a CLI whose price table is too low wouldn't in time.
+    margin = worst_case_usd(MODEL, MAX_CONTEXT_TOKENS, MAX_TOKENS)
+    run = Run(films, tmp_path, budget=str(margin + Decimal("0.05")))
+    turns = [look, *[see_every_frame] * 8, submit()]
+    with pytest.raises(FilmBudgetReached):
+        await run.watch(turns)
+    per_response = cost_usd(MODEL, Usage(input=INPUT, output=OUTPUT))
+    assert len(run.events("model_call")) == 4  # the first response that left less than the margin was the last
+    assert run.meter.spent == 4 * per_response and run.meter.spent <= run.meter.limit
+
+
+async def test_a_model_we_have_no_price_for_is_charged_at_our_dearest_price(films: Path, tmp_path: Path) -> None:
+    dearest = max(PRICES, key=lambda m: PRICES[m].output)
+    run = Run(films, tmp_path)
+    await run.watch([look, see_every_frame, submit()], model="claude-opus-5-5-20261101")
+    calls = run.events("model_call")
+    assert len(calls) == 3  # once each: the result's usage under the same id isn't charged again
+    assert {(c["model"], c["charged"]) for c in calls} == {("claude-opus-5-5-20261101", "dearest_price")}
+    assert run.meter.spent == 3 * cost_usd(dearest, Usage(input=INPUT, output=OUTPUT))
+
+
+async def test_a_cut_off_response_reported_by_the_cli_is_charged_once(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    with pytest.raises(AgentFailed):
+        await run.watch([look, see_every_frame], open_last=True, end="error_during_execution")
+    charged = [c["charged"] for c in run.events("model_call")]
+    assert charged == ["after", "worst_case"]  # its partial usage in the result is not charged again
+
+
+async def test_a_cli_that_never_starts_charges_nothing(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    with pytest.raises(AgentFailed, match="CLIConnectionError"):
+        await run.watch([look], never_starts=True)
+    assert run.events("model_call") == [] and run.meter.spent == 0
 
 
 def test_the_default_film_budget_leaves_the_sdk_watcher_room_to_work() -> None:

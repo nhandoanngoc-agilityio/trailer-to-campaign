@@ -86,14 +86,17 @@ class FilmMeter:
     ) -> None:
         """Charge model spend that already happened, for a harness that can't be metered call by call (ADR 0009).
 
-        usage is charged at our prices; cost (an estimate, or a fail-closed worst case) is
-        charged as given, labelled by charged. The money is spent either way, so spend past
-        the limit is charged in full, logged, and refuses the next metered call.
+        usage is charged at our prices; a cost (a fail-closed worst case, or usage priced
+        another way) is charged as given, labelled by charged, with any usage only logged.
+        The money is spent either way, so spend past the limit is charged in full, logged,
+        and refuses the next metered call.
         """
-        if usage is None and cost is None:
+        if cost is not None:
+            charge = cost
+        elif usage is not None:
+            charge = cost_usd(model, usage)
+        else:
             raise ValueError("charge_after needs the usage or the cost")
-        charge = cost_usd(model, usage) if usage is not None else cost
-        assert charge is not None
         self.spent += charge
         usage = usage or Usage()
         self._log(

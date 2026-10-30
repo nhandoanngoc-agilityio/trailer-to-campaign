@@ -250,3 +250,18 @@ async def test_reaching_the_cap_is_film_budget_reached(films: Path, tmp_path: Pa
     with pytest.raises(FilmBudgetReached):
         await run.watch([look], end="error_max_budget_usd")
     assert len(run.events("film_budget_reached")) == 1
+
+
+async def test_the_cap_margin_holds_because_a_prompt_past_the_guard_stops_the_run(films: Path, tmp_path: Path) -> None:
+    from trailer_to_campaign.agents.watcher_sdk import PROMPT_GUARD
+
+    assert PROMPT_GUARD < MAX_CONTEXT_TOKENS  # room for one more turn's reply and tool results
+    run = Run(films, tmp_path)
+    with pytest.raises(AgentFailed, match="prompt"):
+        await run.watch([look, see_every_frame, submit()], prompts=[2_000, PROMPT_GUARD + 1])
+    assert len(run.events("model_call")) == 2  # no request after the prompt passed the guard
+
+
+def test_the_default_film_budget_leaves_the_sdk_watcher_room_to_work() -> None:
+    margin = worst_case_usd(MODEL, MAX_CONTEXT_TOKENS, MAX_TOKENS)
+    assert Decimal("2.00") - margin >= Decimal("0.75")  # v0 spends about $0.21 on Agent 327

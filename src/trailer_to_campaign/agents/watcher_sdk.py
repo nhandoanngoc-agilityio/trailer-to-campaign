@@ -13,7 +13,8 @@ The SDK runs the agent loop; everything that makes the Watcher safe stays ours:
 
 The SDK can't be metered call by call (ADR 0009). Before it starts, its own spending
 cap is set to what's left of the Film Budget less one worst-case response, so it stops
-while the Run is still inside the Film Budget. Each response is charged at our prices
+while the Run is still inside the Film Budget; a prompt past PROMPT_GUARD stops the Run, so
+no response can outgrow that margin. Each response is charged at our prices
 from the usage it streams; usage the stream never showed is charged from the result;
 a response cut off, or a request in flight when the CLI dies, is charged its worst case.
 """
@@ -50,8 +51,12 @@ from trailer_to_campaign.pricing import PRICES, Usage, worst_case_usd
 SERVER = "watcher"
 AGENT = "watcher"
 # The largest prompt the cap's margin allows for: one response at this size and MAX_TOKENS
-# can't take the Run past its Film Budget. A Watcher's whole prompt stays well under it.
-MAX_CONTEXT_TOKENS = 200_000
+# can't take the Run past its Film Budget. The largest Watcher prompt seen (v0, the T8 Eval
+# Set) was about 26,000 tokens.
+MAX_CONTEXT_TOKENS = 100_000
+# Once a response's prompt passes this, the Run stops before another request: the next
+# prompt adds at most one reply and one turn's tool results, so it stays inside the margin.
+PROMPT_GUARD = 50_000
 # Claude Code keeps a tool result inline up to a size, and past it saves the result to a
 # file the Watcher can't read (it has no file tools); the footage timeline must stay inline.
 RESULT_CHARS = 1_000_000
@@ -83,12 +88,14 @@ class _Session:
     in_flight: bool = True  # a request may be on its way (at the start, and after each tool result)
     open: tuple[str, Usage] | None = None  # the response streaming now: its model and prompt usage
     seen: dict[str, Usage] = field(default_factory=dict)  # usage charged so far, by model
+    last_prompt: int = 0  # the latest response's prompt tokens
 
     def stream(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "message_start":
             message = event.get("message") or {}
             self.open = (message.get("model") or MODEL, _usage(message.get("usage") or {}))
+            self.last_prompt = self.open[1].prompt_tokens
             self.in_flight = False
         elif kind == "message_delta" and self.open is not None:
             model, prompt = self.open
@@ -184,6 +191,11 @@ def sdk_tools(definitions: list[dict[str, Any]], call_tool: Any, session: _Sessi
                 # The SDK would only show an exception to the model; the Run must stop instead.
                 session.failure = err
                 result = ToolResult.error(f"Stopping: {err}")
+            if session.last_prompt > PROMPT_GUARD and session.failure is None:
+                session.failure = AgentFailed(
+                    f"the {AGENT}'s prompt grew past {PROMPT_GUARD} tokens ({session.last_prompt}); "
+                    "stopped so the Film Budget's margin holds"
+                )
             session.meter.event("tool_call", agent=AGENT, tool=name, is_error=result.is_error)
             session.in_flight = True
             return _to_sdk(result)

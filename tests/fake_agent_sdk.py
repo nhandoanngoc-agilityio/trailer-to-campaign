@@ -64,9 +64,12 @@ class FakeQuery:
         extra_usage: dict[str, dict[str, Any]] | None = None,  # model_usage the stream never showed
         crash_after: int | None = None,  # stop after this many turns with no ResultMessage
         open_last: bool = False,  # the last response starts but never finishes (no message_delta)
+        prompts: list[int] | None = None,  # each response's prompt tokens (default INPUT)
     ) -> None:
         self.turns = list(turns)
         self.end, self.extra_usage, self.crash_after, self.open_last = end, extra_usage or {}, crash_after, open_last
+        self.prompts = prompts or []
+        self.input_total = 0
         self.session = Session()
         self.options: ClaudeAgentOptions | None = None
         self.prompt: str | None = None
@@ -106,10 +109,13 @@ class FakeQuery:
             raise ResultError(f"run ended with {self.end}", data={"subtype": self.end})
 
     def _message(self) -> dict[str, Any]:
+        n = self.responses - 1
+        tokens = self.prompts[n] if n < len(self.prompts) else INPUT
+        self.input_total += tokens
         return {
             "id": f"msg_{self.responses}",
             "model": MODEL,
-            "usage": {"input_tokens": INPUT, "output_tokens": 1, "cache_read_input_tokens": 0},
+            "usage": {"input_tokens": tokens, "output_tokens": 1, "cache_read_input_tokens": 0},
         }
 
     def _event(self, event: dict[str, Any]) -> StreamEvent:
@@ -137,7 +143,7 @@ class FakeQuery:
     def _result(self) -> ResultMessage:
         usage = {
             MODEL: {
-                "inputTokens": INPUT * self.responses,
+                "inputTokens": self.input_total,
                 "outputTokens": OUTPUT * self.responses,
                 "cacheReadInputTokens": 0,
                 "cacheCreationInputTokens": 0,

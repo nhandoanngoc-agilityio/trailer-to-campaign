@@ -32,7 +32,7 @@ from typing import Any
 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
-from trailer_to_campaign.config import MissingApiKey, Settings, load_settings, parse_film_budget
+from trailer_to_campaign.config import MissingApiKey, MissingSlackSettings, Settings, load_settings, parse_film_budget
 from trailer_to_campaign.pricing import Usage
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--key-moments", type=Path, required=True, help="a key_moments.json written by t2c watch")
     write.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     write.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
+    slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
+    slack.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
 
     commands.add_parser("serve-footage", help="run the footage MCP server on stdio (ADR 0002)")
     commands.add_parser("serve-catalog", help="run the Catalog Metadata MCP server on stdio")
@@ -279,6 +283,41 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
     return code
 
 
+def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    """The Slack front door (ADR 0002) over Socket Mode, until Ctrl-C.
+
+    Each Marketer's @mention is one Run: Approval comes from that Run Thread's buttons
+    and its progress is posted there. Ctrl-C ends a waiting Run in an error, never an approval.
+    """
+    from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+    from trailer_to_campaign import pipeline, slack_app
+
+    try:
+        bot_token, app_token = settings.require_slack()
+        api_key = settings.require_api_key()
+    except (MissingSlackSettings, MissingApiKey) as err:
+        print(err, file=sys.stderr)
+        return 2
+
+    def runner(request: Any, approver: Any, thread: Any) -> int:
+        stages = pipeline.real_stages(request.film, request.source, settings, lambda: make_client(api_key))
+        return pipeline.run_film(request.film, budget, runs_dir, stages, approver, out=thread)
+
+    door = slack_app.FrontDoor(settings.films_dir, settings.marketers, runner)
+    app = slack_app.build_app(bot_token, door)
+    log.info(
+        "Slack front door is up for %d Marketer(s); runs go to %s. Ctrl-C to stop.", len(settings.marketers), runs_dir
+    )
+    try:
+        SocketModeHandler(app, app_token).start()
+    except KeyboardInterrupt:
+        log.info("stopping: any Run waiting on Approval ends in an error")
+    finally:
+        door.close()
+    return 0
+
+
 def serve_footage(settings: Settings) -> int:
     from trailer_to_campaign.footage.sources import YtDlpDownloader
     from trailer_to_campaign.footage.transcript import FasterWhisperTranscriber
@@ -338,13 +377,19 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
         )
-    if args.command.startswith("serve-") and not settings.films_dir.is_dir():
+    if (args.command.startswith("serve-") or args.command == "slack") and not settings.films_dir.is_dir():
         # An MCP host may start the server in / or $HOME, where there is no films/ folder.
         print(
             f"no films folder at {settings.films_dir.resolve()}; set T2C_FILMS_DIR to the project's films/ folder",
             file=sys.stderr,
         )
         return 2
+    if args.command == "slack":
+        return slack(
+            budget=args.budget or settings.film_budget_usd,
+            runs_dir=args.runs_dir or settings.runs_dir,
+            settings=settings,
+        )
     if args.command == "serve-footage":
         return serve_footage(settings)
     if args.command in ("serve-catalog", "serve-spoilers"):

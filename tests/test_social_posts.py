@@ -247,3 +247,45 @@ def test_a_rewrite_of_a_post_not_asked_for_is_refused() -> None:
         trace([post("tiktok", "vi"), post("facebook", "en")], MOMENTS, CATALOG, required={("tiktok", "vi")})
     [problem] = caught.value.problems
     assert "facebook" in problem and "only" in problem
+
+
+# T16: a control character (other than a newline) is junk, not part of a post: the Copywriter
+# wrote "\ff" where it meant an emoji, and JSON read it as a form feed.
+
+T8_JUNK = EN.replace("Watch it now.", "\x0cf\x0cf Watch it now.")
+
+
+@pytest.mark.parametrize("text", [T8_JUNK, *(EN.replace("a spy ", f"a spy{c}") for c in "\t\r\x00\x7f\x85")])
+def test_a_post_with_a_control_character_is_refused(text: str) -> None:
+    [problem] = problems(six(text=text))
+    code = next(f"U+{ord(c):04X}" for c in text if c in "\x0c\t\r\x00\x7f\x85")
+    assert "control character" in problem and code in problem and "emoji itself" in problem
+
+
+def test_each_control_character_is_named_once() -> None:
+    [problem] = problems(six(text=T8_JUNK))
+    assert problem.count("U+000C") == 1
+
+
+def test_the_problem_shows_where_the_junk_is() -> None:
+    # Removing only the form feeds would leave "ff ff": the Copywriter (or a marketer) must see the letters too.
+    [problem] = problems(six(text=T8_JUNK))
+    assert r"\x0cf\x0cf Watch" in problem and "left from an escape" in problem
+
+
+def test_a_newline_is_allowed() -> None:
+    text = EN.replace(" Watch it now.", "\n\nWatch it now.")
+    assert trace(six(text=text), MOMENTS, CATALOG)[0].text == text
+
+
+def test_a_lone_surrogate_is_refused() -> None:
+    [problem] = problems(six(text=EN.replace("Watch", "\ud83c Watch")))
+    assert "U+D83C (half an emoji)" in problem
+
+
+def test_an_edit_with_a_control_character_is_refused_at_recheck() -> None:
+    edited = SocialPost("facebook", "en", T8_JUNK, [Claim(c["text"], c["source"]) for c in CLAIMS])
+    with pytest.raises(NotTraced) as caught:
+        trace([asdict(edited)], MOMENTS, CATALOG, required={("facebook", "en")})
+    [problem] = caught.value.problems
+    assert "U+000C" in problem

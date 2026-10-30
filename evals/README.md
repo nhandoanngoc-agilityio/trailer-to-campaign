@@ -6,7 +6,7 @@ The Eval Set: a fixed group of released Films that every change to an agent's pr
 evals/
 ├── eval_set.toml            the Films, by slug
 ├── films/<film>/film.toml   Catalog Metadata and the Spoiler List, in the same format as films/ (see films/README.md)
-├── expected/<film>.toml     the Answer Key: written by a person only, never by Claude
+├── expected/<film>.toml     the Answer Key: written by a person only, never by Claude (guarded, see below)
 └── drafts/                  Claude's candidates for a person to review and move in (gitignored)
 ```
 
@@ -15,6 +15,13 @@ The four Blender Films (CC-BY) are tracked in git: they are released, so their s
 ## The Answer Key
 
 One file per Film, checked strictly: an unknown key, a missing field or a `spoiler_id` that isn't on the Film's Spoiler List is refused before anything is spent.
+
+It is guarded against accidental changes (T14):
+- Claude's file tools are denied in `.claude/settings.json`.
+- `.claude/hooks/block_forbidden.py` blocks the obvious shell writes: `>`, `cp`, `mv`, `tee`, `sed -i`, `rm`, `touch`, `git checkout`/`restore`.
+- The `answer-key` CI job shows red on any PR that changes it.
+
+A person changing it on purpose merges past that red job knowing what changed.
 
 ```toml
 [[published_posts]]   # what the Film's studio actually posted, shown beside the generated posts

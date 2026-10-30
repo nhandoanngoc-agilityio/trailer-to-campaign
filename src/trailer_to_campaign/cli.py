@@ -385,12 +385,14 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     env = os.environ if env is None else env
     if getattr(args, "budget", None) is not None:
         env = {k: v for k, v in env.items() if k != "FILM_BUDGET_USD"}  # --budget wins
+    if getattr(args, "watcher", None) is not None or not hasattr(args, "watcher"):
+        env = {k: v for k, v in env.items() if k != "T2C_WATCHER"}  # --watcher wins; unused without a Watcher
     try:
         settings = load_settings(env)
     except ValueError as err:
         parser.error(str(err))
     if getattr(args, "watcher", None):
-        settings = replace(settings, watcher=args.watcher)  # --watcher wins over T2C_WATCHER
+        settings = replace(settings, watcher=args.watcher)
     if args.command == "dummy-run":
         return dummy_run(
             film=args.film,

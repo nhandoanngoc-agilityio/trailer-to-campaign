@@ -467,6 +467,16 @@ def test_the_summary_has_the_watchers_own_numbers(eval_dir: Path, tmp_path: Path
     assert Decimal(totals["cost_usd"]) == 2 * Decimal(data["films"][0]["watcher"]["cost_usd"])
 
 
+def test_a_half_written_run_log_line_never_loses_the_report(tmp_path: Path) -> None:
+    from trailer_to_campaign.evals import FilmResult, _watcher_numbers
+
+    log = tmp_path / "run.jsonl"
+    whole = '{"event": "model_call", "agent": "watcher", "cost_usd": "0.01"}'
+    log.write_text(whole + '\n{"event": "model_ca', encoding="utf-8")  # Ctrl-C mid-write
+    numbers = _watcher_numbers(FilmResult("alpha", None, run_log=log))
+    assert (numbers["model_calls"], numbers["cost_usd"]) == (1, "0.01")
+
+
 def test_the_report_names_the_watcher_that_ran(eval_dir: Path, tmp_path: Path) -> None:
     out = io.StringIO()
     run_eval(prepare(eval_dir), Decimal("2"), tmp_path / "runs", FakeStages().stages, out=out, watcher="sdk")

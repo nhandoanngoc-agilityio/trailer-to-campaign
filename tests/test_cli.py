@@ -713,6 +713,19 @@ def test_the_watcher_flag_reaches_the_command(
     assert seen == [expected]
 
 
+def test_a_bad_t2c_watcher_never_blocks_the_flag_or_a_command_without_a_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trailer_to_campaign import cli
+
+    seen: list[str] = []
+    monkeypatch.setattr(cli, "watch", lambda **kwargs: seen.append(kwargs["settings"].watcher) or 0)
+    bad = {"T2C_FILMS_DIR": str(FILMS), "T2C_WATCHER": "SDK"}
+    assert main(["watch", "--film", "agent-327", "--watcher", "v0"], env=bad) == 0  # the flag wins
+    assert seen == ["v0"]
+    assert main(["dummy-run", "--calls", "1", "--runs-dir", str(tmp_path)], env=bad) == 0  # no Watcher at all
+
+
 def test_an_unknown_watcher_flag_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main(["watch", "--film", "agent-327", "--watcher", "v2"])

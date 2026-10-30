@@ -457,7 +457,11 @@ def _watcher_numbers(r: FilmResult) -> dict[str, Any]:
     """The Watcher's own share of a Film's Run, read from its Run Log: what v0 and the SDK Watcher are compared on."""
     events = []
     if r.run_log is not None and r.run_log.exists():
-        events = [json.loads(line) for line in r.run_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for line in r.run_log.read_text(encoding="utf-8").splitlines():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:  # a line cut short by Ctrl-C: the report must still be written
+                continue
     mine = [e for e in events if e.get("agent") == "watcher"]
     calls = [e for e in mine if e["event"] == "model_call"]
     return {

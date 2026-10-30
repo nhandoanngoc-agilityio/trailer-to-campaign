@@ -48,7 +48,7 @@ The SDK Watcher cost 7% more. Most of the gap is one Film (Charge: one more mode
 **In the SDK Runs' logs:**
 - every response was charged after the fact at our prices
 - there were no worst-case charges, no SDK estimates and no other models
-- the largest prompt was 25,323 tokens, against the 50,000-token guard
+- the largest prompt was 25,323 tokens, against the margin's 100,000
 - the only tools called were the Watcher's four
 
 A smoke run on Agent 327 (`t2c watch --watcher sdk`) cost $0.1835 and stopped right after the accepted submission, with no extra model call.
@@ -66,7 +66,7 @@ The SDK wraps each of our tools. Every call still goes through `watcher.tool_gat
 | Never offered the Spoiler List (ADR 0007) | given only the footage and catalog servers | same servers |
 | No other tools | it has only the tools we list | `tools=[]` (no Bash, files or web), `setting_sources=[]` (nothing from `~/.claude` or CLAUDE.md), only the four Watcher tools allowed, and a `PreToolUse` hook that refuses any other tool by name |
 | Stops when done | the loop returns on an accepted submission | a `PostToolUse` hook ends the session (the SDK catches exceptions from tools, so a failure is recorded and the session stopped) |
-| Film Budget | reserves the worst case before each call (ADR 0005) | a spending cap from what's left minus one worst-case response, a prompt guard, and charges after each response at our prices (ADR 0009) |
+| Film Budget | reserves the worst case before each call (ADR 0005) | a spending cap from what's left minus one worst-case response, a check in our prices before each next request (budget and prompt size), and charges after each response at our prices (ADR 0009) |
 | No double billing | API client `max_retries=0` | the CLI's retries off (`CLAUDE_CODE_MAX_RETRIES=0`, and no timeout retries) |
 | Strict submission schema | `strict: true` on the API tool | not available through MCP tools; grounding still checks every field |
 

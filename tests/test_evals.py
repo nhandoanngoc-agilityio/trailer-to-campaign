@@ -401,9 +401,75 @@ def test_ctrl_c_still_writes_the_report_for_the_films_already_run(eval_dir: Path
     with pytest.raises(KeyboardInterrupt):
         run(eval_dir, tmp_path, fake)
     data = summary(tmp_path)
-    assert [f["film"] for f in data["films"]] == ["alpha"]
-    assert data["interrupted"] == "beta"
+    assert [(f["film"], f["stop"]) for f in data["films"]] == [("alpha", "completed"), ("gamma", "skipped")]
+    assert data["interrupted"] == ["beta"]  # T19: Films run side by side, so it names every Film not finished
     assert run_log(tmp_path, "beta")[-1]["stop_reason"] == "error"
+
+
+# T19: the Films run side by side; the report keeps the Eval Set's order.
+
+
+class SideBySide(FakeStages):
+    """Watches yield, and track how many Films are in the Watcher at once."""
+
+    def __init__(self, delays: dict[str, float] | None = None, meet: int = 0) -> None:
+        super().__init__()
+        self.delays, self.meet = delays or {}, meet
+        self.inside = self.most_inside = 0
+        self.arrived: Any = None
+
+    def stages(self, film: EvalFilm) -> EvalStages:
+        import anyio
+
+        base = super().stages(film)
+
+        async def watch(meter: FilmMeter) -> list[KeyMoment]:
+            self.inside += 1
+            self.most_inside = max(self.most_inside, self.inside)
+            if self.meet:  # every Film must be here before any goes on: a one-at-a-time run never gets past it
+                self.arrived = self.arrived or anyio.Event()
+                if self.inside == self.meet:
+                    self.arrived.set()
+                await self.arrived.wait()
+            await anyio.sleep(self.delays.get(film.slug, 0.01))
+            self.inside -= 1
+            return await self.watch(meter)
+
+        return EvalStages(check=base.check, watch=watch, write_and_check=base.write_and_check)
+
+
+def run_with(eval_dir: Path, tmp_path: Path, fake: FakeStages, parallel: int | None = None) -> tuple[int, str]:
+    out = io.StringIO()
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", fake.stages, out=out, parallel=parallel)
+    return code, out.getvalue()
+
+
+def test_the_films_run_side_by_side(eval_dir: Path, tmp_path: Path) -> None:
+    import signal
+
+    fake = SideBySide(meet=2)
+    signal.alarm(5)  # one at a time would wait forever
+    try:
+        code, _ = run_with(eval_dir, tmp_path, fake)
+    finally:
+        signal.alarm(0)
+    assert code == 0 and fake.most_inside == 2
+
+
+def test_the_report_keeps_the_eval_set_order_when_films_finish_out_of_order(eval_dir: Path, tmp_path: Path) -> None:
+    fake = SideBySide(delays={"alpha": 0.2, "beta": 0.01})
+    _, out = run_with(eval_dir, tmp_path, fake)
+    assert out.index(f"{'beta':20} completed") < out.index(f"{'alpha':20} completed")  # beta ended first
+    assert [f["film"] for f in summary(tmp_path)["films"]] == ["alpha", "beta", "gamma"]
+    [report] = (tmp_path / "runs" / "_eval").glob("*/report.md")
+    text = report.read_text()
+    assert text.index("alpha") < text.index("beta")
+
+
+def test_parallel_1_runs_one_film_at_a_time(eval_dir: Path, tmp_path: Path) -> None:
+    fake = SideBySide(delays={"alpha": 0.05, "beta": 0.05})
+    code, _ = run_with(eval_dir, tmp_path, fake, parallel=1)
+    assert code == 0 and fake.most_inside == 1
 
 
 def test_an_eval_run_asks_for_and_records_no_approval(

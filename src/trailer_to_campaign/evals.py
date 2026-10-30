@@ -2,7 +2,8 @@
 
     code = run_eval(prepare(Path("evals")), budget, runs_dir, lambda film: real_stages(film, settings, make_client))
 
-Each Film gets one Eval Set Run, under one Film Budget and one Run Log:
+Each Film gets one Eval Set Run, under one Film Budget and one Run Log, and the Films run
+side by side (T19; --parallel caps how many at once):
 
 1. its Planted Drafts and Clean Drafts go straight to the Checker, first, because
    that score is cheap and doesn't depend on what the Copywriter writes;
@@ -308,7 +309,7 @@ def caught(draft: PlantedDraft, verdict: Verdict) -> bool:
     )
 
 
-def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, stages: EvalStages) -> FilmResult:
+async def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, stages: EvalStages) -> FilmResult:
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     result = FilmResult(film, key, run_log=run_log.path)
@@ -323,7 +324,7 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
     stop = "completed"
     try:
         try:
-            verdicts = anyio.run(stages.check, posts, meter)
+            verdicts = await stages.check(posts, meter)
         except AgentFailed as err:  # fail closed: drafts the Checker couldn't review are not caught
             result.errors.append(f"the Checker could not review the drafts: {err}")
         else:
@@ -333,10 +334,10 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
                     result.caught[draft.id] = caught(draft, verdict)
                 elif not verdict.passed:
                     result.false_alarms.append(draft.id)
-        moments = anyio.run(stages.watch, meter)
+        moments = await stages.watch(meter)
         result.key_moments = len(moments)
         if moments:
-            result.posts = anyio.run(stages.write_and_check, moments, meter, result.pipeline_verdicts)
+            result.posts = await stages.write_and_check(moments, meter, result.pipeline_verdicts)
         else:
             result.errors.append("the Watcher found no Key Moments, so no posts were written")
     except FilmBudgetReached as err:
@@ -351,7 +352,7 @@ def evaluate_film(film: str, key: AnswerKey, budget: Decimal, runs_dir: Path, st
         stop = "error"
         result.errors.append(f"{type(err).__name__}: {err}")
     except BaseException:
-        run_log.finish(meter.spent, "error")  # Ctrl-C or a crash still leaves the total
+        run_log.finish(meter.spent, "error")  # Ctrl-C, a crash or a cancelled Film still leaves the total
         raise
     result.stop, result.cost = stop, meter.spent
     run_log.finish(meter.spent, stop)
@@ -365,27 +366,51 @@ def run_eval(
     make_stages: Callable[[EvalFilm], EvalStages],
     out: TextIO | None = None,
     watcher: str = "v0",
+    parallel: int | None = None,
 ) -> int:
     """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly.
 
-    watcher names the Watcher the stages run (v0 or sdk), so two reports can be compared."""
+    The Films run side by side in one event loop (T19), at most parallel at once (default: all), and the
+    report keeps the Eval Set's order. On Ctrl-C every Film in flight is cancelled, so no paid call goes on,
+    and the report is still written for the Films that finished. watcher names the Watcher the stages run
+    (v0 or sdk), so two reports can be compared."""
     out = out or sys.stdout  # looked up now, not at import, so a redirected stdout is the one written to
-    results: list[FilmResult] = []
+    done: dict[str, FilmResult] = {}
+    present = [film for film in films if film.key is not None]
     for film in films:
         if film.key is None:
-            result = FilmResult(film.slug, None)
+            done[film.slug] = FilmResult(film.slug, None)
             print(f"{film.slug:20} skipped (not on this clone)", file=out, flush=True)
-        else:
+
+    async def one(film: EvalFilm, slots: anyio.CapacityLimiter) -> None:
+        assert film.key is not None
+        async with slots:
             print(f"{film.slug:20} running...", file=out, flush=True)
             try:
-                result = evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film))
+                result = await evaluate_film(film.slug, film.key, budget, runs_dir, make_stages(film))
             except Exception as err:  # the Run couldn't start (its stages or Run Log): only this Film is lost
                 result = FilmResult(film.slug, film.key, stop="error", errors=[f"{type(err).__name__}: {err}"])
-            except BaseException:  # Ctrl-C: the Films already run were paid for, so their report is still written
-                _write_report(results, runs_dir, out, interrupted=film.slug, watcher=watcher)
-                raise
             print(f"{film.slug:20} {_film_line(result)}", file=out, flush=True)
-        results.append(result)
+            done[film.slug] = result
+
+    async def all_films() -> None:
+        slots = anyio.CapacityLimiter(parallel or max(len(present), 1))
+        async with anyio.create_task_group() as group:
+            for film in present:
+                group.start_soon(one, film, slots)
+
+    def in_order() -> list[FilmResult]:
+        return [done[film.slug] for film in films if film.slug in done]
+
+    try:
+        anyio.run(all_films)
+    except BaseException as err:  # Ctrl-C: the Films already run were paid for, so their report is still written
+        unfinished = [film.slug for film in present if film.slug not in done]
+        _write_report(in_order(), runs_dir, out, interrupted=unfinished, watcher=watcher)
+        if isinstance(err, BaseExceptionGroup) and err.subgroup(KeyboardInterrupt):
+            raise KeyboardInterrupt from err  # Ctrl-C inside one Film reads as Ctrl-C, not as a group
+        raise
+    results = in_order()
     _write_report(results, runs_dir, out, watcher=watcher)
 
     ran = [r for r in results if r.key is not None]
@@ -397,18 +422,22 @@ def run_eval(
 
 
 def _write_report(
-    results: list[FilmResult], runs_dir: Path, out: TextIO, interrupted: str | None = None, watcher: str = "v0"
+    results: list[FilmResult],
+    runs_dir: Path,
+    out: TextIO,
+    interrupted: list[str] | None = None,
+    watcher: str = "v0",
 ) -> None:
     summary = _summary(results, watcher)
     if interrupted:
-        summary["interrupted"] = interrupted  # this Film and the ones after it were not run
+        summary["interrupted"] = interrupted  # the Films in flight or not started: not in the totals
     report_dir = _report_dir(runs_dir)
     (report_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (report_dir / "report.md").write_text(_report(summary, results), encoding="utf-8")
     for line in _totals_lines(summary):
         print(line, file=out)
     if interrupted:
-        print(f"Interrupted during {interrupted}: the totals cover only the Films above.", file=out)
+        print(f"Interrupted during {', '.join(interrupted)}: the totals cover only the Films that finished.", file=out)
     print(f"Report: {report_dir / 'report.md'}", file=out)
 
 

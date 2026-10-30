@@ -53,6 +53,7 @@ def git_switch_main(repo: Path) -> None:
         "git add config/.env.local",
         "bash -c 'git push -f'",
         "rm -r '' -f build",  # an empty argument is not a separator (found in T14)
+        "git status\ngit push -f origin t1-skeleton",  # a newline separates commands (T14 /code-review)
     ],
 )
 def test_blocks_forbidden_commands(repo: Path, command: str) -> None:
@@ -112,6 +113,22 @@ ANSWER_KEY_WRITES = [
     "cd evals && sed -i 's/a/b/' expected/charge.toml",
     "bash -c 'cp notes.toml evals/expected/charge.toml'",
     "sudo rm evals/expected/charge.toml",
+    # from /code-review on #45
+    "echo hi\ntouch evals/expected/x.toml",
+    "echo hi>evals/expected/x.toml",
+    "cat a>>evals/expected/b.toml",
+    "echo x >| evals/expected/a.toml",
+    "rm -r evals",
+    "git checkout -- evals",
+    "git checkout .",
+    "git restore .",
+    "mv evals evals_old",
+    "sed -Ei 's/a/b/' evals/expected/x.toml",
+    "git -C evals checkout -- expected/a.toml",
+    "cp -at evals/expected notes.toml",
+    "(cd evals/expected && touch x.toml)",
+    "cat > evals/expected/x.toml <<'EOF'\nfilms = []\nEOF",
+    "cat <<'EOF' > notes.md\nhi\nEOF\ntouch evals/expected/x.toml",  # a command after the heredoc still counts
 ]
 
 ANSWER_KEY_READS = [
@@ -126,6 +143,16 @@ ANSWER_KEY_READS = [
     "git show HEAD:evals/expected/charge.toml > /tmp/charge.toml",
     "echo hi > evals/drafts/charge.toml",
     "cd evals/expected && cat charge.toml",
+    # from /code-review on #45
+    'grep ">" evals/expected/charge.toml',
+    "bash -c 'cd evals/expected' && touch notes.toml",  # bash -c's cd ends with that shell
+    "git checkout main",
+    "git checkout -b t14-guard",
+    "uv run t2c eval 2>&1 | tee /tmp/eval.log",
+    "cp notes.toml backup.toml 2> /tmp/err.log",
+    # a heredoc's body is text, not commands, even now that newlines separate commands
+    "cat > notes.md <<'EOF'\nNever run git push --force or rm -rf build.\nEOF",
+    "cat >> notes.md <<EOF\ntouch evals/expected/x.toml\nEOF\necho done",
 ]
 
 
@@ -140,6 +167,14 @@ def test_blocks_shell_writes_to_the_answer_key(repo: Path, command: str) -> None
 def test_allows_reading_the_answer_key(repo: Path, command: str) -> None:
     result = run_hook("block_forbidden.py", {"command": command}, repo)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("command", ["touch expected/x.toml", "sed -i 's/a/b/' expected/charge.toml", "rm -r expected"])
+def test_a_shell_already_inside_evals_is_still_guarded(repo: Path, command: str) -> None:
+    # Claude's Bash keeps its directory between calls: an earlier `cd evals` leaves the shell there.
+    result = run_hook("block_forbidden.py", {"command": command}, repo / "evals")
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
 
 
 def test_blocks_commit_on_main(repo: Path) -> None:

@@ -15,32 +15,35 @@ Blocked:
   --continue, --quit, --skip, and merge --ff-only)
 - git reset --hard
 - git add of a .env file (secrets come from the environment, never the repo)
-- shell writes into the Answer Key, evals/expected/ (human-owned): > and >> redirects,
-  rm, touch, tee, sed -i, cp or mv into it (cp out of it is reading), mv out of it, and
-  git checkout / restore / rm / mv of paths in it. Paths count with ./, absolute, or
-  after a cd earlier in the command. A tripwire for accidents, not a sandbox: a script
-  or python -c that writes the file is out of reach (T14).
+- shell writes into the Answer Key, evals/expected/ (human-owned): > >> &> >| redirects,
+  touch, tee, sed -i, cp into it (cp out of it is reading), and rm, mv or git checkout /
+  restore / rm / mv of it, of anything in it, or of a folder that holds it (rm -r evals,
+  git checkout .). Paths count with ./, absolute, after a cd, or from git -C. A tripwire
+  for accidents, not a sandbox: a script or python -c that writes the file is out of
+  reach, and the answer-key CI job is the backstop (T14).
 
 Ported from the claude-training repo, where this hook is battle-tested.
 
 Asked (Claude Code prompts the user before running):
 - adding a dependency: uv add, uv pip install, pip install, python -m pip install
 
-Commands are split on ; && || | & and wrappers like `sudo`, `env X=1`,
-`bash -c "..."` are unwrapped, so `cd x && rm -rf y` is still caught.
+Commands are split on ; && || | & ( ) and newlines, and redirects are read
+apart from the words, all as a shell does unless quoted. Wrappers like `sudo`,
+`env X=1`, `bash -c "..."` are unwrapped, so `cd x && rm -rf y` is still caught.
+Paths are read from the shell's directory (the payload's cwd, then any cd).
 Uses only the standard library, so no jq or extra dependency is needed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
 import shlex
 import subprocess
 import sys
 
-SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
 WRAPPERS = {"sudo", "command", "exec", "nohup", "time", "env", "xargs"}
 SHELLS = {"bash", "sh", "zsh"}
 PROTECTED_BRANCH = "main"
@@ -50,7 +53,9 @@ ANSWER_KEY = "evals/expected"
 ANSWER_KEY_REASON = (
     "the Answer Key (evals/expected/) is human-owned: change the code or the prompt, never the expected answers"
 )
-REDIRECT = re.compile(r"^(?:\d*|&)>>?(.*)$")  # >, >>, 2>, &> with the target attached or as the next token
+OPERATOR_CHARS = ";&|<>()\n"  # split off as their own tokens, as a shell does, unless quoted
+SEPARATOR_CHARS = set(";&|()\n")
+REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
 UV_VALUE_OPTIONS = {
     "--directory",
@@ -64,18 +69,58 @@ UV_VALUE_OPTIONS = {
 }
 
 
-def split_segments(command: str) -> list[list[str]]:
-    """Split a shell command line into simple commands (lists of tokens)."""
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:  # unbalanced quotes: fall back to a rough split
-        tokens = command.replace(";", " ; ").replace("&&", " && ").split()
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")  # <<EOF, <<'EOF', <<-EOF; not <<<
 
+
+def drop_heredoc_bodies(command: str) -> str:
+    """The command without its heredoc bodies: they are text fed to a command, not commands."""
+    kept, closing = [], []
+    for line in command.split("\n"):
+        if closing:  # inside a body: skip to its delimiter line
+            if line.strip() == closing[0]:
+                closing.pop(0)
+            continue
+        kept.append(line)
+        closing = [m.group(2) for m in HEREDOC.finditer(line)]
+    return "\n".join(kept)
+
+
+class Op(str):
+    """An unquoted shell operator (; && | > ( and so on), as opposed to the same text in quotes."""
+
+
+def tokenize(command: str) -> list[str]:
+    """The command's words, with its unquoted operators as Op tokens.
+
+    Lexed twice, with and without quote removal: only the second shows which `>` was quoted.
+    """
+
+    def lex(posix: bool) -> list[str]:
+        lexer = shlex.shlex(command, posix=posix, punctuation_chars=OPERATOR_CHARS)
+        lexer.whitespace = " \t\r"  # a newline separates commands; it is not a space
+        lexer.whitespace_split = True
+        return list(lexer)
+
+    try:
+        words, raw = lex(True), lex(False)
+    except ValueError:  # unbalanced quotes: fall back to a rough split, judged by text
+        words = command.replace(";", " ; ").replace("&&", " && ").replace("\n", " ; ").split()
+        raw = words
+    if len(raw) != len(words):  # the two lexings don't line up (escapes): judge by text
+        raw = words
+    return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw, strict=True)]
+
+
+def split_segments(command: str) -> list[list[str]]:
+    """Split a shell command line into simple commands (lists of tokens).
+
+    Operators are split off as a shell does, unless quoted: so `a>b` is a redirect but
+    `grep ">" f` is not, a newline separates commands, and `( )` group without hiding them.
+    """
     segments, current = [], []
-    for tok in tokens:
-        if tok in SEPARATORS or (tok and set(tok) <= set(";&|")):  # '' is an empty argument, not a separator
+    for tok in tokenize(drop_heredoc_bodies(command)):
+        # '' is an empty argument, not a separator; > >> &> >| are redirects, kept with their command
+        if isinstance(tok, Op) and set(tok) <= SEPARATOR_CHARS:
             if current:
                 segments.append(current)
             current = []
@@ -101,18 +146,51 @@ def unwrap(tokens: list[str]) -> list[str]:
     return tokens
 
 
-def current_branch(cwd: str | None) -> str | None:
+def strip_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """A command's own words, and the files its >, >>, &>, >| redirects write to."""
+    words, targets = [], []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if isinstance(tok, Op) and set(tok) <= REDIRECT_CHARS:  # a redirect: it and its operand aren't the words
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if ">" in tok:
+                if words and words[-1].isdigit():  # the 2 in 2> is a stream number
+                    words.pop()
+                if not (tok.endswith("&") and (target.isdigit() or target == "-")):  # 2>&1 writes no file
+                    targets.append(target)
+            i += 2
+            continue
+        words.append(tok)
+        i += 1
+    return words, targets
+
+
+def run_git(args: list[str], cwd: str | None) -> str | None:
     try:
-        out = subprocess.run(
-            ["git", "symbolic-ref", "--short", "-q", "HEAD"],  # works before the first commit too
-            cwd=cwd or None,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
+
+
+def current_branch(cwd: str | None) -> str | None:
+    return run_git(["symbolic-ref", "--short", "-q", "HEAD"], cwd)  # works before the first commit too
+
+
+def git_subcommand(args: list[str]) -> tuple[str | None, list[str], list[str]]:
+    """git's subcommand and its arguments, past global options, and the -C directories given."""
+    i, dirs = 0, []
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] in ("-C", "-c"):
+            if args[i] == "-C" and i + 1 < len(args):
+                dirs.append(args[i + 1])
+            i += 2
+        else:
+            i += 1
+    if i >= len(args):
+        return None, [], dirs
+    return args[i], args[i + 1 :], dirs
 
 
 def check_rm(args: list[str]) -> str | None:
@@ -178,30 +256,39 @@ def check_dependency(prog: str, args: list[str]) -> str | None:
     return None
 
 
-def in_answer_key(path: str, state: dict) -> bool:
-    """True if a path, read from where the command has cd'd to, is in evals/expected/. By its text only."""
+def resolve(path: str, base: str) -> str:
+    """A path as text, read from base; absolute paths have their symlinks resolved (macOS /var is /private/var)."""
+    full = posixpath.normpath(path if path.startswith("/") else posixpath.join(base, path))
+    return os.path.realpath(full) if full.startswith("/") else full
+
+
+def answer_key_path(state: dict) -> str:
+    """Where the Answer Key is: under the repo the session is in, else under its directory."""
+    if "answer_key" not in state:
+        start = state.get("start") or None
+        root = run_git(["rev-parse", "--show-toplevel"], start) or start or ""
+        state["answer_key"] = resolve(ANSWER_KEY, root)
+    return state["answer_key"]
+
+
+def in_answer_key(path: str, state: dict, whole: bool = False) -> bool:
+    """True if writing to path changes the Answer Key.
+
+    By the path's text, read from where the shell is: a path in evals/expected/, from this
+    repo or any clone. With whole=True (rm, mv, git checkout), a folder that holds the
+    Answer Key counts too, since removing or restoring it takes the Answer Key with it.
+    """
     if not path:
         return False
-    full = path if path.startswith("/") else posixpath.join(state.get("cwd", ""), path)
-    full = posixpath.normpath(full)
-    return (
-        full == ANSWER_KEY
-        or full.startswith(ANSWER_KEY + "/")
-        or full.endswith("/" + ANSWER_KEY)
-        or f"/{ANSWER_KEY}/" in full
-    )
-
-
-def redirect_targets(tokens: list[str]) -> list[str]:
-    """Where a command's > and >> redirects write to."""
-    targets = []
-    for i, tok in enumerate(tokens):
-        match = REDIRECT.match(tok)
-        if match:
-            target = match.group(1) or (tokens[i + 1] if i + 1 < len(tokens) else "")
-            if not target.startswith("&"):  # 2>&1 duplicates a stream, it writes no file
-                targets.append(target)
-    return targets
+    full = resolve(path, state.get("cwd", ""))
+    if full == ANSWER_KEY or full.startswith(ANSWER_KEY + "/") or full.endswith("/" + ANSWER_KEY):
+        return True
+    if f"/{ANSWER_KEY}/" in full:
+        return True
+    if whole:
+        key = answer_key_path(state)
+        return full in (".", "") or key.startswith(full.rstrip("/") + "/")
+    return False
 
 
 def positionals(args: list[str]) -> list[str]:
@@ -215,39 +302,54 @@ def positionals(args: list[str]) -> list[str]:
     return out
 
 
+def is_short_cluster(arg: str) -> bool:
+    return arg.startswith("-") and not arg.startswith("--") and len(arg) > 1
+
+
 def copy_destination(args: list[str]) -> list[str]:
-    """Where cp/mv write: -t DIR / --target-directory=DIR, else the last positional."""
+    """Where cp/mv write: -t DIR (also in a cluster like -at), --target-directory=DIR, else the last positional."""
     for i, arg in enumerate(args):
-        if arg == "-t" and i + 1 < len(args):
-            return [args[i + 1]]
         if arg.startswith("--target-directory="):
             return [arg.split("=", 1)[1]]
+        if is_short_cluster(arg) and "t" in arg[1:]:
+            attached = arg[arg.index("t", 1) + 1 :]
+            if attached or i + 1 < len(args):
+                return [attached or args[i + 1]]
     found = positionals(args)
     return found[-1:] if len(found) > 1 else []
+
+
+def sed_in_place(args: list[str]) -> bool:
+    return any(a.startswith("--in-place") or (is_short_cluster(a) and "i" in a[1:]) for a in args)
 
 
 def check_answer_key(prog: str, args: list[str], state: dict) -> str | None:
     if prog == "cd":  # later segments in this command run from there
         target = positionals(args)[:1]
-        here = state.get("cwd", "")
-        state["cwd"] = "" if not target else posixpath.normpath(posixpath.join(here, target[0]))
+        state["cwd"] = resolve(target[0], state.get("cwd", "")) if target and target[0] not in ("-", "~") else ""
         return None
-    written: list[str] = []
-    if prog in ("rm", "touch", "tee"):
+    written: list[str] = []  # paths written inside
+    taken: list[str] = []  # paths removed, moved or restored whole
+    where = state
+    if prog in ("touch", "tee"):
         written = positionals(args)
+    elif prog == "rm":
+        taken = positionals(args)
     elif prog == "cp":
         written = copy_destination(args)
     elif prog == "mv":  # moving out of the Answer Key changes it too
-        written = positionals(args) + copy_destination(args)
-    elif prog == "sed" and any(a.startswith("-i") or a.startswith("--in-place") for a in args):
+        taken = positionals(args) + copy_destination(args)
+    elif prog == "sed" and sed_in_place(args):
         written = positionals(args)
     elif prog == "git":
-        i = 0
-        while i < len(args) and args[i].startswith("-"):
-            i += 2 if args[i] in ("-C", "-c") else 1
-        if i < len(args) and args[i] in GIT_PATH_WRITERS:
-            written = positionals(args[i + 1 :])
-    if any(in_answer_key(path, state) for path in written):
+        sub, rest, dirs = git_subcommand(args)
+        if sub in GIT_PATH_WRITERS:
+            base = state.get("cwd", "")
+            for d in dirs:  # git -C dir: its paths are read from there
+                base = resolve(d, base)
+            where = {**state, "cwd": base}
+            taken = positionals(rest)
+    if any(in_answer_key(p, where) for p in written) or any(in_answer_key(p, where, whole=True) for p in taken):
         return ANSWER_KEY_REASON
     return None
 
@@ -259,13 +361,9 @@ def is_secret_file(arg: str) -> bool:
 
 
 def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
-    # skip global options such as `git -C dir` or `git -c key=val`
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in ("-C", "-c") else 1
-    if i >= len(args):
+    sub, rest, _ = git_subcommand(args)  # past global options such as `git -C dir` or `git -c key=val`
+    if sub is None:
         return None
-    sub, rest = args[i], args[i + 1 :]
 
     if sub == "push":
         if any(a in ("--force", "-f") or (a.startswith("-") and not a.startswith("--") and "f" in a) for a in rest):
@@ -306,12 +404,16 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
     is judged on main, not on whatever branch was checked out before the command.
     """
     state = {} if state is None else state
+    # Paths are read from the shell's own directory, which carries over between Claude's Bash calls.
+    state.setdefault("start", cwd or "")
+    state.setdefault("cwd", cwd or "")
     if depth > 3:
         return None
     for segment in split_segments(command):
-        if any(in_answer_key(target, state) for target in redirect_targets(segment)):
+        words, targets = strip_redirects(segment)
+        if any(in_answer_key(target, state) for target in targets):
             return ANSWER_KEY_REASON
-        tokens = unwrap(segment)
+        tokens = unwrap(words)
         if not tokens:
             continue
         prog = tokens[0].rsplit("/", 1)[-1]
@@ -321,7 +423,9 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
         if prog in SHELLS and "-c" in tokens:
             idx = tokens.index("-c")
             if idx + 1 < len(tokens):
+                here = state["cwd"]
                 reason = find_violation(tokens[idx + 1], cwd, depth + 1, state)
+                state["cwd"] = here  # a cd inside bash -c ends with that shell
                 if reason:
                     return reason
         elif prog == "rm":

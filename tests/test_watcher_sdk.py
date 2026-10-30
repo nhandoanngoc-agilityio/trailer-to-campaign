@@ -18,8 +18,8 @@ from clips import make_clip
 from fake_agent_sdk import INPUT, MODEL, OUTPUT, Call, FakeQuery, Session, Turn, tool
 from test_watcher import FILM_TOML, SPOILER, Downloads, Transcriber, grounded_moments
 
-from trailer_to_campaign.agents import load_prompt
-from trailer_to_campaign.agents.loop import MAX_TOKENS, AgentFailed
+from trailer_to_campaign.agents import load_prompt, watcher_sdk
+from trailer_to_campaign.agents.loop import MAX_TOKENS, MODEL_CALL_TIMEOUT_S, AgentFailed
 from trailer_to_campaign.agents.watcher_sdk import MAX_CONTEXT_TOKENS, watch_trailer_sdk
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.pricing import PRICES, Usage, cost_usd, worst_case_usd
@@ -168,7 +168,7 @@ async def test_the_harness_is_locked_down_to_the_watchers_tools(films: Path, tmp
     assert env["ANTHROPIC_API_KEY"] == KEY  # the API key, never the user's own Claude login
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "0"  # a retried call could be billed twice and charged once
     assert env["CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES"] == "0"
-    assert env["API_TIMEOUT_MS"] == "300000"  # the same deadline as v0's calls (T17)
+    assert env["API_TIMEOUT_MS"] == str(MODEL_CALL_TIMEOUT_S * 1000)  # each request, as in v0's calls (T17)
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(MAX_TOKENS)
     assert Path(options.cwd).name.startswith("t2c-watcher-")  # an empty folder, not the repo
 
@@ -238,6 +238,18 @@ async def test_a_response_cut_off_mid_stream_is_charged_its_worst_case(films: Pa
     run = Run(films, tmp_path)
     with pytest.raises(AgentFailed):
         await run.watch([look, see_every_frame], open_last=True)
+    [worst] = [c for c in run.events("model_call") if c["charged"] == "worst_case"]
+    assert Decimal(worst["cost_usd"]) == worst_case_usd(MODEL, INPUT, MAX_TOKENS)
+
+
+async def test_a_stream_that_goes_silent_fails_the_watcher_and_is_charged_its_worst_case(
+    films: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T17: the CLI's own timeout is per request; a stalled stream must not hang the Run, as a call did in #34.
+    monkeypatch.setattr(watcher_sdk, "MODEL_CALL_TIMEOUT_S", 0.05)
+    run = Run(films, tmp_path)
+    with pytest.raises(AgentFailed, match=r"sent nothing for 0\.05 s"):
+        await run.watch([look, see_every_frame], stalls=True)
     [worst] = [c for c in run.events("model_call") if c["charged"] == "worst_case"]
     assert Decimal(worst["cost_usd"]) == worst_case_usd(MODEL, INPUT, MAX_TOKENS)
 

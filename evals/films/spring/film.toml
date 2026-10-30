@@ -1,0 +1,37 @@
+# Eval Set Film: Blender Studio's open movie "Spring" (2019), CC-BY 4.0.
+#
+# Sources:
+# - logline, director, runtime, license: studio.blender.org/films/spring/pages/about
+#   ("the story of a shepherd girl and her dog, who face ancient spirits in order to continue the cycle of life";
+#   written and directed by Andy Goralczyk; 7:44)
+# - character names and ending: en.wikipedia.org/wiki/Spring_(2019_film) (the shepherdess is named Spring)
+# - language: the film has no dialogue, so "zxx" (no linguistic content); the transcript detects its own
+# - footage: no official trailer exists, so the official Showreel stands in (ADR 0008), 189 s
+# - cast: no voice cast; the wrong-cast Trap uses a wrong character name instead
+
+[catalog]
+title = "Spring"
+synopsis = """A shepherd girl and her dog face ancient spirits in order to continue the cycle of life."""
+genre = ["animation", "fantasy"]
+language = "zxx"
+runtime_minutes = 8
+trailer = "https://www.youtube.com/watch?v=R7TLwKwixZA"
+
+[[catalog.cast]]
+character = "Spring"
+
+[[catalog.cast]]
+character = "Spring's dog"
+
+[[catalog.cast]]
+character = "The Alpha"
+
+[[spoilers]]
+id = "the-thaw"
+text = "Spring herds the spirits out of the valley, the clouds part and the frozen land thaws into bloom."
+why = "The climax (Wikipedia, plot)."
+
+[[spoilers]]
+id = "chime-chain"
+text = "Spring hangs the new chime on a chain of chimes from past years: she does this every year."
+why = "The final scene, which reveals the cycle (Wikipedia, plot)."

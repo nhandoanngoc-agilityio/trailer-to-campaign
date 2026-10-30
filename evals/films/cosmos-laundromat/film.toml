@@ -1,0 +1,35 @@
+# Eval Set Film: Blender's open movie "Cosmos Laundromat: First Cycle" (2015), CC-BY.
+#
+# Sources:
+# - premise, genre, runtime, voice cast, ending: en.wikipedia.org/wiki/Cosmos_Laundromat
+#   (absurdist science fantasy; 12 minutes; Pierre Bokma as Franck, Reinout Scholten van Aschat as Victor)
+# - director: Mathieu Auvray (same page)
+# - footage: Blender's official "Cosmos Laundromat, Pilot: Trailer" (youtube u8Y6S6ev-Vg, 50 s)
+
+[catalog]
+title = "Cosmos Laundromat"
+synopsis = """On a desolate island, Franck, a gloomy sheep, meets Victor, a mysterious salesman \
+who offers him all the lives he ever wanted."""
+genre = ["animation", "fantasy", "comedy"]
+language = "en"
+runtime_minutes = 12
+
+trailer = "https://www.youtube.com/watch?v=u8Y6S6ev-Vg"
+
+[[catalog.cast]]
+character = "Franck"
+name = "Pierre Bokma"
+
+[[catalog.cast]]
+character = "Victor"
+name = "Reinout Scholten van Aschat"
+
+[[spoilers]]
+id = "new-life"
+text = "Franck accepts Victor's offer and wakes up in a different body, in a new life far from his island."
+why = "The ending (Wikipedia, plot)."
+
+[[spoilers]]
+id = "victor-leaves"
+text = "Victor is called away by a timer and leaves Franck behind; the film ends 'To be continued'."
+why = "The last scene (Wikipedia, plot)."

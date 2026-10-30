@@ -1,0 +1,4 @@
+# The Eval Set (ADR 0008): every change to an agent's prompt, tool or model is scored on these Films.
+# A Film whose evals/films/<slug>/ folder is missing is skipped and named in the report
+# (song-lang is gitignored, so it runs only where its files are).
+films = ["sprite-fright", "cosmos-laundromat", "spring", "charge", "song-lang"]

@@ -141,5 +141,9 @@ The human-owned record, for each Eval Set Film, of the posts actually published 
 _Avoid_: Expected output, fixtures, golden files
 
 **Time Saved**:
-The difference between campaign preparation time before and after the agent team, measured per Film.
+The difference between campaign preparation time before and after the agent team, measured per Film, on the same deliverable both ways: the six Social Posts ready to publish.
 _Avoid_: Efficiency, productivity
+
+**Side-by-Side Trial**:
+One upcoming Film prepared twice, the old way and with the agent team, by two marketers each timing their own active work, to measure Time Saved, Approval Rate and cost per Film. Only the one using the agent team acts as a Marketer.
+_Avoid_: A/B test, benchmark, pilot

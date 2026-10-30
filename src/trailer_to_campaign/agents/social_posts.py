@@ -150,13 +150,18 @@ def _problems(post: SocialPost, title: str, catalog_words: set[str], key_moments
 
 def _control_problems(text: str) -> list[str]:
     """Control characters (Cc) other than a newline, and lone surrogates (Cs): half an emoji escaped by hand."""
-    found = dict.fromkeys(c for c in text if c != "\n" and unicodedata.category(c) in ("Cc", "Cs"))
-    if not found:
+    at = [i for i, c in enumerate(text) if c != "\n" and unicodedata.category(c) in ("Cc", "Cs")]
+    if not at:
         return []
-    codes = ", ".join(f"U+{ord(c):04X}" for c in found)
+    found = dict.fromkeys(text[i] for i in at)
+    codes = ", ".join(
+        f"U+{ord(c):04X}" + (" (half an emoji)" if unicodedata.category(c) == "Cs" else "") for c in found
+    )
+    near = text[max(0, at[0] - 12) : at[0] + 16]  # shown escaped, so the letters left from an escape show too
     return [
-        f"remove the control character{'s' if len(found) > 1 else ''} {codes}: write an emoji as the emoji itself, "
-        "not an escape code like \\f, and lay out the post with line breaks only"
+        f"remove the control character{'s' if len(found) > 1 else ''} {codes}, first at {near!r}, "
+        "and any letters left from an escape around it: write an emoji as the emoji itself, "
+        "and lay out the post with line breaks only"
     ]
 
 

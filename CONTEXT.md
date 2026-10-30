@@ -63,7 +63,7 @@ Said of a Key Moment that the code has checked against what the Watcher was actu
 _Avoid_: Verified, validated, fact-checked
 
 **Traced**:
-Said of a Social Post whose every factual claim cites its source, a Key Moment or a Catalog Metadata field, whose every quoted line is a Key Moment's quote word for word, and which holds no control character but a newline, as checked by code. Only traced posts go on to the Checker.
+Said of a Social Post whose every factual claim cites its source, a Key Moment or a Catalog Metadata field, whose every quoted line is a Key Moment's quote word for word, and which holds no control character but a newline nor half an emoji, as checked by code. Only traced posts go on to the Checker.
 _Avoid_: Sourced, fact-checked, verified
 
 **Flagged**:

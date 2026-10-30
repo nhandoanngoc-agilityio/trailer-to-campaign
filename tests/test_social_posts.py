@@ -267,6 +267,12 @@ def test_each_control_character_is_named_once() -> None:
     assert problem.count("U+000C") == 1
 
 
+def test_the_problem_shows_where_the_junk_is() -> None:
+    # Removing only the form feeds would leave "ff ff": the Copywriter (or a marketer) must see the letters too.
+    [problem] = problems(six(text=T8_JUNK))
+    assert r"\x0cf\x0cf Watch" in problem and "left from an escape" in problem
+
+
 def test_a_newline_is_allowed() -> None:
     text = EN.replace(" Watch it now.", "\n\nWatch it now.")
     assert trace(six(text=text), MOMENTS, CATALOG)[0].text == text
@@ -274,7 +280,7 @@ def test_a_newline_is_allowed() -> None:
 
 def test_a_lone_surrogate_is_refused() -> None:
     [problem] = problems(six(text=EN.replace("Watch", "\ud83c Watch")))
-    assert "U+D83C" in problem
+    assert "U+D83C (half an emoji)" in problem
 
 
 def test_an_edit_with_a_control_character_is_refused_at_recheck() -> None:

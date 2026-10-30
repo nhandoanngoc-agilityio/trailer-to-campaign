@@ -344,6 +344,32 @@ def test_each_stage_gets_a_client_of_its_own_event_loop(tmp_path: Path, monkeypa
     assert "aren't traced" in (result.note or "")  # a person's new facts can't be traced by code: say so
 
 
+# T9: in Slack, the Run Log records which Marketer decided each draft.
+
+
+def test_an_approval_records_who_decided_when_the_approver_knows(tmp_path: Path) -> None:
+    approver = ScriptedApprover(
+        [KeyMomentDecision("approve", by="U07A")] + [KeyMomentDecision("reject", by="U07B")] * 4,
+        [(PostDecision("approve", by="U07A"), None)] * 6,
+    )
+    _, lines, _ = run(tmp_path, FakeStages(), approver)
+    approvals = events(lines, "approval")
+    assert [a["by"] for a in approvals] == ["U07A", "U07B", "U07B", "U07B", "U07B"] + ["U07A"] * 6
+
+
+def test_what_a_run_says_names_its_run_but_no_local_path(tmp_path: Path) -> None:
+    """In Slack, everything the Run says is posted to the channel: no paths on the host machine."""
+    run(tmp_path, FakeStages(), marketer())
+    said = run.out  # type: ignore[attr-defined]
+    assert str(tmp_path) not in said
+    assert "runs/sample/" in said  # still enough for the team to find the Run Log
+
+
+def test_a_terminal_approval_names_no_one(tmp_path: Path) -> None:
+    _, lines, _ = run(tmp_path, FakeStages(), marketer())
+    assert all("by" not in a for a in events(lines, "approval"))
+
+
 # From /code-review: a re-check never ends the Run, and what was decided survives an early stop.
 
 

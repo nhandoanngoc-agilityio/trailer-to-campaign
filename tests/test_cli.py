@@ -546,6 +546,83 @@ def test_every_command_shares_one_set_of_exit_codes() -> None:
     assert cli.EXIT_AGENT_FAILED is pipeline.EXIT_AGENT_FAILED is run_log.EXIT_AGENT_FAILED
 
 
+# t2c slack: the front door's process (the front door itself is tested in test_slack_app.py).
+
+SLACK_ENV = {
+    **KEY_ENV,
+    "SLACK_BOT_TOKEN": "xoxb-test",
+    "SLACK_APP_TOKEN": "xapp-test",
+    "T2C_MARKETERS": "U07MARKET",
+}
+
+
+@pytest.mark.parametrize("missing", ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "T2C_MARKETERS", "ANTHROPIC_API_KEY"])
+def test_slack_refuses_to_start_without_its_settings(
+    missing: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign import slack_app
+
+    monkeypatch.setattr(slack_app, "build_app", lambda *a: pytest.fail("must not start"))
+    env = {k: v for k, v in SLACK_ENV.items() if k != missing}
+    assert main(["slack"], env=env) == 2
+    assert missing in capsys.readouterr().err
+
+
+class FakeSocketMode:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import slack_bolt.adapter.socket_mode as socket_mode
+
+        from trailer_to_campaign import slack_app
+
+        self.doors: list[Any] = []
+        self.tokens: list[str] = []
+        monkeypatch.setattr(slack_app, "build_app", lambda token, door: self.doors.append(door) or ("app", token))
+        fake = self
+
+        class Handler:
+            def __init__(self, app: Any, app_token: str) -> None:
+                fake.tokens += [app[1], app_token]
+
+            def start(self) -> None:
+                raise KeyboardInterrupt  # someone pressed Ctrl-C
+
+        monkeypatch.setattr(socket_mode, "SocketModeHandler", Handler)
+
+
+def test_slack_runs_the_front_door_until_ctrl_c_and_closes_waiting_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket = FakeSocketMode(monkeypatch)
+    assert main(["slack", "--runs-dir", str(tmp_path / "runs")], env=SLACK_ENV) == 0
+    assert socket.tokens == ["xoxb-test", "xapp-test"]
+    [door] = socket.doors
+    assert door.marketers == frozenset({"U07MARKET"})
+
+
+def test_each_slack_run_is_a_full_run_for_the_requested_film(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from decimal import Decimal
+
+    from trailer_to_campaign import pipeline
+    from trailer_to_campaign.slack_request import RunRequest
+
+    socket = FakeSocketMode(monkeypatch)
+    runs: list[dict[str, Any]] = []
+    monkeypatch.setattr(pipeline, "real_stages", lambda film, source, settings, make: ("stages", film, source))
+    monkeypatch.setattr(
+        pipeline,
+        "run_film",
+        lambda film, budget, runs_dir, stages, approver, out: runs.append(locals()) or 0,
+    )
+    main(["slack", "--budget", "1.50", "--runs-dir", str(tmp_path / "runs")], env=SLACK_ENV)
+    [door] = socket.doors
+
+    door.runner(RunRequest("agent-327", "https://youtu.be/x"), "approver", "thread")
+    [run] = runs
+    assert (run["film"], run["budget"], run["runs_dir"]) == ("agent-327", Decimal("1.50"), tmp_path / "runs")
+    assert run["stages"] == ("stages", "agent-327", "https://youtu.be/x")
+    assert (run["approver"], run["out"]) == ("approver", "thread")  # Approval and progress go to the Run Thread
+
+
 # t2c eval: the wiring around the Eval Set (scoring is tested in test_evals.py).
 
 

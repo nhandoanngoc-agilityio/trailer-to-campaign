@@ -44,3 +44,16 @@ uv run t2c eval                         # the Eval Set: how many Traps the Check
 `t2c run` is the whole pipeline as one Run, under one Film Budget and one Run Log. The Watcher picks the Key Moments and you approve, edit (description and mood) or reject each one. The Copywriter and the Checker then write and check the Social Posts from the ones you kept, and you approve, edit or reject each post; an edit is re-checked and the result shown before you decide. Mark each edit a Light Edit or heavy (rewriting the hook is never light): the Run ends with its Approval Rate. Only your keystrokes approve: closing the terminal ends the Run in an error, never in an approval. The Run Log shows the spend, the retries and every decision, and `campaign.json` holds the result.
 
 `t2c eval` runs the Eval Set (see `evals/README.md`): for each Film, the Checker reviews its Planted and Clean Drafts, then the agent team runs on its trailer with no Approval. It reports how many Traps the Checker caught, its false alarms and the cost per Film, and writes `report.md` and `summary.json` under `runs/_eval/<time>/`. Run it before merging any change to an agent's prompt, tool or model, and compare with `main`.
+
+### In Slack
+
+Slack is the front door (ADR 0002). Create a Slack app (Socket Mode, bot scopes `app_mentions:read`, `chat:write`, `reactions:write`, the `app_mention` event, Interactivity on), install it, invite its bot to your channel, and export:
+
+```
+export SLACK_BOT_TOKEN=xoxb-...         # Install App: Bot User OAuth Token
+export SLACK_APP_TOKEN=xapp-...         # Basic Information: App-Level Token with connections:write
+export T2C_MARKETERS=U07ABC123          # the Marketers' Slack member ids, comma-separated
+uv run t2c slack                        # runs until Ctrl-C
+```
+
+A **Marketer** starts a Run by mentioning the app with a Film, a trailer link, or both: `@t2c agent-327`. The app reacts 👀, refuses anyone not on `T2C_MARKETERS`, and refuses a Film with no `film.toml` (no Spoiler List, no Run). The Run lives in its **Run Thread**, under the mention: its progress, then each Key Moment and each Social Post with **Approve** and **Reject** buttons that only a Marketer's click decides, and the Run Log records who decided each one. One Run at a time; a mention inside an old thread starts a new Run in a new thread. Stopping `t2c slack` ends a Run that is waiting for Approval in an error, never in an approval. Editing a draft and marking Light Edits in Slack come with T10.

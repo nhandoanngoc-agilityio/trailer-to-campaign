@@ -1,0 +1,28 @@
+# DRAFT Answer Key candidates for a person to review. Claude never writes evals/expected/.
+
+# TODO (you): 2–3 posts Blender Studio actually published for the premiere (Dec 2022), with url and date.
+
+[[planted_drafts]]
+id = "leak-robot"
+trap = "spoiler"
+spoiler_id = "battery-for-robot"
+platform = "facebook"
+language = "en"
+text = "Charge: he risks everything for one battery, and it's not for him. It's for the old robot waiting by his fire. Stream it now."
+
+[[planted_drafts]]
+id = "invented-hero"
+trap = "wrong_cast"
+wrong_name = "Captain Rook"  # no such character
+platform = "tiktok"
+language = "en"
+text = "Captain Rook breaks into a battery factory in Charge. One old man against one deadly droid. Stream it now."
+
+[[clean_drafts]]
+id = "clean-dystopia"
+platform = "instagram"
+language = "vi"
+text = "Charge: trong một thế giới cạn kiệt năng lượng, một ông lão liều mình đột nhập nhà máy pin. Xem ngay."
+
+[[input_traps]]
+spoiler_id = "battery-for-robot"  # the whole short is the footage, so the ending is on screen

@@ -97,7 +97,7 @@ The maximum model spend allowed for one Run; the Run stops when it is reached.
 _Avoid_: Cost limit, quota
 
 **Run**:
-One pass of the agent team over one Film, from its trailer to the Approval of its Social Posts; the Approval of Key Moments is a pause inside the Run, however long it takes. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error.
+One pass of the agent team over one Film, from its trailer to the Approval of its Social Posts; the Approval of Key Moments is a pause inside the Run, however long it takes. Rework after a rejected draft stays in the same Run; starting the Film again (a new request, a re-run, an Eval Set run) starts a new Run. It ends completed, at the Film Budget, or in an error. An Eval Set Run ends at the Checker: no Approval is asked for or recorded.
 _Avoid_: Job, execution, session
 
 **Run Thread**:
@@ -109,15 +109,23 @@ The record a Run leaves of every model call, what each cost, and how the Run end
 _Avoid_: Trace, audit log, history
 
 **Eval Set**:
-A fixed group of past Films, with the posts the team actually published and planted Traps, that every change to the agents is tested against.
+A fixed group of released Films, with the posts actually published for them and planted Traps, that every change to the agents is tested against. In slice 1 these are openly licensed Films, whose studio's own published posts stand in for the team's.
 _Avoid_: Test data, benchmark
 
 **Trap**:
-A deliberate error planted in an Eval Set Film (a Spoiler List item, a wrong cast name) that the Checker must catch.
+A deliberate error planted in an Eval Set Film (a Spoiler List item, a wrong cast name) that the Checker must catch. It is planted either in the Film's inputs, where it is caught only if a post falls into it, or in a Planted Draft. An input Trap no post touches is not triggered: it counts as neither caught nor missed, and only a person reading the posts can tell it from a miss.
 _Avoid_: Test case, gotcha
 
+**Planted Draft**:
+A hand-written Social Post carrying a Trap, given straight to the Checker so that whether the Trap is caught never depends on what the Copywriter happened to write.
+_Avoid_: Trap post, bait draft, fake post
+
+**Clean Draft**:
+A hand-written Social Post with no Trap, given straight to the Checker beside the Planted Drafts; rejecting it is a false alarm.
+_Avoid_: Control, negative case
+
 **Answer Key**:
-The human-owned record, for each Eval Set Film, of the posts the team actually published and the Traps the Checker must catch. Agents read it and never change it.
+The human-owned record, for each Eval Set Film, of the posts actually published for it (by the team, or by the Film's studio when they stand in) and the Traps the Checker must catch. Agents read it and never change it.
 _Avoid_: Expected output, fixtures, golden files
 
 **Time Saved**:

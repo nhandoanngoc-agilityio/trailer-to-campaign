@@ -4,6 +4,7 @@
     t2c run --film agent-327 [--source trailer.mp4]
     t2c watch --film agent-327 [--source trailer.mp4]
     t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
+    t2c eval [--eval-dir evals]
 
 run is one Run for a Film: the Watcher, the Approval of its Key Moments, the
 Copywriter and the Checker, then the Approval of the Social Posts, in this
@@ -15,6 +16,8 @@ names one) and writes its Key Moments next to the Run Log. write runs the
 Copywriter and the Checker on those Key Moments and writes the Social Posts the
 same way: no post leaves it unchecked. watch and write are single stages, each a
 Run of its own, for trying one agent; run is the Run a marketer uses.
+eval runs the Eval Set (ADR 0008): one Eval Set Run per Film, scored against its
+Answer Key, with no Approval, so it needs no person and runs unattended.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -94,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--key-moments", type=Path, required=True, help="a key_moments.json written by t2c watch")
     write.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     write.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
+
+    evaluate = commands.add_parser("eval", help="run the Eval Set and report how many Traps the Checker caught")
+    evaluate.add_argument("--eval-dir", type=Path, default=Path("evals"), help="the Eval Set (default: evals/)")
+    evaluate.add_argument("--budget", type=_budget_arg, help="Film Budget per Run (default: FILM_BUDGET_USD or 2.00)")
+    evaluate.add_argument("--runs-dir", type=Path, help="where run logs and the report go (default: runs/)")
 
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
@@ -283,6 +291,24 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
     return code
 
 
+def run_eval_set(eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Settings) -> int:
+    from trailer_to_campaign import evals
+
+    try:
+        api_key = settings.require_api_key()
+        films = evals.prepare(eval_dir)  # every Answer Key is checked before the first paid call
+    except (MissingApiKey, ValueError) as err:  # ValueError: a bad eval_set.toml, film.toml or Answer Key
+        print(err, file=sys.stderr)
+        return 2
+    settings = replace(settings, films_dir=eval_dir / "films")
+    return evals.run_eval(
+        films,
+        budget,
+        runs_dir,
+        lambda film: evals.real_stages(film.slug, film.trailer, settings, lambda: make_client(api_key)),
+    )
+
+
 def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     """The Slack front door (ADR 0002) over Socket Mode, until Ctrl-C.
 
@@ -373,6 +399,13 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         return write(
             film=args.film,
             key_moments_file=args.key_moments,
+            budget=args.budget or settings.film_budget_usd,
+            runs_dir=args.runs_dir or settings.runs_dir,
+            settings=settings,
+        )
+    if args.command == "eval":
+        return run_eval_set(
+            eval_dir=args.eval_dir,
             budget=args.budget or settings.film_budget_usd,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,

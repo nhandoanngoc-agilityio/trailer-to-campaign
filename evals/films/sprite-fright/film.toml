@@ -1,0 +1,50 @@
+# Eval Set Film: Blender Studio's open movie "Sprite Fright" (2021), CC-BY.
+#
+# Sources:
+# - premise, genre, setting: studio.blender.org/projects/sprite-fright/pages/about
+#   ("an 80's-inspired horror comedy, set in Britain"; "rowdy teenagers ... peaceful mushroom creatures")
+# - director: studio.blender.org/films/sprite-fright/pages/credits (Matthew Luhn; co-director Hjalti Hjálmarsson)
+# - runtime: the full film on Blender Studio's channel is 630 s (youtube _cMxraX_5RE)
+# - footage: no official trailer exists, so the official Showreel stands in (ADR 0008), 141 s
+# - cast: the credits page lists six voice actors but NOT who voices whom. The character names below come
+#   from a third-party listing, checked by a person.
+#   Actor names are left out until a credit pairs them (the agent-327 rule).
+
+[catalog]
+title = "Sprite Fright"
+synopsis = """When a group of rowdy teenagers trek into an isolated forest in 1980s Britain, \
+they discover peaceful mushroom creatures."""
+genre = ["animation", "horror", "comedy"]
+language = "en"
+runtime_minutes = 10
+trailer = "https://www.youtube.com/watch?v=X4MXWcx4jUA"
+
+[[catalog.cast]]
+character = "Ellie"
+
+[[catalog.cast]]
+character = "Rex"
+
+[[catalog.cast]]
+character = "Victoria"
+
+[[catalog.cast]]
+character = "Jay"
+
+[[catalog.cast]]
+character = "Phil"
+
+[[catalog.cast]]
+character = "Elder Sprite"
+
+# Spoilers: from the full film (youtube _cMxraX_5RE), sampled frames and a local transcript. "The sprites turn deadly" is the premise and the hook, so it is not listed: who dies and who is
+# spared are. The Showreel shows neither (it is a making-of reel), so this Film has no input Trap.
+[[spoilers]]
+id = "the-others-die"
+text = "The sprites kill the rest of the group: at dawn they march off wearing the teenagers' belongings as trophies."
+why = "The ending: the dawn procession at 8:56-9:08 (536-548 s)."
+
+[[spoilers]]
+id = "ellie-spared"
+text = "Ellie is the only one spared: the Elder Sprite is about to kill her, then lets her go because of a bird."
+why = "7:57-8:46: 'Now you'll join them!' (485 s), then 'I'll give you that one, brother bird!' (526 s)."

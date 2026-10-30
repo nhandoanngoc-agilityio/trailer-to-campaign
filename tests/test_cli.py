@@ -621,3 +621,57 @@ def test_each_slack_run_is_a_full_run_for_the_requested_film(tmp_path: Path, mon
     assert (run["film"], run["budget"], run["runs_dir"]) == ("agent-327", Decimal("1.50"), tmp_path / "runs")
     assert run["stages"] == ("stages", "agent-327", "https://youtu.be/x")
     assert (run["approver"], run["out"]) == ("approver", "thread")  # Approval and progress go to the Run Thread
+
+
+# t2c eval: the wiring around the Eval Set (scoring is tested in test_evals.py).
+
+
+def an_eval_set(tmp_path: Path) -> Path:
+    from test_evals import ANSWER_KEY, film_toml
+
+    root = tmp_path / "evals"
+    (root / "films" / "alpha").mkdir(parents=True)
+    (root / "films" / "alpha" / "film.toml").write_text(film_toml("Alpha"), encoding="utf-8")
+    (root / "expected").mkdir()
+    (root / "expected" / "alpha.toml").write_text(ANSWER_KEY, encoding="utf-8")
+    (root / "eval_set.toml").write_text('films = ["alpha", "song-lang"]\n', encoding="utf-8")
+    return root
+
+
+def test_eval_needs_an_api_key_and_a_valid_eval_set_before_anything_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    eval_dir = an_eval_set(tmp_path)
+    argv = ["eval", "--eval-dir", str(eval_dir), "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={}) == 2
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+    (eval_dir / "expected" / "alpha.toml").write_text("[[planted_drafts]]\nid = 1\n", encoding="utf-8")
+    assert main(argv, env={"ANTHROPIC_API_KEY": "sk-test"}) == 2
+    assert "alpha.toml" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_eval_runs_unattended_on_the_eval_sets_own_films(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_evals import FakeStages
+
+    from trailer_to_campaign import cli, evals
+
+    eval_dir = an_eval_set(tmp_path)
+    fake, made = FakeStages(), []
+
+    def stages(film: str, trailer: str, settings: Any, make_client: Any) -> Any:
+        made.append((film, trailer, settings.films_dir, make_client()))
+        return fake.stages(evals.EvalFilm(film, None, trailer))
+
+    monkeypatch.setattr(evals, "real_stages", stages)
+    monkeypatch.setattr(cli, "make_client", lambda api_key: f"client for {api_key}")
+    monkeypatch.setattr(cli, "_at_a_terminal", lambda: False)  # piped stdin is fine: nothing asks for Approval
+    argv = ["eval", "--eval-dir", str(eval_dir), "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={"ANTHROPIC_API_KEY": "sk-test"}) == 0
+    assert made == [("alpha", "https://www.youtube.com/watch?v=abc123", eval_dir / "films", "client for sk-test")]
+    out = capsys.readouterr().out
+    assert "Planted Drafts: caught 1 of 2" in out
+    assert "song-lang" in out and "skipped" in out
+    assert list((tmp_path / "runs").glob("alpha/*/run.jsonl"))

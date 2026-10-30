@@ -205,7 +205,35 @@ async def test_revise_rewrites_only_the_rejected_posts(films: Path, tmp_path: Pa
     assert [(p.platform, p.language, p.text) for p in posts] == [("tiktok", "en", fixed["text"])]
     [refused] = results(client.messages.requests[2])
     assert refused["is_error"] and "only the posts asked for" in refused["content"][0]["text"]
+    header = refused["content"][0]["text"].splitlines()[0]  # T18: it names the posts still asked for
+    assert "the 1 post" in header and header.endswith(": tiktok en (2 left):")
     task = client.messages.requests[0]["messages"][0]["content"]
     assert reason in task and json.dumps(rejected.text)[1:-1] in task and '"key_moment": 2' in task
     for request in client.messages.requests:
         assert SPOILER not in json.dumps(request, default=str)
+
+
+# T18: a rejected first draft is told to send all six posts again, by name, and the Run Log keeps what it sent.
+
+
+async def test_a_rejected_first_draft_is_told_to_resubmit_all_six_posts_by_name(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    one_problem = submit(1, text=EN + " " + "x" * 200)
+    posts, fake = await run.write([read_catalog, one_problem, submit(2)])
+
+    [rejected] = results(fake.requests[2])
+    header = rejected["content"][0]["text"].splitlines()[0]
+    assert "all 6 posts" in header and "one submit_social_posts call" in header
+    pairs = "facebook en, facebook vi, instagram en, instagram vi, tiktok en, tiktok vi"
+    assert header.endswith(f": {pairs} ({MAX_SUBMISSIONS - 1} left):")
+    assert len(posts) == 6
+
+
+async def test_a_rejected_submission_is_kept_in_the_run_log(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    partial = lambda params: reply(use("submit_social_posts", 1, posts=six_posts()[:2]))  # noqa: E731
+    await run.write([read_catalog, partial, submit(2)])
+
+    [event] = run.events("social_posts_rejected")
+    assert event["submitted"] == six_posts()[:2]  # the posts as sent, so a partial set can be read back
+    assert any("write one" in p for p in event["problems"])

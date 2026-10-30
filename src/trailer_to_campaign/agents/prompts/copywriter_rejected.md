@@ -1,2 +1,2 @@
-Not accepted. Fix these and submit all the posts asked for again ({left} left):
+Not accepted. Fix these, then submit {count} again, together in one submit_social_posts call: {required} ({left} left):
 {problems}

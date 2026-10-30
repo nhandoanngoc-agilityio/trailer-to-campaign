@@ -272,7 +272,7 @@ def test_edit_opens_the_form_and_a_saved_edit_reaches_the_run(films: Path) -> No
     assert opened["trigger_id"] == "trigger-7" and opened["view"]["private_metadata"] == f"{run_id}:km1"
 
     front.handle_submission(saved_form(f"{run_id}:km1", {"what_happens": "A spy strolls in.", "mood": "cool"}), client)
-    front.handle_action(click(f"{run_id}:km1", action="t2c_approve_light"), client)
+    front.handle_action(click(f"{run_id}:km1:v1", action="t2c_approve_light"), client)  # the edited version
     assert finished.wait(2)
     [decision] = decided
     assert (decision.decision, decision.what_happens, decision.light, decision.by) == (

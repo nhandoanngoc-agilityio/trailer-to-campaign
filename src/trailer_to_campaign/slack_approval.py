@@ -65,18 +65,25 @@ class _Click:
 
 @dataclass
 class _Draft:
-    value: str
+    base: str  # "<run id>:<draft>"
     fields: dict[str, str]  # what a Marketer can edit, as it now stands
     labels: dict[str, str]  # each field's label in the form
     render: Callable[[dict[str, str]], list[str]]  # the draft's lines in the thread, escaped
     measure: Callable[[dict[str, str]], str]  # the text the measured change is taken on
     original: dict[str, str] = field(init=False)
+    version: int = 0  # bumped by each saved edit: a click or form always names the version it was made on
     ts: str = ""
     notes: list[str] = field(default_factory=list)  # after an edit: its measured change and re-check
     changed: float | None = None
+    edited_by: str | None = None
 
     def __post_init__(self) -> None:
         self.original = dict(self.fields)
+
+    @property
+    def value(self) -> str:
+        """What this version's buttons and form carry; an older version's clicks decide nothing."""
+        return self.base if self.version == 0 else f"{self.base}:v{self.version}"
 
     @property
     def edited(self) -> bool:
@@ -112,7 +119,10 @@ class SlackApprover:
         if user not in self.marketers:
             self._tell(user, "Only a Marketer can approve, edit or reject drafts in a Run.")
         elif draft is None or draft.value != value or self._closed:
-            self._tell(user, "That draft was already decided, or isn't up for Approval yet.")
+            self._tell(user, _why_not(draft, value))
+        elif any(len(text) > INPUT_CHARS for text in draft.fields.values()):
+            # The form can't hold it, and cutting it would silently drop the tail on save.
+            self._tell(user, "This draft is too long to edit in Slack's form: approve or reject it here.")
         else:
             try:
                 client.views_open(trigger_id=trigger_id, view=_form(draft))
@@ -131,7 +141,7 @@ class SlackApprover:
             return lines
 
         draft = _Draft(
-            value=f"{self.run_id}:km{i}",
+            base=f"{self.run_id}:km{i}",
             fields={"what_happens": moment.what_happens, "mood": moment.mood},
             labels={"what_happens": "Description", "mood": "Mood"},
             render=render,
@@ -140,7 +150,13 @@ class SlackApprover:
         decision, user, light = self._decide(draft, recheck=None)
         if decision == "edit":
             return KeyMomentDecision(
-                "edit", what_happens=draft.fields["what_happens"], mood=draft.fields["mood"], light=light, by=user
+                "edit",
+                what_happens=draft.fields["what_happens"],
+                mood=draft.fields["mood"],
+                light=light,
+                by=user,
+                edited_by=draft.edited_by,
+                changed=draft.changed,
             )
         return KeyMomentDecision(decision, by=user)
 
@@ -161,7 +177,7 @@ class SlackApprover:
             return lines
 
         draft = _Draft(
-            value=f"{self.run_id}:post{i}",
+            base=f"{self.run_id}:post{i}",
             fields={"text": post.text},
             labels={"text": f"{post.platform} {post.language} post"},
             render=render,
@@ -169,7 +185,14 @@ class SlackApprover:
         )
         decision, user, light = self._decide(draft, recheck=recheck)
         if decision == "edit":
-            return PostDecision("edit", text=draft.fields["text"], light=light, by=user)
+            return PostDecision(
+                "edit",
+                text=draft.fields["text"],
+                light=light,
+                by=user,
+                edited_by=draft.edited_by,
+                changed=draft.changed,
+            )
         return PostDecision(decision, by=user)
 
     def _decide(self, draft: _Draft, recheck: Callable[[str], Recheck] | None) -> tuple[str, str, bool | None]:
@@ -183,7 +206,7 @@ class SlackApprover:
         draft.ts = posted["ts"]
         try:
             while True:
-                click = self._next(draft.value)
+                click = self._next(draft)
                 action, user = click.action_id, click.user
                 if action == REJECT:
                     return self._final(draft, "reject", user, None)
@@ -205,11 +228,16 @@ class SlackApprover:
             self._tell(click.user, "That edit changes nothing, so the draft stays as it is.")
             return
         draft.fields = fields
-        draft.notes, draft.changed = [], None
+        draft.version += 1  # every button and form from before this edit is now out of date
+        draft.notes, draft.changed, draft.edited_by = [], None, None
         if draft.edited:
             draft.changed = measured_change(draft.measure(draft.original), draft.measure(fields))
+            draft.edited_by = click.user
             draft.notes.append(f"✏️ Edited by <@{click.user}>: this edit changed {draft.changed:.0%} of the words.")
             if recheck is not None:
+                # The re-check takes a while: show the edit was received, with no buttons to click meanwhile.
+                waiting = f"✏️ Edit received from <@{click.user}>: re-checking it…"
+                self._update(draft, self._sections([*draft.render(fields), waiting]))
                 draft.notes += self._recheck(recheck, draft.measure(fields))
             draft.notes.append(
                 "Approve it as a Light Edit or a heavy edit (rewriting the hook is never light), "
@@ -248,16 +276,16 @@ class SlackApprover:
         self._update(draft, [*self._sections(draft.render(draft.fields)), context])
         return decision, user, light
 
-    def _next(self, value: str) -> _Click:
-        """The next click on this draft by a Marketer; anything else is answered privately."""
+    def _next(self, draft: _Draft) -> _Click:
+        """The next click on this version of this draft by a Marketer; anything else is answered privately."""
         while True:
             click = self._clicks.get()
             if click is None or self._closed:
                 raise ApprovalAborted("the Slack app stopped before every draft was decided")
             if click.user not in self.marketers:
                 self._tell(click.user, "Only a Marketer can approve, edit or reject drafts in a Run.")
-            elif click.value != value:
-                self._tell(click.user, "That draft was already decided, or isn't up for Approval yet.")
+            elif click.value != draft.value:
+                self._tell(click.user, _why_not(draft, click.value))
             else:
                 return click
 
@@ -320,7 +348,7 @@ def _form(draft: _Draft) -> dict[str, Any]:
                 "type": "plain_text_input",
                 "action_id": "value",
                 "multiline": name != "mood",
-                "initial_value": value[:INPUT_CHARS],
+                "initial_value": value,  # open_editor refuses a draft too long for the form
                 "max_length": INPUT_CHARS,
             },
         }
@@ -335,6 +363,13 @@ def _form(draft: _Draft) -> dict[str, Any]:
         "close": _plain("Cancel"),
         "blocks": blocks,
     }
+
+
+def _why_not(draft: _Draft | None, value: str) -> str:
+    """Why a click or form on this value doesn't count: an older version of the draft, or another draft."""
+    if draft is not None and value.split(":v")[0] == draft.base:
+        return "That draft changed since you saw it. Use its latest message, or click Edit again to start from it."
+    return "That draft was already decided, or isn't up for Approval yet."
 
 
 def _fallback(draft: _Draft) -> str:

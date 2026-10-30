@@ -230,11 +230,18 @@ def test_no_form_opens_for_someone_else_or_another_draft(user: str, value: str, 
 def test_an_edited_key_moment_shows_its_measured_change_and_is_approved_as_a_light_edit() -> None:
     slack, client = approver()
     slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
-    slack.click("t2c_approve_light", "run1:km1", MARKETER)
-    assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision(
-        "edit", what_happens=KM_EDIT["what_happens"], mood="sly", light=True, by=MARKETER
+    slack.click("t2c_approve_light", "run1:km1:v1", MARKETER)  # the edited draft is version 1
+    decision = slack.key_moment(1, 5, MOMENT)
+    assert (decision.decision, decision.what_happens, decision.mood, decision.light, decision.by) == (
+        "edit",
+        KM_EDIT["what_happens"],
+        "sly",
+        True,
+        MARKETER,
     )
-    after_edit = client.updated[0]
+    assert decision.edited_by == MARKETER and decision.changed is not None
+    after_edit = client.updated[-2]
+    assert f"{decision.changed:.0%} of the words" in text_of(after_edit)  # recorded = shown
     assert "He grins" in text_of(after_edit) and "% of the words" in text_of(after_edit)
     assert [b["action_id"] for b in buttons(after_edit)] == [
         "t2c_approve_light",
@@ -261,12 +268,16 @@ def test_an_edited_post_is_rechecked_and_a_flag_stays_private() -> None:
 
     slack, client = approver()
     slack.submit_edit("run1:post1", MARKETER, POST_EDIT)
-    slack.click("t2c_approve_heavy", "run1:post1", MARKETER)
-    assert slack.social_post(1, 6, POST, recheck) == PostDecision(
-        "edit", text=POST_EDIT["text"], light=False, by=MARKETER
+    slack.click("t2c_approve_heavy", "run1:post1:v1", MARKETER)
+    decision = slack.social_post(1, 6, POST, recheck)
+    assert (decision.decision, decision.text, decision.light, decision.by) == (
+        "edit",
+        POST_EDIT["text"],
+        False,
+        MARKETER,
     )
     assert rechecked == [POST_EDIT["text"]]
-    in_channel = text_of(client.updated[0])
+    in_channel = text_of(client.updated[-2])  # the draft as edited and re-checked
     assert "no claim cites the brawl" in in_channel and "Facts you added" in in_channel  # code's checks: shown
     assert "flagged" in in_channel and "captured" not in in_channel and "ending-capture" not in in_channel
     assert any("captured" in e["text"] for e in client.ephemeral if e["user"] == MARKETER)  # the reason: private
@@ -281,9 +292,9 @@ def test_edit_again_starts_from_the_latest_edit() -> None:
         if client.updated:
             break
         threading.Event().wait(0.01)
-    slack.open_editor(client, "trigger-2", "run1:km1", MARKETER)
+    slack.open_editor(client, "trigger-2", "run1:km1:v1", MARKETER)
     assert form_values(client.views[0]["view"]) == KM_EDIT
-    slack.click("t2c_reject", "run1:km1", MARKETER)
+    slack.click("t2c_reject", "run1:km1:v1", MARKETER)
     thread.join(2)
     assert result == [KeyMomentDecision("reject", by=MARKETER)]
 
@@ -300,11 +311,78 @@ def test_buttons_out_of_step_decide_nothing() -> None:
     slack, client = approver()
     slack.click("t2c_approve_light", "run1:km1", MARKETER)  # no edit yet
     slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
-    slack.click("t2c_approve", "run1:km1", MARKETER)  # an edit is pending: Approve as Light or heavy
-    slack.click("t2c_approve_heavy", "run1:km1", MARKETER)
+    slack.click("t2c_approve", "run1:km1:v1", MARKETER)  # an edit is pending: Approve as Light or heavy
+    slack.click("t2c_approve_heavy", "run1:km1:v1", MARKETER)
     decision = slack.key_moment(1, 5, MOMENT)
     assert decision.decision == "edit" and decision.light is False
     assert len(client.ephemeral) == 2
+
+
+# From /code-review: an Approval is always for the text the Marketer saw.
+
+SECOND = "U07SECOND"
+
+
+def two_marketers() -> tuple[SlackApprover, FakeClient]:
+    client = FakeClient()
+    return SlackApprover(client, "C0TEST", "1.0", frozenset({MARKETER, SECOND}), run_id="run1"), client
+
+
+def test_a_form_opened_on_older_text_never_overwrites_a_newer_edit() -> None:
+    slack, client = two_marketers()
+    slack.submit_edit("run1:km1", MARKETER, KM_EDIT)  # A's edit: the draft becomes version 1
+    slack.submit_edit("run1:km1", SECOND, {"what_happens": "B's rewrite, from the old text.", "mood": "odd"})
+    slack.click("t2c_approve_light", "run1:km1:v1", MARKETER)  # A approves the edit A saw
+    decision = slack.key_moment(1, 5, MOMENT)
+    assert decision.what_happens == KM_EDIT["what_happens"] and decision.by == MARKETER
+    [told] = [e for e in client.ephemeral if e["user"] == SECOND]
+    assert "changed since" in told["text"]
+
+
+def test_a_click_on_an_older_version_of_the_draft_decides_nothing() -> None:
+    slack, client = two_marketers()
+    slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
+    slack.click("t2c_approve", "run1:km1", SECOND)  # a click on the message as it was before the edit
+    slack.click("t2c_reject", "run1:km1:v1", MARKETER)
+    assert slack.key_moment(1, 5, MOMENT).decision == "reject"
+    assert any(e["user"] == SECOND for e in client.ephemeral)
+
+
+def test_the_record_says_who_wrote_the_edit_and_who_approved_it() -> None:
+    slack, _ = two_marketers()
+    slack.submit_edit("run1:km1", SECOND, KM_EDIT)
+    slack.click("t2c_approve_heavy", "run1:km1:v1", MARKETER)
+    decision = slack.key_moment(1, 5, MOMENT)
+    assert (decision.edited_by, decision.by) == (SECOND, MARKETER)
+
+
+def test_while_an_edit_is_rechecked_the_draft_says_so_and_offers_no_buttons() -> None:
+    from trailer_to_campaign.agents.checker import Verdict
+    from trailer_to_campaign.approval import Recheck
+
+    slack, client = approver()
+    seen_during: list[dict[str, Any]] = []
+
+    def recheck(text: str) -> Recheck:
+        seen_during.append(client.updated[-1])
+        return Recheck([], Verdict(True, []))
+
+    slack.submit_edit("run1:post1", MARKETER, POST_EDIT)
+    slack.click("t2c_reject", "run1:post1:v1", MARKETER)
+    slack.social_post(1, 6, POST, recheck)
+    [during] = seen_during
+    assert buttons(during) == [] and "re-check" in text_of(during)
+
+
+def test_a_draft_too_long_for_the_form_is_not_offered_for_editing() -> None:
+    long_moment = KeyMoment(1.0, 2.0, "word " * 700, "calm", None, [], [1])
+    slack, client = approver()
+    thread, _ = in_background(lambda: slack.key_moment(1, 1, long_moment))
+    assert client.draft_posted.wait(2)
+    slack.open_editor(client, "trigger-1", "run1:km1", MARKETER)
+    assert client.views == [] and "too long" in client.ephemeral[-1]["text"]
+    slack.click("t2c_reject", "run1:km1", MARKETER)
+    thread.join(2)
 
 
 def test_an_edit_from_someone_who_is_not_a_marketer_changes_nothing() -> None:

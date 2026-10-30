@@ -54,6 +54,8 @@ class KeyMomentDecision:
     mood: str | None = None
     light: bool | None = None  # an edit only: True for a Light Edit, False for heavy
     by: str | None = None  # the Marketer who decided, when the surface knows (a Slack user id)
+    edited_by: str | None = None  # the Marketer who wrote the edit, when it wasn't the one who approved it
+    changed: float | None = None  # an edit's measured change, as shown when it was marked Light or heavy
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,8 @@ class PostDecision:
     text: str | None = None  # the edited text
     light: bool | None = None
     by: str | None = None
+    edited_by: str | None = None
+    changed: float | None = None
 
 
 @dataclass(frozen=True)
@@ -122,7 +126,7 @@ class TerminalApprover:
         if what == moment.what_happens and mood == moment.mood:
             return KeyMomentDecision("approve")
         changed = measured_change(key_moment_text(moment.what_happens, moment.mood), key_moment_text(what, mood))
-        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light(changed))
+        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light(changed), changed=changed)
 
     def social_post(self, i: int, n: int, checked: CheckedPost, recheck: Callable[[str], Recheck]) -> PostDecision:
         post = checked.post
@@ -147,7 +151,8 @@ class TerminalApprover:
             self._show(recheck(text))
             choice = self._choose("[a]pprove this edit / [e]dit again / [r]eject: ", "aer")
             if choice == "a":
-                return PostDecision("edit", text=text, light=self._light(measured_change(post.text, text)))
+                changed = measured_change(post.text, text)
+                return PostDecision("edit", text=text, light=self._light(changed), changed=changed)
         return PostDecision("reject")
 
     def _edit(self) -> str:

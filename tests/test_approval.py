@@ -71,7 +71,7 @@ def test_a_bad_key_is_asked_again() -> None:
 def test_a_key_moment_edit_changes_only_its_description_and_mood() -> None:
     terminal, _, _ = approver("e", "He grins as the cape goes up.", "", "l")  # Enter keeps the mood
     assert terminal.key_moment(1, 5, MOMENT) == KeyMomentDecision(
-        "edit", what_happens="He grins as the cape goes up.", mood="deadpan", light=True
+        "edit", what_happens="He grins as the cape goes up.", mood="deadpan", light=True, changed=pytest.approx(0.765)
     )
 
 
@@ -97,7 +97,9 @@ def test_an_edited_post_is_rechecked_shown_and_then_decided() -> None:
     terminal, _, out = approver("e", "A spy walks into a barbershop.", "Stream it now.", ".", "a", "h")
     decision = terminal.social_post(1, 6, POST, recheck)
     assert rechecked == ["A spy walks into a barbershop.\nStream it now."]
-    assert decision == PostDecision("edit", text="A spy walks into a barbershop.\nStream it now.", light=False)
+    assert decision == PostDecision(
+        "edit", text="A spy walks into a barbershop.\nStream it now.", light=False, changed=pytest.approx(0.6, abs=0.2)
+    )
     shown = out.getvalue()
     assert "end with a call to watch" in shown and "Ends weakly." in shown  # the re-check, before the decision
 

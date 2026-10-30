@@ -30,6 +30,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          # Don't leave the job's token in .git/config, where text in a PR could get the reviewer to read it.
+          persist-credentials: false
 
       - name: Run Claude Code Review
         id: claude-review
@@ -39,11 +41,15 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # allowedTools: the same tools the code-review command declares.
+          # allowedTools: the same tools the code-review command declares (narrowing it breaks the review).
+          # disallowedTools: no comment from a file, so text in a PR can't get the reviewer to post a file's
+          # contents; deny rules win over allow rules. Any -F counts, -Ffile included: a comment whose text
+          # says "-F" is refused too, and the reviewer rewords it (the safe side of that trade).
           # append-system-prompt: subagents launched in the background are lost when this
           # non-interactive run ends its turn (run 40215456609 stopped after 5s, before reviewing).
           claude_args: >-
             --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Bash(gh pr comment *--body-file*),Bash(gh pr comment *-F*)"
             --append-system-prompt "This is a non-interactive CI run that ends when you stop. Run every subagent in the foreground and wait for its result before continuing."
           # Show Claude's report in the run's Step Summary, so a silent run still explains what it checked
           # or why it skipped. Safer than show_full_output, which logs every tool result.

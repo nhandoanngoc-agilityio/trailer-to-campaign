@@ -26,3 +26,26 @@ jobs:
           uv run ruff format --check .
       - name: Test
         run: uv run pytest -q
+
+  # The Answer Key is human-owned (CLAUDE.md, T14). This can't block a merge on this plan,
+  # but it shows red at review, whoever or whatever changed it: another machine, @claude, a person.
+  answer-key:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The Answer Key is unchanged
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE...HEAD" -- evals/expected/)
+          if [ -n "$changed" ]; then
+            echo "::error title=Answer Key changed::This PR changes the Answer Key (evals/expected/), which is human-owned. If a person meant it, merge knowing what changed; if an agent did, revert it and fix the code or the prompt instead."
+            echo "Changed:"
+            printf '%s\n' "$changed" | sed 's/^/  - /'  # indented: a file name can never start a ::workflow command
+            exit 1
+          fi
+          echo "The Answer Key (evals/expected/) is unchanged."

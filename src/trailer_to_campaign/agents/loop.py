@@ -76,24 +76,29 @@ class Submissions:
     agent: str  # "watcher"
     noun: str  # what it submits: "Key Moments"
     failure: str  # how a failed check reads: "were not grounded"
-    rejected_prompt: str  # what the agent is told, with {left} and {problems}
+    rejected_prompt: str  # what the agent is told, with {left}, {problems} and any of details
     limit: int
+    details: dict[str, str] = field(default_factory=dict)  # more for the prompt: the posts asked for, say
     count: int = 0
     accepted: list[Any] | None = None
 
-    def submit(self, check: Callable[[], list[Any]]) -> ToolResult:
+    def submit(self, check: Callable[[], list[Any]], submitted: Any = None) -> ToolResult:
+        """submitted, when given, is logged with a rejection so it can be read back: only an agent's own
+        drafts, never the Checker's verdicts (they name the Spoiler List)."""
         self.count += 1
         try:
             result = check()
         except ChecksFailed as err:
             event = f"{self.noun.lower().replace(' ', '_')}_rejected"
-            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems)
+            sent = {} if submitted is None else {"submitted": submitted}
+            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems, **sent)
             if self.count >= self.limit:
                 raise AgentFailed(
                     f"the {self.agent.capitalize()}'s {self.noun} {self.failure} after {self.limit} tries"
                 ) from err
             problems = "\n".join(f"- {p}" for p in err.problems)
-            return ToolResult.error(self.rejected_prompt.format(left=self.limit - self.count, problems=problems))
+            left = self.limit - self.count
+            return ToolResult.error(self.rejected_prompt.format(left=left, problems=problems, **self.details))
         self.accepted = result
         return ToolResult.text(f"Accepted {len(result)} {self.noun}.")
 

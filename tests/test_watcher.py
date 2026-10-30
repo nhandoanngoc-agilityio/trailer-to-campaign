@@ -212,6 +212,7 @@ async def test_an_ungrounded_submission_is_sent_back_with_its_problems(films: Pa
     assert len(moments) >= 5
     [event] = run.events("key_moments_rejected")
     assert any("Dr. Nobody" in p for p in event["problems"])
+    assert "Dr. Nobody" in json.dumps(event["submitted"])  # what was sent, to read back later (T18)
 
 
 async def test_submitting_before_watching_is_refused(films: Path, tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -32,10 +33,17 @@ class FakeClient:
         self.posted: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
         self.ephemeral: list[dict[str, Any]] = []
+        self.views: list[dict[str, Any]] = []
+        self.draft_posted = threading.Event()
 
     def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
         self.posted.append(kwargs)
+        self.draft_posted.set()
         return {"ok": True, "ts": f"100.{len(self.posted)}"}
+
+    def views_open(self, **kwargs: Any) -> dict[str, Any]:
+        self.views.append(kwargs)
+        return {"ok": True}
 
     def chat_update(self, **kwargs: Any) -> dict[str, Any]:  # noqa: N802
         self.updated.append(kwargs)
@@ -74,6 +82,7 @@ def test_a_marketers_click_decides_a_key_moment(click: str, decision: str) -> No
     assert "A cape is drawn up" in text_of(posted) and "Just a trim, please." in text_of(posted)
     assert [(b["action_id"], b["value"]) for b in buttons(posted)] == [
         ("t2c_approve", "run1:km1"),
+        ("t2c_edit", "run1:km1"),
         ("t2c_reject", "run1:km1"),
     ]
     [updated] = client.updated  # the decision replaces the buttons, so it can't be clicked twice
@@ -170,3 +179,137 @@ def test_model_text_cannot_ping_or_link_in_slack() -> None:
     shown = text_of(client.posted[0])
     assert "<!channel>" not in shown and "<@U0BOSS>" not in shown and "<https://evil" not in shown
     assert "&lt;!channel&gt;" in shown
+
+
+# T10: Edit opens a form; a saved edit is measured (and a post re-checked); then Approve as Light or heavy.
+
+KM_EDIT = {"what_happens": "He grins as the cape goes up to his chin.", "mood": "sly"}
+POST_EDIT = {"text": '"Just a trim, please." A haircut turns into a brawl. Stream it now.'}
+
+
+def in_background(work: Callable[[], Any]) -> tuple[threading.Thread, list[Any]]:
+    """Run a draft's Approval in its own thread, as a Run does, and keep what it returns."""
+    result: list[Any] = []
+    thread = threading.Thread(target=lambda: result.append(work()), daemon=True)  # a failing test can't hang the run
+    thread.start()
+    return thread, result
+
+
+def form_values(view: dict[str, Any]) -> dict[str, str]:
+    return {b["block_id"]: b["element"].get("initial_value", "") for b in view["blocks"] if b["type"] == "input"}
+
+
+def test_edit_opens_a_form_filled_with_the_draft_for_a_marketer() -> None:
+    slack, client = approver()
+    thread, result = in_background(lambda: slack.key_moment(1, 5, MOMENT))
+    assert client.draft_posted.wait(2)
+    slack.open_editor(client, "trigger-1", "run1:km1", MARKETER)
+    [opened] = client.views
+    assert opened["trigger_id"] == "trigger-1"
+    assert opened["view"]["private_metadata"] == "run1:km1" and opened["view"]["callback_id"] == "t2c_edit"
+    assert form_values(opened["view"]) == {"what_happens": "A cape is drawn up to his chin.", "mood": "deadpan"}
+    slack.click("t2c_reject", "run1:km1", MARKETER)
+    thread.join(2)
+    assert result == [KeyMomentDecision("reject", by=MARKETER)]
+
+
+@pytest.mark.parametrize(
+    ("user", "value", "says"), [(PASSER_BY, "run1:km1", "Marketer"), (MARKETER, "run1:km9", "already")]
+)
+def test_no_form_opens_for_someone_else_or_another_draft(user: str, value: str, says: str) -> None:
+    slack, client = approver()
+    thread, _ = in_background(lambda: slack.key_moment(1, 5, MOMENT))
+    assert client.draft_posted.wait(2)
+    slack.open_editor(client, "trigger-1", value, user)
+    assert client.views == []
+    assert says in client.ephemeral[-1]["text"] and client.ephemeral[-1]["user"] == user
+    slack.click("t2c_reject", "run1:km1", MARKETER)
+    thread.join(2)
+
+
+def test_an_edited_key_moment_shows_its_measured_change_and_is_approved_as_a_light_edit() -> None:
+    slack, client = approver()
+    slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
+    slack.click("t2c_approve_light", "run1:km1", MARKETER)
+    assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision(
+        "edit", what_happens=KM_EDIT["what_happens"], mood="sly", light=True, by=MARKETER
+    )
+    after_edit = client.updated[0]
+    assert "He grins" in text_of(after_edit) and "% of the words" in text_of(after_edit)
+    assert [b["action_id"] for b in buttons(after_edit)] == [
+        "t2c_approve_light",
+        "t2c_approve_heavy",
+        "t2c_edit",
+        "t2c_reject",
+    ]
+    final = client.updated[-1]
+    assert buttons(final) == [] and "Light Edit" in text_of(final) and f"<@{MARKETER}>" in text_of(final)
+
+
+def test_an_edited_post_is_rechecked_and_a_flag_stays_private() -> None:
+    from trailer_to_campaign.agents.checker import Problem, Verdict
+    from trailer_to_campaign.approval import Recheck
+
+    rechecked: list[str] = []
+
+    def recheck(text: str) -> Recheck:
+        rechecked.append(text)
+        spoiler = Problem(
+            "spoiler", "brawl", "Hints at how the fight ends: he is captured.", spoiler_id="ending-capture"
+        )
+        return Recheck(["no claim cites the brawl"], Verdict(False, [spoiler]), note="Facts you added aren't traced")
+
+    slack, client = approver()
+    slack.submit_edit("run1:post1", MARKETER, POST_EDIT)
+    slack.click("t2c_approve_heavy", "run1:post1", MARKETER)
+    assert slack.social_post(1, 6, POST, recheck) == PostDecision(
+        "edit", text=POST_EDIT["text"], light=False, by=MARKETER
+    )
+    assert rechecked == [POST_EDIT["text"]]
+    in_channel = text_of(client.updated[0])
+    assert "no claim cites the brawl" in in_channel and "Facts you added" in in_channel  # code's checks: shown
+    assert "flagged" in in_channel and "captured" not in in_channel and "ending-capture" not in in_channel
+    assert any("captured" in e["text"] for e in client.ephemeral if e["user"] == MARKETER)  # the reason: private
+
+
+def test_edit_again_starts_from_the_latest_edit() -> None:
+    slack, client = approver()
+    slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
+    thread, result = in_background(lambda: slack.key_moment(1, 5, MOMENT))
+    assert client.draft_posted.wait(2)
+    for _ in range(100):  # the edit is applied by the Run's thread
+        if client.updated:
+            break
+        threading.Event().wait(0.01)
+    slack.open_editor(client, "trigger-2", "run1:km1", MARKETER)
+    assert form_values(client.views[0]["view"]) == KM_EDIT
+    slack.click("t2c_reject", "run1:km1", MARKETER)
+    thread.join(2)
+    assert result == [KeyMomentDecision("reject", by=MARKETER)]
+
+
+def test_an_edit_that_changes_nothing_leaves_the_draft_as_it_was() -> None:
+    slack, client = approver()
+    slack.submit_edit("run1:km1", MARKETER, {"what_happens": "A cape is drawn up to his chin.", "mood": "deadpan"})
+    slack.click("t2c_approve", "run1:km1", MARKETER)
+    assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision("approve", by=MARKETER)
+    assert any("nothing" in e["text"] for e in client.ephemeral)
+
+
+def test_buttons_out_of_step_decide_nothing() -> None:
+    slack, client = approver()
+    slack.click("t2c_approve_light", "run1:km1", MARKETER)  # no edit yet
+    slack.submit_edit("run1:km1", MARKETER, KM_EDIT)
+    slack.click("t2c_approve", "run1:km1", MARKETER)  # an edit is pending: Approve as Light or heavy
+    slack.click("t2c_approve_heavy", "run1:km1", MARKETER)
+    decision = slack.key_moment(1, 5, MOMENT)
+    assert decision.decision == "edit" and decision.light is False
+    assert len(client.ephemeral) == 2
+
+
+def test_an_edit_from_someone_who_is_not_a_marketer_changes_nothing() -> None:
+    slack, client = approver()
+    slack.submit_edit("run1:km1", PASSER_BY, KM_EDIT)
+    slack.click("t2c_approve", "run1:km1", MARKETER)
+    assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision("approve", by=MARKETER)
+    assert client.ephemeral[0]["user"] == PASSER_BY

@@ -15,6 +15,7 @@ or the catalog can't steer the Watcher to another Film or another link.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,28 +92,44 @@ class _Watching:
     seen_frames: set[int] = field(default_factory=set)
 
 
-async def watch_trailer(
-    film: str, source: str, *, servers: list[Any], client: Any, meter: FilmMeter
-) -> list[KeyMoment]:
+def start_watching(film: str, source: str, meter: FilmMeter) -> _Watching:
     gate = Submissions(
         meter, "watcher", "Key Moments", "were not grounded", load_prompt("watcher_rejected"), MAX_SUBMISSIONS
     )
-    watching = _Watching(film, source, gate)
+    return _Watching(film, source, gate)
+
+
+def tool_gate(watching: _Watching, mcp: McpTools) -> Callable[[str, dict[str, Any]], Awaitable[ToolResult]]:
+    """The one way the Watcher reaches a tool, whichever harness runs it (v0's loop or the Agent SDK).
+
+    Every call is pinned to this Run's Film and trailer, what the Watcher is shown is
+    remembered as grounding, and a submission is grounded before it is accepted.
+    """
+
+    async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
+        if name == SUBMIT:
+            return _submit(watching, arguments)
+        if name not in mcp:
+            return ToolResult.error(f"there is no tool {name!r}")
+        refusal = _off_run(watching, name, arguments)
+        if refusal:
+            return ToolResult.error(refusal)
+        result = await mcp.call(name, arguments)
+        if not result.is_error:
+            _remember(watching, name, arguments, result)
+        return result
+
+    return call_tool
+
+
+async def watch_trailer(
+    film: str, source: str, *, servers: list[Any], client: Any, meter: FilmMeter
+) -> list[KeyMoment]:
+    watching = start_watching(film, source, meter)
+    gate = watching.gate
 
     async def watch(mcp: McpTools) -> list[KeyMoment]:
-        async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
-            if name == SUBMIT:
-                return _submit(watching, arguments)
-            if name not in mcp:
-                return ToolResult.error(f"there is no tool {name!r}")
-            refusal = _off_run(watching, name, arguments)
-            if refusal:
-                return ToolResult.error(refusal)
-            result = await mcp.call(name, arguments)
-            if not result.is_error:
-                _remember(watching, name, arguments, result)
-            return result
-
+        call_tool = tool_gate(watching, mcp)
         loop = AgentLoop(
             client=client,
             meter=meter,

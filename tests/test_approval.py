@@ -177,6 +177,18 @@ def test_the_measured_change_is_the_share_of_words_changed(before: str, after: s
     assert measured_change(before, after) == pytest.approx(changed, abs=0.01)
 
 
+def test_the_terminal_shows_the_measured_change_before_light_or_heavy() -> None:
+    terminal, keys, out = approver("e", "A cape is drawn up to his chin, slowly.", "", "l")
+    terminal.key_moment(1, 5, MOMENT)
+    shown = out.getvalue()
+    assert "changed" in shown and "% of the words" in shown
+    assert shown.index("% of the words") < shown.rindex("Light Edit")  # seen before the mark is asked
+
+    terminal, _, out = approver("e", "A spy walks in. Stream it now.", ".", "a", "h")
+    terminal.social_post(1, 6, POST, lambda t: Recheck([], Verdict(True, [])))
+    assert "% of the words" in out.getvalue()
+
+
 def test_spacing_alone_is_not_a_change() -> None:
     from trailer_to_campaign.approval import measured_change
 

@@ -38,6 +38,11 @@ def measured_change(before: str, after: str) -> float:
     return round(1 - SequenceMatcher(None, old, new, autojunk=False).ratio(), 3)
 
 
+def key_moment_text(what_happens: str, mood: str) -> str:
+    """What a Marketer can edit in a Key Moment, as one text: the measured change is taken on this."""
+    return f"{what_happens}\n{mood}"
+
+
 class ApprovalAborted(Exception):
     """The marketer's terminal closed mid-Approval: nothing more can be decided, so nothing is approved."""
 
@@ -94,7 +99,8 @@ class TerminalApprover:
                 if answer in (key, WORDS[key]):
                     return key
 
-    def _light(self) -> bool:
+    def _light(self, changed: float) -> bool:
+        self._say(f"This edit changed {changed:.0%} of the words.")
         self._say("Is this a Light Edit? Rewriting the hook is never light.")
         return self._choose("[l]ight / [h]eavy: ", "lh") == "l"
 
@@ -115,7 +121,8 @@ class TerminalApprover:
         mood = self._read("Mood: ").strip() or moment.mood
         if what == moment.what_happens and mood == moment.mood:
             return KeyMomentDecision("approve")
-        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light())
+        changed = measured_change(key_moment_text(moment.what_happens, moment.mood), key_moment_text(what, mood))
+        return KeyMomentDecision("edit", what_happens=what, mood=mood, light=self._light(changed))
 
     def social_post(self, i: int, n: int, checked: CheckedPost, recheck: Callable[[str], Recheck]) -> PostDecision:
         post = checked.post
@@ -140,7 +147,7 @@ class TerminalApprover:
             self._show(recheck(text))
             choice = self._choose("[a]pprove this edit / [e]dit again / [r]eject: ", "aer")
             if choice == "a":
-                return PostDecision("edit", text=text, light=self._light())
+                return PostDecision("edit", text=text, light=self._light(measured_change(post.text, text)))
         return PostDecision("reject")
 
     def _edit(self) -> str:

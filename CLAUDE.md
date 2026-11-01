@@ -31,7 +31,10 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
 3. **Build.** Branch `t<n>-<slug>` from fresh `main`. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
    _Done when:_ every planned test is green.
 4. **Verify.** Run the full test suite and lint. Then, by what changed:
-   - **An agent's prompt, tool or model:** run the Eval Set and compare Traps caught and cost per Film against `main`. A drop in Traps caught blocks the PR.
+   - **An agent's prompt, tool or model:** run the smallest Eval Set run that covers the change, and compare Traps caught and cost per Film with the Baseline from `t2c eval --baseline`. Run `main` again only when it says a new run is needed. A drop in Traps caught blocks the PR.
+     - The Checker alone: `t2c eval --only drafts`.
+     - The Copywriter alone: `t2c eval --key-moments-from <a report from main>`.
+     - The Watcher, or anything shared (`loop.py`, `brand.md`, a tool): a full `t2c eval`.
    - **The pipeline:** run one real trailer end to end and confirm it stays inside the Film Budget.
    - **Slack:** exercise the flow in the test channel.
 

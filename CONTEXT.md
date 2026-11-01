@@ -49,7 +49,7 @@ The agent that turns approved Key Moments into Social Posts.
 _Avoid_: Writer, creative agent
 
 **Checker**:
-The agent that reviews every Campaign Draft against the Spoiler List and the brand before it goes to Approval.
+The agent that reviews every Campaign Draft against the Spoiler List, the Film's cast and the brand before it goes to Approval.
 _Avoid_: Reviewer, validator
 
 ### Outputs

@@ -64,7 +64,7 @@ spoiler_id = "..."
 
 `t2c eval` prints one line per Film and these totals, and writes `report.md` and `summary.json` under `runs/_eval/<time>/`:
 
-- **Planted Drafts: caught X of Y**: deterministic, since the drafts don't depend on what the Copywriter writes. A drop against `main` blocks the PR. A spoiler Trap is caught when the Checker names its Spoiler List item; a wrong-cast Trap, when it calls the name an invented detail. The Checker has no cast list until #33, so it catches a wrong name only from what it already knows about a film: invented names and well-known films, but not a swap in a lesser-known one. Drafts the Checker failed to review are counted as not caught and shown as "not reviewed", so a timeout looks like what it is, not like a regression.
+- **Planted Drafts: caught X of Y**: deterministic, since the drafts don't depend on what the Copywriter writes. A drop against `main` blocks the PR. A spoiler Trap is caught when the Checker names its Spoiler List item; a wrong-cast Trap, when it calls the name an invented detail. The Checker reads the Film's cast from its catalog (T15), so it can settle a name on a Film it has never heard of. Drafts the Checker failed to review are counted as not caught and shown as "not reviewed", so a timeout looks like what it is, not like a regression.
 - **Input Traps: caught M of N**: an input Trap no verdict names is listed with the Film's posts, because only a person reading them can tell whether no post touched it or the Checker missed it.
 - **Clean Drafts: false alarms K of N**: a Checker that rejects everything would catch every Trap, so a rise here is a regression too. N counts only Clean Drafts the Checker actually reviewed.
 - **Cost**: the sum of the Films' Run Logs. Each Run has its own Film Budget.
@@ -77,7 +77,7 @@ A full run costs about $2. Pay only for what a change touches:
 
 | Command | What runs | About | Good for |
 |---|---|---|---|
-| `t2c eval --only drafts` | the Checker on the Planted and Clean Drafts | $0.37 | the Checker alone. Input Traps show as "not run". |
+| `t2c eval --only drafts` | the Checker on the Planted and Clean Drafts | $0.15 | the Checker alone. Input Traps show as "not run". |
 | `t2c eval --key-moments-from <report>` | the Copywriter and the Checker, on the Key Moments that report saved | $1.00 | the Copywriter alone. The report names its source. |
 | `t2c eval` | everything | $2.00 | the Watcher, or anything shared |
 | `t2c eval --baseline` | nothing: free, and needs no API key | $0 | finding the numbers to compare with |

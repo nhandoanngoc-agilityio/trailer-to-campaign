@@ -11,8 +11,10 @@ import pytest
 from fake_claude import FakeClient, Step, reply, results, use
 from mcp import Client
 
+from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.checker import (
     MAX_SUBMISSIONS,
+    MAX_TURNS,
     MODEL,
     Problem,
     Verdict,
@@ -24,6 +26,7 @@ from trailer_to_campaign.agents.social_posts import Claim, SocialPost
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 from trailer_to_campaign.run_log import RunLog
+from trailer_to_campaign.tools.catalog import create_catalog_server
 from trailer_to_campaign.tools.spoilers import create_spoiler_server
 
 pytestmark = pytest.mark.anyio
@@ -63,8 +66,8 @@ def films(tmp_path: Path) -> Path:
     return tmp_path / "films"
 
 
-def read_spoilers(params: dict[str, Any]) -> Any:
-    return reply(use("get_spoiler_list", film="sample"))
+def read_both(params: dict[str, Any]) -> Any:
+    return reply(use("get_spoiler_list", film="sample"), use("get_catalog", film="sample"))
 
 
 SPOILER = {
@@ -86,7 +89,7 @@ def submit(verdicts: list[dict[str, Any]], n: int = 1) -> Step:
 
 class Run:
     def __init__(self, films: Path, tmp_path: Path) -> None:
-        self.servers = [create_spoiler_server(films)]
+        self.servers = [create_spoiler_server(films), create_catalog_server(films)]
         self.run_log = RunLog.create(tmp_path / "runs", "sample")
         self.meter = FilmMeter(Decimal("2.00"), self.run_log)
 
@@ -102,7 +105,7 @@ class Run:
 
 async def test_the_checker_returns_a_verdict_for_each_post(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
-    verdicts, fake = await run.check([read_spoilers, submit(GOOD)])
+    verdicts, fake = await run.check([read_both, submit(GOOD)])
 
     assert verdicts == [
         Verdict(passed=True, problems=[]),
@@ -128,26 +131,88 @@ async def test_the_checker_returns_a_verdict_for_each_post(films: Path, tmp_path
     assert '"post": 2' in task and "carry on with the procedure" in task  # the posts, as numbered data
 
 
-async def test_the_checker_is_offered_only_the_spoiler_list(films: Path, tmp_path: Path) -> None:
+async def test_the_checker_is_offered_the_spoiler_list_and_the_catalog(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
-    _, fake = await run.check([read_spoilers, submit(GOOD)])
+    _, fake = await run.check([read_both, submit(GOOD)])
     for request in fake.requests:
-        assert [t["name"] for t in request["tools"]] == ["get_spoiler_list", "submit_verdicts"]
+        assert {t["name"] for t in request["tools"]} == {"get_spoiler_list", "get_catalog", "submit_verdicts"}
 
 
-async def test_the_real_server_set_is_the_spoiler_list_only(films: Path) -> None:
+async def test_the_real_server_set_is_the_spoiler_list_and_the_catalog(films: Path) -> None:
     names = set()
     for server in checker_servers(Settings(films_dir=films)):
         async with Client(server) as client:
             names |= {t.name for t in (await client.list_tools()).tools}
-    assert names == {"get_spoiler_list"}
+    assert names == {"get_spoiler_list", "get_catalog"}
 
 
 async def test_verdicts_before_reading_the_spoiler_list_are_refused(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
-    _, fake = await run.check([submit(GOOD, 0), read_spoilers, submit(GOOD)])
+    _, fake = await run.check([submit(GOOD, 0), read_both, submit(GOOD)])
     [refused] = results(fake.requests[1])
     assert refused["is_error"] and "get_spoiler_list" in refused["content"][0]["text"]
+
+
+# T15: the Checker checks names against the Film's cast, so it must have read it before it judges.
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        lambda params: reply(use("get_spoiler_list", film="sample")),
+        lambda params: reply(use("get_catalog", film="sample")),
+    ],
+)
+async def test_verdicts_before_reading_both_are_refused_and_not_counted(
+    films: Path, tmp_path: Path, first: Step
+) -> None:
+    run = Run(films, tmp_path)
+    _, fake = await run.check([first, submit(GOOD, 0), read_both, submit(GOOD, 1)])
+
+    [refused] = results(fake.requests[2])
+    text = refused["content"][0]["text"]
+    assert refused["is_error"] and "get_spoiler_list" in text and "get_catalog" in text
+    assert run.events("verdicts_rejected") == []
+
+
+async def test_the_checker_is_shown_the_films_cast(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    _, fake = await run.check([read_both, submit(GOOD)])
+
+    shown = json.dumps(results(fake.requests[1]))
+    assert "cast" in shown and "Agent 327" in shown
+
+
+async def test_a_catalog_that_cannot_be_read_never_lets_a_post_pass(films: Path, tmp_path: Path) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    broken = MCPServer("catalog")
+
+    @broken.tool()
+    def get_catalog(film: str) -> dict:
+        raise ValueError("the film.toml is damaged")
+
+    run = Run(films, tmp_path)
+    run.servers = [create_spoiler_server(films), broken]
+    keep_passing = [submit(GOOD, n) for n in range(MAX_TURNS)]
+    with pytest.raises(AgentFailed):
+        await run.check([read_both, *keep_passing])  # fail closed: these posts go to a person, flagged
+    assert run.events("post_checked") == []
+
+
+async def test_another_films_catalog_is_refused(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    other = lambda params: reply(use("get_catalog", film="another-film"))  # noqa: E731
+    _, fake = await run.check([other, read_both, submit(GOOD)])
+
+    [refused] = results(fake.requests[1])
+    assert refused["is_error"] and "sample" in refused["content"][0]["text"]
+
+
+def test_the_prompt_asks_for_the_cast_check() -> None:
+    prompt = load_prompt("checker")
+    assert "get_catalog" in prompt and "invented_detail" in prompt
+    assert "cast" in prompt.casefold() and "null" in prompt  # the wording is the Eval Set's to judge
 
 
 def problem(**over: Any) -> dict[str, Any]:
@@ -173,7 +238,7 @@ async def test_the_gate_sends_back_verdicts_that_do_not_hold(
     films: Path, tmp_path: Path, verdicts: list[Any], says: str
 ) -> None:
     run = Run(films, tmp_path)
-    result, fake = await run.check([read_spoilers, submit(verdicts), submit(GOOD, 2)])
+    result, fake = await run.check([read_both, submit(verdicts), submit(GOOD, 2)])
     [refused] = results(fake.requests[2])
     assert refused["is_error"] and says in refused["content"][0]["text"]
     assert result[1].passed is False
@@ -182,7 +247,7 @@ async def test_the_gate_sends_back_verdicts_that_do_not_hold(
 async def test_rejected_verdicts_are_not_logged_as_a_submission(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)  # T18 logs the writers' rejected drafts; the Checker passes no submission
     invented = {"post": 2, "verdict": "reject", "problems": [problem(offending_text="he is captured")]}
-    await run.check([read_spoilers, submit([GOOD[0], invented]), submit(GOOD, 2)])
+    await run.check([read_both, submit([GOOD[0], invented]), submit(GOOD, 2)])
 
     [event] = run.events("verdicts_rejected")
     assert "submitted" not in event
@@ -194,7 +259,7 @@ async def test_the_checker_gives_up_after_too_many_bad_submissions(films: Path, 
     run = Run(films, tmp_path)
     bad = [submit([GOOD[0]], i) for i in range(MAX_SUBMISSIONS)]
     with pytest.raises(AgentFailed):
-        await run.check([read_spoilers, *bad])
+        await run.check([read_both, *bad])
 
 
 async def test_offending_text_matches_in_either_unicode_form(films: Path, tmp_path: Path) -> None:
@@ -204,7 +269,7 @@ async def test_offending_text_matches_in_either_unicode_form(films: Path, tmp_pa
     spoiler = problem(offending_text=unicodedata.normalize("NFC", "bí mật cuối phim"))
     run = Run(films, tmp_path)
     verdicts, _ = await run.check(
-        [read_spoilers, submit([{"post": 1, "verdict": "reject", "problems": [spoiler]}])], posts=[vi]
+        [read_both, submit([{"post": 1, "verdict": "reject", "problems": [spoiler]}])], posts=[vi]
     )
     assert not verdicts[0].passed
 
@@ -219,6 +284,6 @@ async def test_a_spoiler_list_that_cannot_be_read_fails_the_checker_not_the_run(
         return {"film": film, "items": []}  # not the shape the Checker reads
 
     run_log = RunLog.create(tmp_path / "runs", "sample")
-    client = FakeClient([read_spoilers, submit(GOOD)])
+    client = FakeClient([lambda params: reply(use("get_spoiler_list", film="sample")), submit(GOOD)])
     with pytest.raises(AgentFailed, match="Spoiler List"):
         await check_posts("sample", POSTS, servers=[broken], client=client, meter=FilmMeter(Decimal("2"), run_log))

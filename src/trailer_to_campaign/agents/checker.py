@@ -1,11 +1,13 @@
-"""The Checker: reviews Social Posts against the Spoiler List and the brand before Approval.
+"""The Checker: reviews Social Posts against the Spoiler List, the cast and the brand before Approval.
 
     verdicts = await check_posts(film, posts, servers=checker_servers(settings), client=client, meter=meter)
 
-It is the only agent given the spoilers MCP server (ADR 0007), and it reads no
-catalog or Key Moments: only the posts and the list. It submits one verdict per
-post with a local tool; the verdicts are checked in code (judge) and sent back
-until they hold, at most MAX_SUBMISSIONS times. Every problem points at the words
+It is the only agent given the spoilers MCP server (ADR 0007). It also reads the
+catalog, because only the Film's cast can settle a name: a real actor in the wrong
+part, or a Film too new for the model to know (T15). It reads no Key Moments. Both
+reads come before any verdict, or a post could pass unchecked against them. It submits
+one verdict per post with a local tool; the verdicts are checked in code (judge) and
+sent back until they hold, at most MAX_SUBMISSIONS times. Every problem points at the words
 in the post that carry it, so a rewrite can be asked for without the Spoiler List
 ever reaching the Copywriter (review.py builds those requests).
 """
@@ -90,10 +92,12 @@ def submit_tool() -> dict[str, Any]:
 
 
 def checker_servers(settings: Settings) -> list[Any]:
-    """The Checker's servers: the Spoiler List only (ADR 0007)."""
+    """The Checker's servers: the Spoiler List, which no other agent gets (ADR 0007), and the catalog."""
+    from trailer_to_campaign.tools.catalog import create_catalog_server
     from trailer_to_campaign.tools.spoilers import create_spoiler_server
 
-    return [create_spoiler_server(settings.films_dir.resolve())]
+    films_dir = settings.films_dir.resolve()
+    return [create_spoiler_server(films_dir), create_catalog_server(films_dir)]
 
 
 def judge(submitted: list[Any], posts: list[SocialPost], spoiler_ids: set[str]) -> list[Verdict]:
@@ -166,6 +170,7 @@ class _Checking:
     posts: list[SocialPost]
     gate: Submissions
     spoiler_ids: set[str] | None = None
+    catalog_read: bool = False
 
 
 async def check_posts(
@@ -189,6 +194,8 @@ async def check_posts(
                 except (KeyError, IndexError, TypeError, ValueError) as err:
                     # Fail closed: without the list nothing can be judged, so these posts get flagged.
                     raise AgentFailed(f"the Checker could not read the Spoiler List ({type(err).__name__})") from err
+            if not result.is_error and name == "get_catalog":
+                checking.catalog_read = True
             return result
 
         loop = AgentLoop(
@@ -225,7 +232,7 @@ async def check_posts(
 
 def _submit(checking: _Checking, arguments: dict[str, Any]) -> ToolResult:
     spoiler_ids = checking.spoiler_ids
-    if spoiler_ids is None:
-        return ToolResult.error("call get_spoiler_list before giving verdicts")
+    if spoiler_ids is None or not checking.catalog_read:
+        return ToolResult.error("call get_spoiler_list and get_catalog before giving verdicts")
     submitted = list(arguments.get("verdicts") or [])
     return checking.gate.submit(lambda: judge(submitted, checking.posts, spoiler_ids))

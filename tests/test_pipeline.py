@@ -281,7 +281,7 @@ async def test_the_real_recheck_traces_the_edit_and_asks_the_checker(tmp_path: P
     verdict = {"post": 1, "verdict": "pass", "problems": []}
     client = FakeClient(
         [
-            lambda p: reply(use("get_spoiler_list", film="sample")),
+            lambda p: reply(use("get_spoiler_list", film="sample"), use("get_catalog", film="sample")),
             lambda p: reply(use("submit_verdicts", verdicts=[verdict])),
         ]
     )
@@ -321,7 +321,7 @@ def test_each_stage_gets_a_client_of_its_own_event_loop(tmp_path: Path, monkeypa
         made.append(
             LoopBoundClient(
                 [
-                    lambda p: reply(use("get_spoiler_list", film="sample")),
+                    lambda p: reply(use("get_spoiler_list", film="sample"), use("get_catalog", film="sample")),
                     lambda p: reply(use("submit_verdicts", verdicts=[verdict])),
                 ]
             )

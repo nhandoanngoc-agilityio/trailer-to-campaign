@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scope = evaluate.add_mutually_exclusive_group()
     scope.add_argument(
-        "--only", choices=["drafts"], help="drafts: only the Checker on the Planted and Clean Drafts (about $0.37)"
+        "--only", choices=["drafts"], help="drafts: only the Checker on the Planted and Clean Drafts (about $0.15)"
     )
     scope.add_argument(
         "--key-moments-from",

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from trailer_to_campaign.agents.checker import Verdict
+from trailer_to_campaign.agents.checker import Problem, Verdict
 from trailer_to_campaign.agents.key_moments import KeyMoment, Quote
 from trailer_to_campaign.agents.loop import AgentFailed
 from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview
@@ -44,6 +44,8 @@ class FakeStages:
         self.watch_raises: BaseException | None = None
         self.write_raises: BaseException | None = None
         self.recheck_raises: BaseException | None = None
+        self.rechecks: dict[str, Recheck] = {}  # by the text checked; anything else passes
+        self.flagged: dict[tuple[str, str], list[str]] = {}  # posts the Checker still rejects after its retries
 
     def stages(self) -> Stages:
         return Stages(watch=self.watch, write_and_check=self.write_and_check, recheck=self.recheck)
@@ -66,7 +68,12 @@ class FakeStages:
         spend(meter, "copywriter")
         spend(meter, "checker")
         return [
-            CheckedPost(SocialPost(p, lang, f"{p} {lang} post. Stream it now.", []), "passed", [], 0)
+            CheckedPost(
+                SocialPost(p, lang, f"{p} {lang} post. Stream it now.", []),
+                "flagged" if (p, lang) in self.flagged else "passed",
+                self.flagged.get((p, lang), []),
+                0,
+            )
             for p, lang in ALL_PAIRS
         ]
 
@@ -75,7 +82,7 @@ class FakeStages:
         if self.recheck_raises:
             raise self.recheck_raises
         spend(meter, "checker")
-        return Recheck([], Verdict(True, []))
+        return self.rechecks.get(post.text, Recheck([], Verdict(True, [])))
 
 
 class ScriptedApprover:
@@ -519,3 +526,175 @@ def test_a_model_call_that_never_answers_ends_the_run_in_an_error(
     assert Decimal(lines[-1]["total_usd"]) == Decimal(answered["cost_usd"]) + Decimal(hung["cost_usd"])
     assert "did not answer within" in run.out  # type: ignore[attr-defined]
     assert approver.asked == []  # nothing reaches Approval
+
+
+# T22: a post approved over a flag says so, in the record and in the numbers.
+
+
+EDITED = "An edited post. Stream it now."
+REJECTED = Problem("brand", "edited", "A word is missing.", rule="other")
+CHECKER_FLAGGED = Recheck([], Verdict(False, [REJECTED]))
+TRACE_FLAGGED = Recheck(["quote 'x' is not a Key Moment's line"], Verdict(True, []))
+
+
+class EditsAgain(ScriptedApprover):
+    """Edits one post several times before deciding, as a Marketer can."""
+
+    def __init__(self, edits: list[str], decision: PostDecision) -> None:
+        super().__init__([APPROVE_KM] * 5, [APPROVE_POST] * 5)
+        self.edits, self.decision = edits, decision
+
+    def social_post(self, i: int, n: int, checked: CheckedPost, recheck: Any) -> PostDecision:
+        if i > 1:
+            return super().social_post(i, n, checked, recheck)
+        for text in self.edits:
+            recheck(text)
+        return self.decision
+
+
+def edit_of_first_post(stages: FakeStages, tmp_path: Path, edits: list[str], **decision: Any) -> tuple[Any, Any, Any]:
+    made = PostDecision("edit", text=edits[-1], light=decision.get("light", True))
+    _, lines, run_dir = run(tmp_path, stages, EditsAgain(edits, made))
+    [approval] = [a for a in events(lines, "approval") if a.get("platform") == "facebook" and a["language"] == "en"]
+    first = json.loads((run_dir / "campaign.json").read_text())["social_posts"][0]
+    [rate] = events(lines, "approval_rate")
+    return approval, first, rate
+
+
+def test_an_edit_the_checker_passes_records_passed(tmp_path: Path) -> None:
+    approval, first, rate = edit_of_first_post(FakeStages(), tmp_path, [EDITED])
+    assert approval["edit_check"] == first["edit_check"] == "passed"
+    assert approval["edit_problems"] == first["edit_problems"] == []
+    assert rate["approved_over_a_flag"] == [] and rate["approved_not_rechecked"] == []
+
+
+def test_an_edit_the_checker_rejects_and_a_marketer_approves_records_flagged(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    approval, first, rate = edit_of_first_post(stages, tmp_path, [EDITED])
+
+    assert approval["edit_check"] == first["edit_check"] == "flagged"
+    assert (
+        any("A word is missing." in p for p in first["edit_problems"])
+        and approval["edit_problems"] == first["edit_problems"]
+    )
+    assert first["status"] == "passed"  # the draft's status, before the edit: unchanged, and beside the new one
+    assert first["final_text"] == EDITED
+    assert rate["approved_over_a_flag"] == ["facebook en"]
+
+
+def test_an_edit_with_only_a_tracing_problem_records_flagged(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = TRACE_FLAGGED
+    _, first, rate = edit_of_first_post(stages, tmp_path, [EDITED])
+
+    assert first["edit_check"] == "flagged" and first["edit_problems"] == TRACE_FLAGGED.problems
+    assert rate["approved_over_a_flag"] == ["facebook en"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FilmBudgetReached(Decimal("1.9"), Decimal("2"), Decimal("0.3")),
+        AgentFailed("the Checker gave up"),
+        ValueError("oops"),
+    ],
+)
+def test_an_edit_whose_recheck_could_not_run_records_not_rechecked(tmp_path: Path, failure: Exception) -> None:
+    stages = FakeStages()
+    stages.recheck_raises = failure
+    _, first, rate = edit_of_first_post(stages, tmp_path, [EDITED])
+
+    assert first["edit_check"] == "not_rechecked" and first["edit_problems"]  # it says why
+    assert rate["approved_not_rechecked"] == ["facebook en"] and rate["approved_over_a_flag"] == []
+
+
+def test_an_edit_decided_with_no_recheck_of_its_text_records_not_rechecked(tmp_path: Path) -> None:
+    decision = PostDecision("edit", text="Text nobody re-checked. Stream it now.", light=True)
+    _, lines, run_dir = run(tmp_path, FakeStages(), EditsAgain([EDITED], decision))
+    first = json.loads((run_dir / "campaign.json").read_text())["social_posts"][0]
+    assert first["edit_check"] == "not_rechecked"
+    assert events(lines, "approval_rate")[0]["approved_not_rechecked"] == ["facebook en"]
+
+
+@pytest.mark.parametrize(
+    ("flagged_text", "edits", "expected"),
+    [
+        ("First try. Stream it now.", ["First try. Stream it now.", "Second try. Stream it now."], "passed"),
+        ("Second try. Stream it now.", ["First try. Stream it now.", "Second try. Stream it now."], "flagged"),
+    ],
+)
+def test_only_the_recheck_of_the_final_text_counts(
+    tmp_path: Path, flagged_text: str, edits: list[str], expected: str
+) -> None:
+    stages = FakeStages()
+    stages.rechecks[flagged_text] = CHECKER_FLAGGED
+    _, first, _ = edit_of_first_post(stages, tmp_path, edits)
+    assert first["edit_check"] == expected
+
+
+def test_a_post_with_no_edit_and_a_rejected_edit_keep_todays_record(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    _, lines, run_dir = run(tmp_path, stages, EditsAgain([EDITED], PostDecision("reject")))
+
+    campaign = json.loads((run_dir / "campaign.json").read_text())["social_posts"]
+    posts = [a for a in events(lines, "approval") if a["stage"] == "social_posts"]
+    assert all("edit_check" not in p and "edit_problems" not in p for p in [*campaign, *posts])
+    [rate] = events(lines, "approval_rate")
+    assert rate["approved_over_a_flag"] == []  # rejected: it won't go out
+
+
+def test_a_flagged_post_approved_unedited_counts_as_approved_over_a_flag(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.flagged[("tiktok", "vi")] = ["spoiler the-end: gives it away"]
+    approver = ScriptedApprover([APPROVE_KM] * 5, [APPROVE_POST] * 6)
+    _, lines, run_dir = run(tmp_path, stages, approver)
+
+    assert events(lines, "approval_rate")[0]["approved_over_a_flag"] == ["tiktok vi"]
+    assert "edit_check" not in json.loads((run_dir / "campaign.json").read_text())["social_posts"][5]
+
+
+def test_a_flagged_post_rejected_is_not_approved_over_a_flag(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.flagged[("facebook", "en")] = ["spoiler the-end: gives it away"]
+    approver = ScriptedApprover([APPROVE_KM] * 5, [(PostDecision("reject"), None), *[APPROVE_POST] * 5])
+    _, lines, _ = run(tmp_path, stages, approver)
+    assert events(lines, "approval_rate")[0]["approved_over_a_flag"] == []
+
+
+def test_a_flagged_post_whose_edit_passes_is_not_approved_over_a_flag(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.flagged[("facebook", "en")] = ["spoiler the-end: gives it away"]
+    _, first, rate = edit_of_first_post(stages, tmp_path, [EDITED])
+    assert first["edit_check"] == "passed" and rate["approved_over_a_flag"] == []
+
+
+def test_a_heavy_edit_over_a_flag_counts_though_it_is_not_in_the_approval_rate(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    _, _, rate = edit_of_first_post(stages, tmp_path, [EDITED], light=False)
+    assert rate["approved_over_a_flag"] == ["facebook en"]
+    assert rate["social_posts"] == "5/6"  # a heavy edit was never in it
+
+
+def test_approving_over_a_flag_does_not_change_the_approval_rate(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    _, _, flagged_rate = edit_of_first_post(stages, tmp_path / "flagged", [EDITED])
+    _, _, passed_rate = edit_of_first_post(FakeStages(), tmp_path / "passed", [EDITED])
+    assert flagged_rate["social_posts"] == passed_rate["social_posts"] == "6/6"
+
+
+def test_the_run_says_what_was_approved_over_a_flag_by_name_and_not_why(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    edit_of_first_post(stages, tmp_path, [EDITED])
+    said = run.out  # type: ignore[attr-defined]
+    assert "over a flag: facebook en" in said
+    assert "A word is missing." not in said  # in Slack, everything the Run says goes to the channel
+
+
+def test_a_clean_run_says_nothing_about_flags(tmp_path: Path) -> None:
+    edit_of_first_post(FakeStages(), tmp_path, [EDITED])
+    assert "over a flag" not in run.out and "not re-checked" not in run.out  # type: ignore[attr-defined]

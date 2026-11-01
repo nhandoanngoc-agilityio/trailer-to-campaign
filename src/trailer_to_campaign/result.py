@@ -250,6 +250,8 @@ def _page(r: FilmResult) -> str:
             f"heavy edits: {heavy.get('count', 0)}, mean {_share(heavy.get('mean'))}",
             f"- Light Edits that changed over {_share(a.get('light_edit_flag', LIGHT_EDIT_FLAG))} of the words: "
             f"{len(flagged)}",
+            f"- Social Posts approved over a flag: {_count_or_unknown(a, 'approved_over_a_flag')}; "
+            f"approved with no re-check: {_count_or_unknown(a, 'approved_not_rechecked')}",
         ]
     lines += ["", "## Runs", "", "| Run | Ended | Cost | Run Log time |", "|---|---|---|---|"]
     lines += [
@@ -257,6 +259,16 @@ def _page(r: FilmResult) -> str:
         for s in r.runs
     ]
     return "\n".join(lines) + "\n"
+
+
+def _flag_count(approval: dict[str, Any], key: str) -> int | None:
+    """How many posts, or None for a Run from before T22 (or none used): unknown is not zero."""
+    return len(approval[key]) if key in approval else None
+
+
+def _count_or_unknown(approval: dict[str, Any], key: str) -> str:
+    count = _flag_count(approval, key)
+    return "not recorded" if count is None else str(count)
 
 
 def _share(value: Any) -> str:
@@ -271,6 +283,8 @@ def _numbers(r: FilmResult) -> dict[str, Any]:
         "new_way_minutes": str(r.new_minutes),
         "time_saved_minutes": str(r.time_saved),
         "approval_rate": r.approval.get("overall"),
+        "approved_over_a_flag": _flag_count(r.approval, "approved_over_a_flag"),
+        "approved_not_rechecked": _flag_count(r.approval, "approved_not_rechecked"),
         "cost_usd": str(r.cost),
         "run_log_minutes": str(r.run_log_minutes),
         "runs": [

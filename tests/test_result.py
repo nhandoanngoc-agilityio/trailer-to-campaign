@@ -78,6 +78,8 @@ RATE = {
     "heavy_edit_change": {"count": 1, "mean": 0.64},
     "light_edit_flag": 0.3,
     "light_edits_over_flag": [{"where": "tiktok vi", "changed": 0.41}],
+    "approved_over_a_flag": ["tiktok vi"],
+    "approved_not_rechecked": [],
 }
 
 
@@ -125,6 +127,10 @@ def test_the_page_holds_numbers_and_no_unreleased_text(tmp_path: Path, films: Pa
         assert secret not in page
     data = json.loads((tmp_path / "runs" / FILM / "result.json").read_text(encoding="utf-8"))
     assert data["cost_usd"] == "1.35" and data["time_saved_minutes"] == "180" and data["approval_rate"] == "13/15"
+    # T22: how many were approved over a flag, as counts: never which words or why.
+    assert "Social Posts approved over a flag: 1" in page and "approved with no re-check: 0" in page
+    assert data["approved_over_a_flag"] == 1 and data["approved_not_rechecked"] == 0
+    assert "tiktok vi" not in page.split("## Runs")[0].split("over a flag")[1]
 
 
 def test_a_trial_with_no_completed_run_says_it_is_not_finished(tmp_path: Path, films: Path) -> None:
@@ -214,3 +220,15 @@ def test_a_slower_new_way_says_so(tmp_path: Path, films: Path) -> None:
     result = film_result(FILM, tmp_path / "runs", films, old_minutes=60, new_minutes=90)
     page = write_result(result, tmp_path / "runs").read_text(encoding="utf-8")
     assert "Time Saved: none: Trailer-to-Campaign took 30 min longer (50%)" in page
+
+
+def test_a_run_from_before_the_flag_count_says_not_recorded(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    old = {k: v for k, v in RATE.items() if k not in ("approved_over_a_flag", "approved_not_rechecked")}
+    a_run(runs, "20261102T040000Z", costs=["0.45"], end="completed", minutes=75, rate=old)
+    path = write_result(film_result(FILM, runs, films, old_minutes=240, new_minutes=60), runs)
+
+    page = path.read_text(encoding="utf-8")
+    assert "Social Posts approved over a flag: not recorded" in page  # unknown is not zero
+    data = json.loads(path.with_name("result.json").read_text(encoding="utf-8"))
+    assert data["approved_over_a_flag"] is None and data["approved_not_rechecked"] is None

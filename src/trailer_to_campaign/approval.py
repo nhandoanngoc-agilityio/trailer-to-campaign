@@ -77,6 +77,13 @@ class Recheck:
     note: str | None = None
 
 
+def recheck_outcome(result: Recheck) -> str:
+    """How a re-check ended, for the record: a re-check that couldn't run must not read as passed."""
+    if result.verdict is None:
+        return "not_rechecked"
+    return "passed" if result.verdict.passed and not result.problems else "flagged"
+
+
 class Approver(Protocol):
     def key_moment(self, i: int, n: int, moment: KeyMoment) -> KeyMomentDecision: ...
 

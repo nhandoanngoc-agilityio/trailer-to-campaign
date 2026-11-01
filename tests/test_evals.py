@@ -5,11 +5,13 @@ from __future__ import annotations
 import builtins
 import io
 import json
+import signal
 import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from fake_claude import FakeClient, reply, use
 
@@ -412,15 +414,18 @@ def test_ctrl_c_still_writes_the_report_for_the_films_already_run(eval_dir: Path
 class SideBySide(FakeStages):
     """Watches yield, and track how many Films are in the Watcher at once."""
 
-    def __init__(self, delays: dict[str, float] | None = None, meet: int = 0) -> None:
+    def __init__(
+        self,
+        delays: dict[str, float] | None = None,
+        meet: int = 0,
+        fails: dict[str, BaseException] | None = None,
+    ) -> None:
         super().__init__()
-        self.delays, self.meet = delays or {}, meet
+        self.delays, self.meet, self.fails = delays or {}, meet, fails or {}
         self.inside = self.most_inside = 0
         self.arrived: Any = None
 
     def stages(self, film: EvalFilm) -> EvalStages:
-        import anyio
-
         base = super().stages(film)
 
         async def watch(meter: FilmMeter) -> list[KeyMoment]:
@@ -430,10 +435,35 @@ class SideBySide(FakeStages):
                 self.arrived = self.arrived or anyio.Event()
                 if self.inside == self.meet:
                     self.arrived.set()
-                await self.arrived.wait()
+                with anyio.fail_after(2):
+                    await self.arrived.wait()
             await anyio.sleep(self.delays.get(film.slug, 0.01))
             self.inside -= 1
+            if film.slug in self.fails:
+                raise self.fails[film.slug]
             return await self.watch(meter)
+
+        return EvalStages(check=base.check, watch=watch, write_and_check=base.write_and_check)
+
+
+class CtrlC(FakeStages):
+    """One Film's Watcher spends, then a real SIGINT arrives while its next call is still in flight."""
+
+    def __init__(self, film: str, after: float = 0.05) -> None:
+        super().__init__()
+        self.film, self.after = film, after
+
+    def stages(self, film: EvalFilm) -> EvalStages:
+        base = super().stages(film)
+        if film.slug != self.film:
+            return base
+
+        async def watch(meter: FilmMeter) -> list[KeyMoment]:
+            spend(meter, "watcher")
+            await anyio.sleep(self.after)
+            signal.raise_signal(signal.SIGINT)
+            await anyio.sleep(30)  # only being cancelled ends this
+            raise AssertionError("Ctrl-C did not cancel the Film in flight")
 
         return EvalStages(check=base.check, watch=watch, write_and_check=base.write_and_check)
 
@@ -445,14 +475,8 @@ def run_with(eval_dir: Path, tmp_path: Path, fake: FakeStages, parallel: int | N
 
 
 def test_the_films_run_side_by_side(eval_dir: Path, tmp_path: Path) -> None:
-    import signal
-
-    fake = SideBySide(meet=2)
-    signal.alarm(5)  # one at a time would wait forever
-    try:
-        code, _ = run_with(eval_dir, tmp_path, fake)
-    finally:
-        signal.alarm(0)
+    fake = SideBySide(meet=2)  # one at a time would time out at the barrier
+    code, _ = run_with(eval_dir, tmp_path, fake)
     assert code == 0 and fake.most_inside == 2
 
 
@@ -470,6 +494,46 @@ def test_parallel_1_runs_one_film_at_a_time(eval_dir: Path, tmp_path: Path) -> N
     fake = SideBySide(delays={"alpha": 0.05, "beta": 0.05})
     code, _ = run_with(eval_dir, tmp_path, fake, parallel=1)
     assert code == 0 and fake.most_inside == 1
+
+
+def test_ctrl_c_cancels_a_film_in_flight_and_reports_the_ones_that_finished(eval_dir: Path, tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        run_with(eval_dir, tmp_path, CtrlC("beta"))  # alpha has no wait, so it is done by then
+
+    data = summary(tmp_path)
+    assert [(f["film"], f["stop"]) for f in data["films"]] == [("alpha", "completed"), ("gamma", "skipped")]
+    assert data["interrupted"] == ["beta"]
+    last = run_log(tmp_path, "beta")[-1]
+    assert last["stop_reason"] == "error" and Decimal(last["total_usd"]) > 0  # its spend is kept
+
+
+def test_no_new_film_starts_after_ctrl_c(eval_dir: Path, tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        run_with(eval_dir, tmp_path, CtrlC("alpha"), parallel=1)
+
+    assert summary(tmp_path)["interrupted"] == ["alpha", "beta"]
+    assert run_log(tmp_path, "alpha")[-1]["stop_reason"] == "error"
+    assert not (tmp_path / "runs" / "beta").exists()  # it never began, so it spent nothing
+
+
+@pytest.mark.parametrize(
+    ("failure", "stop"),
+    [
+        (RuntimeError("the Watcher crashed"), "error"),
+        (FilmBudgetReached(Decimal("1.99"), Decimal("2.00"), Decimal("0.50")), "film_budget_reached"),
+    ],
+)
+def test_a_film_failing_in_flight_leaves_the_other_films_score_alone(
+    eval_dir: Path, tmp_path: Path, failure: BaseException, stop: str
+) -> None:
+    fake = SideBySide(delays={"alpha": 0.01, "beta": 0.1}, meet=2, fails={"alpha": failure})
+    code, _ = run_with(eval_dir, tmp_path, fake)
+
+    alpha, beta, _gamma = summary(tmp_path)["films"]
+    assert code != 0 and alpha["stop"] == stop
+    assert beta["stop"] == "completed" and beta["errors"] == [] and beta["watcher"]["key_moments"] == 1
+    assert beta["planted"] == alpha["planted"]  # alpha's Planted Drafts were scored before it failed
+    assert fake.most_inside == 2  # beta was in flight when alpha failed
 
 
 def test_an_eval_run_asks_for_and_records_no_approval(

@@ -83,8 +83,9 @@ class Submissions:
 
     def submit(self, check: Callable[[], list[Any]], submitted: Any = None) -> ToolResult:
         """submitted, when given, is logged with a rejection so it can be read back. The Copywriter and the
-        Watcher pass their drafts, as sent. The Checker doesn't: a verdict that failed its check isn't a draft,
-        and may word the Spoiler List. (Its accepted verdicts are in the Run Log, as post_checked, for the team.)"""
+        Watcher pass their drafts, as sent. The Checker passes nothing, so a rejected verdict's reason stays out,
+        though its problems can quote the verdict's offending_text and spoiler_id. The Run Log is for the team and
+        can hold spoilers: post_checked keeps accepted verdicts in full."""
         self.count += 1
         try:
             result = check()

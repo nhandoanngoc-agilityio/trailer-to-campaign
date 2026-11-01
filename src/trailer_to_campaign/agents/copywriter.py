@@ -150,7 +150,7 @@ async def _write(
     client: Any,
     meter: FilmMeter,
 ) -> list[SocialPost]:
-    # A rejection names every post still asked for: "all the posts asked for" read as only the one at fault (T18).
+    # A rejection names every post still asked for, so it can't be read as only the one at fault (T18).
     rejected = load_prompt("copywriter_rejected").replace("{required}", post_names(required))
     gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", rejected, MAX_SUBMISSIONS)
     writing = _Writing(film, key_moments, required, gate)
@@ -193,7 +193,7 @@ def _submit(writing: _Writing, arguments: dict[str, Any]) -> ToolResult:
     catalog = writing.catalog
     if catalog is None:
         return ToolResult.error("call get_catalog before submitting")
-    submitted = list(arguments.get("posts") or [])
+    posts = list(arguments.get("posts") or [])
     return writing.gate.submit(
-        lambda: trace(submitted, writing.key_moments, catalog, writing.required), submitted=arguments
+        lambda: trace(posts, writing.key_moments, catalog, writing.required), submitted=arguments
     )

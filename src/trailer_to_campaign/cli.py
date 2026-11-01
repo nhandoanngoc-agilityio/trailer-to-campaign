@@ -122,6 +122,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--parallel", type=_parallel_arg, help="how many Films run at once (default: all; 1 runs them in turn)"
     )
+    scope = evaluate.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--only", choices=["drafts"], help="drafts: only the Checker on the Planted and Clean Drafts (about $0.37)"
+    )
+    scope.add_argument(
+        "--key-moments-from",
+        type=Path,
+        metavar="REPORT_DIR",
+        help="reuse the Key Moments of an earlier run's report (runs/_eval/<time>): no Watcher runs",
+    )
+    scope.add_argument(
+        "--baseline",
+        action="store_true",
+        help="print the newest saved report of main's agents, or say a new run is needed; free",
+    )
 
     slack = commands.add_parser("slack", help="run the Slack front door: a Marketer's @mention starts a Run")
     slack.add_argument("--budget", type=_budget_arg, help="Film Budget per Run in USD (default: FILM_BUDGET_USD)")
@@ -325,14 +340,24 @@ def write(film: str, key_moments_file: Path, budget: Decimal, runs_dir: Path, se
 
 
 def run_eval_set(
-    eval_dir: Path, budget: Decimal, runs_dir: Path, settings: Settings, parallel: int | None = None
+    eval_dir: Path,
+    budget: Decimal,
+    runs_dir: Path,
+    settings: Settings,
+    parallel: int | None = None,
+    only_drafts: bool = False,
+    key_moments_from: Path | None = None,
+    baseline: bool = False,
 ) -> int:
     from trailer_to_campaign import evals
 
+    if baseline:
+        return evals.show_baseline(runs_dir, settings.watcher)
     try:
         api_key = settings.require_api_key()
         films = evals.prepare(eval_dir)  # every Answer Key is checked before the first paid call
-    except (MissingApiKey, ValueError) as err:  # ValueError: a bad eval_set.toml, film.toml or Answer Key
+        reused = evals.load_reused(key_moments_from, films) if key_moments_from else None
+    except (MissingApiKey, ValueError) as err:  # ValueError: a bad eval_set.toml, film.toml, Answer Key or report
         print(err, file=sys.stderr)
         return 2
     settings = replace(settings, films_dir=eval_dir / "films")
@@ -343,6 +368,8 @@ def run_eval_set(
         lambda film: evals.real_stages(film.slug, film.trailer, settings, lambda: make_client(api_key)),
         watcher=settings.watcher,
         parallel=parallel,
+        only_drafts=only_drafts,
+        reused=reused,
     )
 
 
@@ -495,6 +522,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
             parallel=args.parallel,
+            only_drafts=args.only == "drafts",
+            key_moments_from=args.key_moments_from,
+            baseline=args.baseline,
         )
     if (args.command.startswith("serve-") or args.command == "slack") and not settings.films_dir.is_dir():
         # An MCP host may start the server in / or $HOME, where there is no films/ folder.

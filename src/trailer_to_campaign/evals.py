@@ -14,6 +14,11 @@ No Approval is asked for or recorded: every Grounded Key Moment goes on to the
 Copywriter, and the Run ends at the Checker. A Film whose folder is missing (Song
 Lang is gitignored) is skipped and named in the report.
 
+A run can skip what a change doesn't touch (T20): only_drafts stops after step 1, and
+reused takes the Key Moments an earlier run saved, so no Watcher runs. Each report says
+which it was, the commit, and a hash of the agents, so show_baseline can find a whole
+run of `main`'s agents again instead of paying for a new one.
+
 The Answer Key in evals/expected/ is human-written: this module only reads it,
 checked strictly like film.toml, because a typo that dropped a Trap would make a
 regression look like a pass.
@@ -26,7 +31,7 @@ import logging
 import sys
 import tomllib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +40,7 @@ from typing import Any, TextIO
 import anyio
 
 from trailer_to_campaign.agents.checker import Verdict
-from trailer_to_campaign.agents.key_moments import KeyMoment
+from trailer_to_campaign.agents.key_moments import KeyMoment, load_key_moments
 from trailer_to_campaign.agents.loop import AgentFailed
 from trailer_to_campaign.agents.post_text import nfc
 from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview
@@ -43,6 +48,7 @@ from trailer_to_campaign.agents.social_posts import LANGUAGES, PLATFORM_LIMITS, 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
 from trailer_to_campaign.config import Settings
+from trailer_to_campaign.eval_baseline import agents_hash, current_commit, find_baseline, main_agents_hash
 from trailer_to_campaign.run_log import (
     EXIT_AGENT_FAILED,
     EXIT_FILM_BUDGET_REACHED,
@@ -290,6 +296,7 @@ class FilmResult:
     errors: list[str] = field(default_factory=list)
     run_log: Path | None = None
     key_moments: int = 0  # what the Watcher handed on
+    drafts_only: bool = False  # --only drafts: no post was written, so no input Trap could be caught
 
     def input_caught(self, spoiler_id: str) -> bool:
         return any(
@@ -312,6 +319,47 @@ def caught(draft: PlantedDraft, verdict: Verdict) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class ReusedKeyMoments:
+    """Key Moments an earlier Eval Set run saved, so this one needs no Watcher."""
+
+    source: Path  # that run's report folder
+    commit: str | None
+    by_film: dict[str, list[KeyMoment]]
+
+
+def load_reused(report_dir: Path, films: list[EvalFilm]) -> ReusedKeyMoments:
+    """Read every present Film's saved Key Moments, or raise ValueError naming what's missing, before any paid call.
+
+    Each file is found from the report's own runs folder (<runs>/_eval/<time>/), so a moved folder still works."""
+    try:
+        summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+        entries = {entry["film"]: entry for entry in summary["films"]}
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        raise ValueError(f"{report_dir / 'summary.json'} could not be read as an Eval Set report") from err
+    runs = report_dir.resolve().parents[1]
+    by_film: dict[str, list[KeyMoment]] = {}
+    for film in films:
+        if film.key is None:
+            continue
+        parts = Path(str(entries.get(film.slug, {}).get("run_log"))).parts[-3:]
+        if len(parts) != 3 or parts[0] != film.slug or ".." in parts:
+            raise ValueError(f"{report_dir} has no Run of {film.slug} to reuse Key Moments from")
+        try:
+            by_film[film.slug] = load_key_moments(runs.joinpath(*parts).with_name("key_moments.json"))
+        except ValueError as err:
+            raise ValueError(f"{film.slug}: no Key Moments to reuse from {report_dir}: {err}") from err
+    return ReusedKeyMoments(report_dir, summary.get("commit"), by_film)
+
+
+def _save_key_moments(path: Path, moments: list[KeyMoment]) -> None:
+    """Next to the Run Log, for --key-moments-from. Failing to save costs only that later saving, never this Run."""
+    try:
+        path.write_text(json.dumps([asdict(m) for m in moments], ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as err:
+        log.warning("could not save %s: %r", path, err)
+
+
 async def evaluate_film(
     film: str,
     key: AnswerKey,
@@ -319,13 +367,15 @@ async def evaluate_film(
     runs_dir: Path,
     stages: EvalStages,
     started: dict[str, FilmMeter] | None = None,
+    only_drafts: bool = False,
+    reused: ReusedKeyMoments | None = None,
 ) -> FilmResult:
     """One Film's Eval Set Run. started, when given, gets the Film's meter, so a Run cut short can be accounted for."""
     run_log = RunLog.create(runs_dir, film)
     meter = FilmMeter(budget, run_log)
     if started is not None:
         started[film] = meter
-    result = FilmResult(film, key, run_log=run_log.path)
+    result = FilmResult(film, key, run_log=run_log.path, drafts_only=only_drafts)
     meter.event(
         "eval_run",
         planted_drafts=len(key.planted_drafts),
@@ -347,12 +397,18 @@ async def evaluate_film(
                     result.caught[draft.id] = caught(draft, verdict)
                 elif not verdict.passed:
                     result.false_alarms.append(draft.id)
-        moments = await stages.watch(meter)
-        result.key_moments = len(moments)
-        if moments:
-            result.posts = await stages.write_and_check(moments, meter, result.pipeline_verdicts)
-        else:
-            result.errors.append("the Watcher found no Key Moments, so no posts were written")
+        if not only_drafts:
+            if reused is not None:
+                moments = reused.by_film[film]
+                meter.event("key_moments_reused", source=str(reused.source), key_moments=len(moments))
+            else:
+                moments = await stages.watch(meter)
+            result.key_moments = len(moments)
+            if moments:
+                _save_key_moments(run_log.path.with_name("key_moments.json"), moments)
+                result.posts = await stages.write_and_check(moments, meter, result.pipeline_verdicts)
+            else:
+                result.errors.append("the Watcher found no Key Moments, so no posts were written")
     except FilmBudgetReached as err:
         stop = "film_budget_reached"
         result.errors.append(str(err))
@@ -380,6 +436,8 @@ def run_eval(
     out: TextIO | None = None,
     watcher: str = "v0",
     parallel: int | None = None,
+    only_drafts: bool = False,
+    reused: ReusedKeyMoments | None = None,
 ) -> int:
     """One Eval Set Run per present Film, then the report. Returns 0 only if every Run completed cleanly.
 
@@ -390,6 +448,16 @@ def run_eval(
     stages run (v0 or sdk), so two reports can be compared."""
     if parallel is not None and parallel < 1:
         raise ValueError(f"parallel must be at least 1, got {parallel}")
+    if only_drafts and reused is not None:
+        raise ValueError("only_drafts writes no posts, so it has no use for reused Key Moments")
+    # Worked out before any Film starts: what these Runs measure, and a failure here costs nothing.
+    measured_on: dict[str, Any] = {
+        "mode": "drafts" if only_drafts else "reused_key_moments" if reused else "full",
+        "commit": current_commit(),
+        "agents_hash": agents_hash(),
+    }
+    if reused is not None:
+        measured_on |= {"key_moments_from": str(reused.source), "key_moments_commit": reused.commit}
     out = out or sys.stdout  # looked up now, not at import, so a redirected stdout is the one written to
     done: dict[str, FilmResult] = {}
     started: dict[str, FilmMeter] = {}
@@ -405,7 +473,9 @@ def run_eval(
             _say(f"{film.slug:20} running...", out)
             try:
                 stages = make_stages(film)
-                result = await evaluate_film(film.slug, film.key, budget, runs_dir, stages, started)
+                result = await evaluate_film(
+                    film.slug, film.key, budget, runs_dir, stages, started, only_drafts=only_drafts, reused=reused
+                )
             except Exception as err:  # its stages or Run Log failed: only this Film is lost, and what it spent is kept
                 meter = started.get(film.slug)
                 result = FilmResult(
@@ -428,7 +498,8 @@ def run_eval(
     def report() -> list[FilmResult]:
         results = [done[film.slug] for film in films if film.slug in done]
         unfinished = [film.slug for film in present if film.slug not in done]
-        _write_report(results, runs_dir, out, _unfinished(unfinished, started), watcher=watcher)
+        extra = {**measured_on, **_unfinished(unfinished, started)}
+        _write_report(results, runs_dir, out, extra, watcher=watcher)
         return results
 
     try:
@@ -477,10 +548,10 @@ def _write_report(
     results: list[FilmResult],
     runs_dir: Path,
     out: TextIO,
-    unfinished: dict[str, Any] | None = None,
+    extra: dict[str, Any],
     watcher: str = "v0",
 ) -> None:
-    summary = {**_summary(results, watcher), **(unfinished or {})}
+    summary = {**_summary(results, watcher), **extra}
     report_dir = _report_dir(runs_dir)
     (report_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (report_dir / "report.md").write_text(_report(summary, results), encoding="utf-8")
@@ -508,11 +579,11 @@ def _unfinished_lines(summary: dict[str, Any]) -> list[str]:
 
 def _film_line(r: FilmResult) -> str:
     s = _film_summary(r)
-    return (
+    line = (
         f"{r.stop:19} ${r.cost:.4f}  Planted Drafts {s['planted']['caught']}/{s['planted']['total']}  "
-        f"false alarms {s['false_alarms']['count']}/{s['false_alarms']['total']}  "
-        f"input Traps {s['input_traps']['caught']}/{s['input_traps']['total']}"
+        f"false alarms {s['false_alarms']['count']}/{s['false_alarms']['total']}"
     )
+    return line if r.drafts_only else f"{line}  input Traps {s['input_traps']['caught']}/{s['input_traps']['total']}"
 
 
 def _film_summary(r: FilmResult) -> dict[str, Any]:
@@ -522,6 +593,7 @@ def _film_summary(r: FilmResult) -> dict[str, Any]:
     # reviewed is not clean, so it is left out of the false alarms rather than counted as a pass.
     planted = r.key.planted_drafts
     hit = {d.id: r.caught.get(d.id, False) for d in planted}
+    input_traps = [] if r.drafts_only else r.key.input_traps  # not run, so neither caught nor missed
     by_trap = {
         trap: [sum(hit[d.id] for d in planted if d.trap == trap), sum(d.trap == trap for d in planted)]
         for trap in TRAPS
@@ -543,9 +615,9 @@ def _film_summary(r: FilmResult) -> dict[str, Any]:
             "ids": r.false_alarms,
         },
         "input_traps": {
-            "caught": sum(r.input_caught(t) for t in r.key.input_traps),
-            "total": len(r.key.input_traps),
-            "not_caught": [t for t in r.key.input_traps if not r.input_caught(t)],
+            "caught": sum(r.input_caught(t) for t in input_traps),
+            "total": len(input_traps),
+            "not_caught": [t for t in input_traps if not r.input_caught(t)],
         },
         "watcher": _watcher_numbers(r),
         "errors": r.errors,
@@ -601,16 +673,58 @@ def _totals_lines(summary: dict[str, Any]) -> list[str]:
     t = summary["totals"]
     ran = len(summary["films"]) - len(summary["skipped"])
     unreviewed = t["planted"]["not_reviewed"]
+    mode = summary.get("mode", "full")
+    if mode == "drafts":
+        input_traps, watcher = "Input Traps: not run (--only drafts)", "Watcher: not run (--only drafts)"
+    else:
+        input_traps = f"Input Traps: caught {t['input_traps']['caught']} of {t['input_traps']['total']}"
+        watcher = (
+            f"Watcher: {summary['watcher']}, ${Decimal(t['watcher']['cost_usd']):.4f}, "
+            f"{t['watcher']['grounding_rejections']} grounding rejections, {t['watcher']['key_moments']} Key Moments"
+        )
+    if mode == "reused_key_moments":
+        commit = (summary.get("key_moments_commit") or "unknown")[:7]
+        watcher = f"Watcher: not run, Key Moments reused from {summary['key_moments_from']} (commit {commit})"
     return [
         f"Planted Drafts: caught {t['planted']['caught']} of {t['planted']['total']}"
         + (f" ({unreviewed} not reviewed: the Checker failed on them)" if unreviewed else ""),
-        f"Input Traps: caught {t['input_traps']['caught']} of {t['input_traps']['total']}",
+        input_traps,
         f"Clean Drafts: false alarms {t['false_alarms']['count']} of {t['false_alarms']['total']}",
         f"Cost: ${Decimal(t['cost_usd']):.4f} over {ran} Films"
         + (f" ({len(summary['skipped'])} skipped)" if summary["skipped"] else ""),
-        f"Watcher: {summary['watcher']}, ${Decimal(t['watcher']['cost_usd']):.4f}, "
-        f"{t['watcher']['grounding_rejections']} grounding rejections, {t['watcher']['key_moments']} Key Moments",
+        watcher,
     ]
+
+
+def show_baseline(
+    runs_dir: Path,
+    watcher: str,
+    out: TextIO | None = None,
+    main_hash: Callable[[], str | None] = main_agents_hash,
+) -> int:
+    """Print the newest saved report of `main`'s agents, or say a new run is needed. Free: no model is called.
+
+    Returns 0 if there is one to compare with, and 1 if not."""
+    out = out or sys.stdout
+    wanted, whose = main_hash(), "main's agents"
+    if wanted is None:
+        wanted, whose = agents_hash(), "this checkout's agents, as git could not read main"
+    reports = runs_dir / REPORTS
+    found = find_baseline(reports, wanted, watcher)
+    if found is None:
+        _say(
+            f"No whole report in {reports} matches {whose} on the {watcher} Watcher: a new run on main is needed.", out
+        )
+        return EXIT_AGENT_FAILED
+    path, summary = found
+    commit = (summary.get("commit") or "unknown")[:7]
+    _say(f"Baseline for {whose}: {path} (commit {commit}, run at {summary['at']})", out)
+    for film in summary["films"]:
+        if film["stop"] != "skipped":
+            _say(f"{film['film']:20} ${Decimal(film['cost_usd']):.4f}", out)
+    for line in _totals_lines(summary):
+        _say(line, out)
+    return 0
 
 
 def _report_dir(runs_dir: Path) -> Path:
@@ -654,6 +768,8 @@ def _report(summary: dict[str, Any], results: list[FilmResult]) -> str:
                 "",
             ]
             lines += [f"- `{t}`" for t in s["input_traps"]["not_caught"]]
+        if r.drafts_only:
+            continue
         lines += ["", "### Generated posts", ""]
         lines += [f"- **{c.status}** {c.post.platform} {c.post.language}: {c.post.text}" for c in r.posts] or [
             "- (none)"

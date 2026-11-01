@@ -17,7 +17,7 @@ import pytest
 from fake_claude import FakeClient, reply, use
 
 from trailer_to_campaign.agents.checker import Problem, Verdict
-from trailer_to_campaign.agents.key_moments import KeyMoment, Quote
+from trailer_to_campaign.agents.key_moments import KeyMoment, Quote, load_key_moments
 from trailer_to_campaign.agents.loop import AgentFailed
 from trailer_to_campaign.agents.review import CheckedPost
 from trailer_to_campaign.agents.social_posts import SocialPost
@@ -28,6 +28,7 @@ from trailer_to_campaign.evals import (
     EvalFilm,
     EvalStages,
     load_answer_key,
+    load_reused,
     prepare,
     real_stages,
     run_eval,
@@ -190,7 +191,8 @@ def summary(tmp_path: Path) -> dict[str, Any]:
 
 
 def run_log(tmp_path: Path, film: str) -> list[dict[str, Any]]:
-    [path] = (tmp_path / "runs" / film).glob("*/run.jsonl")
+    runs = tmp_path if (tmp_path / film).exists() else tmp_path / "runs"
+    [path] = (runs / film).glob("*/run.jsonl")
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
@@ -602,6 +604,133 @@ def test_a_film_failing_in_flight_leaves_the_other_films_score_alone(
     assert beta["stop"] == "completed" and beta["errors"] == [] and beta["watcher"]["key_moments"] == 1
     assert beta["planted"] == alpha["planted"]  # alpha's Planted Drafts were scored before it failed
     assert fake.most_inside == 2  # beta was in flight when alpha failed
+
+
+# T20: a run can skip what a change doesn't touch, and says so.
+
+
+def run_in(eval_dir: Path, runs: Path, fake: FakeStages, **options: Any) -> tuple[int, str, dict[str, Any], Path]:
+    out = io.StringIO()
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), runs, fake.stages, out=out, **options)
+    [report] = (runs / "_eval").glob("*/summary.json")
+    return code, out.getvalue(), json.loads(report.read_text()), report.parent
+
+
+def test_only_drafts_runs_only_the_checker_and_scores_as_a_full_run_does(eval_dir: Path, tmp_path: Path) -> None:
+    full, drafts = FakeStages(), FakeStages()
+    _, _, whole, _ = run_in(eval_dir, tmp_path / "full", full)
+    code, out, data, report_dir = run_in(eval_dir, tmp_path / "drafts", drafts, only_drafts=True)
+
+    assert code == 0 and drafts.order == ["check", "check"]  # no Watcher, no Copywriter
+    assert "watch" in full.order
+    for one, other in zip(whole["films"][:2], data["films"][:2], strict=True):
+        assert one["planted"] == other["planted"] and one["false_alarms"] == other["false_alarms"]
+    assert data["mode"] == "drafts" and whole["mode"] == "full"
+    # No post was written, so no input Trap could be caught: "not run", never "0 of 2".
+    assert "Input Traps: not run" in out and "Input Traps: caught" not in out
+    assert "input Traps" not in out
+    text = (report_dir / "report.md").read_text()
+    assert "Input Traps: not run" in text and "Generated posts" not in text
+
+
+def test_only_drafts_fails_when_the_checker_does(eval_dir: Path, tmp_path: Path) -> None:
+    fake = FakeStages()
+    fake.draft_verdicts = AgentFailed("the Checker gave up")
+    code, _, data, _ = run_in(eval_dir, tmp_path / "runs", fake, only_drafts=True)
+
+    assert code == 1
+    assert data["films"][0]["planted"]["not_reviewed"] == 2 and data["films"][0]["errors"]
+
+
+def test_a_report_records_what_it_was_measured_on(eval_dir: Path, tmp_path: Path) -> None:
+    from trailer_to_campaign.eval_baseline import agents_hash
+
+    _, _, data, _ = run_in(eval_dir, tmp_path / "runs", FakeStages())
+    assert data["agents_hash"] == agents_hash() and "commit" in data
+
+
+def test_each_run_saves_its_key_moments_next_to_its_run_log(eval_dir: Path, tmp_path: Path) -> None:
+    run_in(eval_dir, tmp_path / "runs", FakeStages())
+    [path] = (tmp_path / "runs" / "alpha").glob("*/key_moments.json")
+    assert path.parent == next((tmp_path / "runs" / "alpha").glob("*/run.jsonl")).parent
+    assert load_key_moments(path) == [moment()]
+
+
+def test_failing_to_save_key_moments_does_not_end_the_film(
+    eval_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = Path.write_text
+
+    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name == "key_moments.json":
+            raise OSError("the disk is full")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    code, _, data, _ = run_in(eval_dir, tmp_path / "runs", FakeStages())
+    assert code == 0 and data["films"][0]["stop"] == "completed"
+
+
+class Remembers(FakeStages):
+    def __init__(self) -> None:
+        super().__init__()
+        self.given: list[list[KeyMoment]] = []
+
+    async def write_and_check(self, moments: list[KeyMoment], meter: FilmMeter, seen: list[Verdict]) -> Any:
+        self.given.append(moments)
+        return await super().write_and_check(moments, meter, seen)
+
+
+def test_key_moments_from_makes_no_watcher_call_and_the_report_names_its_source(eval_dir: Path, tmp_path: Path) -> None:
+    _, _, first, source = run_in(eval_dir, tmp_path / "first", FakeStages())
+    films = prepare(eval_dir)
+    fake = Remembers()
+
+    code, out, data, report_dir = run_in(eval_dir, tmp_path / "second", fake, reused=load_reused(source, films))
+
+    assert code == 0 and "watch" not in fake.order
+    assert fake.given == [[moment()], [moment()]]
+    assert data["mode"] == "reused_key_moments" and data["key_moments_from"] == str(source)
+    assert data["key_moments_commit"] == first["commit"]
+    assert data["films"][0]["watcher"]["cost_usd"] == "0"  # no Watcher money in this report
+    assert str(source) in out and str(source) in (report_dir / "report.md").read_text()
+    [event] = [e for e in run_log(tmp_path / "second", "alpha") if e["event"] == "key_moments_reused"]
+    assert event["source"] == str(source) and event["key_moments"] == 1
+
+
+def test_a_run_on_reused_key_moments_saves_them_again(eval_dir: Path, tmp_path: Path) -> None:
+    _, _, _, source = run_in(eval_dir, tmp_path / "first", FakeStages())
+    _, _, _, second = run_in(eval_dir, tmp_path / "second", FakeStages(), reused=load_reused(source, prepare(eval_dir)))
+    assert load_reused(second, prepare(eval_dir)).by_film["alpha"] == [moment()]
+
+
+def test_key_moments_are_found_after_the_runs_folder_moves(eval_dir: Path, tmp_path: Path) -> None:
+    _, _, _, source = run_in(eval_dir, tmp_path / "first", FakeStages())
+    (tmp_path / "first").rename(tmp_path / "moved")
+    moved = tmp_path / "moved" / "_eval" / source.name
+    assert load_reused(moved, prepare(eval_dir)).by_film["beta"] == [moment()]
+
+
+def test_key_moments_from_refuses_what_it_cannot_use(eval_dir: Path, tmp_path: Path) -> None:
+    films = prepare(eval_dir)
+    with pytest.raises(ValueError, match="summary.json"):
+        load_reused(tmp_path / "nowhere", films)
+
+    # A report that never ran a Watcher has nothing to reuse.
+    _, _, _, drafts = run_in(eval_dir, tmp_path / "drafts", FakeStages(), only_drafts=True)
+    with pytest.raises(ValueError, match="alpha"):
+        load_reused(drafts, films)
+
+    # A Film missing from the report, or with a broken file, is named before any paid call.
+    _, _, data, source = run_in(eval_dir, tmp_path / "full", FakeStages())
+    [saved] = (tmp_path / "full" / "beta").glob("*/key_moments.json")
+    saved.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="beta"):
+        load_reused(source, films)
+    data["films"] = data["films"][1:]
+    (source / "summary.json").write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="alpha"):
+        load_reused(source, films)
 
 
 def test_an_eval_run_asks_for_and_records_no_approval(

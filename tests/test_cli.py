@@ -686,6 +686,67 @@ def test_eval_runs_unattended_on_the_eval_sets_own_films(
     assert list((tmp_path / "runs").glob("alpha/*/run.jsonl"))
 
 
+# T20: --only, --key-moments-from and --baseline.
+
+
+def test_eval_only_drafts_reaches_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trailer_to_campaign import evals
+
+    seen: list[Any] = []
+    monkeypatch.setattr(evals, "run_eval", lambda *args, **kwargs: seen.append(kwargs) or 0)
+    argv = ["eval", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs"), "--only", "drafts"]
+    assert main(argv, env={"ANTHROPIC_API_KEY": "sk-test"}) == 0
+    assert seen[0]["only_drafts"] is True and seen[0]["reused"] is None
+
+
+def test_eval_key_moments_from_is_loaded_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign import evals
+
+    seen: list[Any] = []
+    monkeypatch.setattr(evals, "run_eval", lambda *args, **kwargs: seen.append(kwargs) or 0)
+    base = ["eval", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs")]
+
+    missing = [*base, "--key-moments-from", str(tmp_path / "no-report")]
+    assert main(missing, env={"ANTHROPIC_API_KEY": "sk-test"}) == 2
+    assert "summary.json" in capsys.readouterr().err and seen == []
+
+    loaded = object()
+    monkeypatch.setattr(evals, "load_reused", lambda report, films: loaded)
+    assert main(missing, env={"ANTHROPIC_API_KEY": "sk-test"}) == 0
+    assert seen[0]["reused"] is loaded and seen[0]["only_drafts"] is False
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--only", "drafts", "--key-moments-from", "x"],
+        ["--only", "drafts", "--baseline"],
+        ["--key-moments-from", "x", "--baseline"],
+    ],
+)
+def test_eval_scope_flags_cannot_be_combined(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], flags: list[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["eval", "--eval-dir", str(an_eval_set(tmp_path)), *flags], env={"ANTHROPIC_API_KEY": "sk-test"})
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_eval_only_accepts_drafts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["eval", "--only", "copywriter"], env={"ANTHROPIC_API_KEY": "sk-test"})
+    assert "--only" in capsys.readouterr().err
+
+
+def test_eval_baseline_is_free_and_needs_no_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["eval", "--baseline", "--runs-dir", str(tmp_path / "runs")], env={})
+    assert code == 1  # nothing saved yet
+    assert "new run on main" in capsys.readouterr().out
+    assert not (tmp_path / "runs").exists()  # looking writes nothing
+
+
 @pytest.mark.parametrize(("flag", "expected"), [([], None), (["--parallel", "2"], 2)])
 def test_eval_passes_how_many_films_run_at_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: list[str], expected: int | None

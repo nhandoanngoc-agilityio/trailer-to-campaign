@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import io
 import json
@@ -505,15 +506,50 @@ def test_ctrl_c_cancels_a_film_in_flight_and_reports_the_ones_that_finished(eval
     assert data["interrupted"] == ["beta"]
     last = run_log(tmp_path, "beta")[-1]
     assert last["stop_reason"] == "error" and Decimal(last["total_usd"]) > 0  # its spend is kept
+    # In parallel a Film in flight can hold most of the spend, so the report says what the totals leave out.
+    assert Decimal(data["interrupted_spent_usd"]) == Decimal(last["total_usd"])
+    [report] = (tmp_path / "runs" / "_eval").glob("*/report.md")
+    assert "Interrupted during beta" in report.read_text()
 
 
 def test_no_new_film_starts_after_ctrl_c(eval_dir: Path, tmp_path: Path) -> None:
     with pytest.raises(KeyboardInterrupt):
         run_with(eval_dir, tmp_path, CtrlC("alpha"), parallel=1)
 
-    assert summary(tmp_path)["interrupted"] == ["alpha", "beta"]
+    data = summary(tmp_path)
+    assert data["interrupted"] == ["alpha"] and data["not_started"] == ["beta"]
     assert run_log(tmp_path, "alpha")[-1]["stop_reason"] == "error"
     assert not (tmp_path / "runs" / "beta").exists()  # it never began, so it spent nothing
+
+
+def test_a_stray_cancellation_is_not_a_clean_run(eval_dir: Path, tmp_path: Path) -> None:
+    fake = SideBySide(fails={"alpha": asyncio.CancelledError()})  # from a library, with no Ctrl-C
+    code, out = run_with(eval_dir, tmp_path, fake)
+
+    assert code != 0  # the exit code gates prompt PRs: a run that scored nothing must not read as clean
+    data = summary(tmp_path)
+    assert "alpha" in data["interrupted"] + data.get("not_started", [])
+    assert "alpha" in out and "totals cover only" in out
+
+
+def test_a_closed_pipe_on_a_films_line_costs_no_film(eval_dir: Path, tmp_path: Path) -> None:
+    class ClosedForAlpha(io.StringIO):
+        def write(self, text: str) -> int:
+            if text.startswith("alpha") and "completed" in text:
+                raise BrokenPipeError
+            return super().write(text)
+
+    fake = SideBySide(delays={"alpha": 0.01, "beta": 0.1})
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", fake.stages, out=ClosedForAlpha())
+
+    data = summary(tmp_path)
+    assert code == 0 and "interrupted" not in data
+    assert [(f["film"], f["stop"]) for f in data["films"]][:2] == [("alpha", "completed"), ("beta", "completed")]
+
+
+def test_running_no_films_at_once_is_refused(eval_dir: Path, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="parallel"):
+        run_with(eval_dir, tmp_path, FakeStages(), parallel=0)
 
 
 @pytest.mark.parametrize(

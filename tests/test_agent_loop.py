@@ -53,6 +53,23 @@ async def test_a_failed_teardown_after_success_is_still_raised(broken_teardown: 
         await McpTools.using([], work)
 
 
+def test_a_rejection_logs_the_submission_only_when_given_it(tmp_path: Path) -> None:
+    from trailer_to_campaign.agents import ChecksFailed
+    from trailer_to_campaign.agents.loop import Submissions
+
+    meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
+    gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", "{problems} {left}", 3)
+
+    def fails() -> list[Any]:
+        raise ChecksFailed("Social Posts not traced", ["bad"])
+
+    gate.submit(fails)
+    gate.submit(fails, submitted=[{"post": 1}])
+    first, second = logged(meter.run_log.path, "social_posts_rejected")
+    assert "submitted" not in first
+    assert second["submitted"] == [{"post": 1}]
+
+
 # T17: a model call that never answers ends the agent, and the meter keeps what it may have cost.
 
 

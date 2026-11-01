@@ -178,5 +178,5 @@ def _submit(watching: _Watching, arguments: dict[str, Any]) -> ToolResult:
     footage, cast = watching.footage, watching.cast
     if footage is None or cast is None:
         return ToolResult.error("call get_catalog and watch_footage, and look at frames, before submitting")
-    submitted = list(arguments.get("key_moments") or [])
-    return watching.gate.submit(lambda: ground(submitted, footage, cast, watching.seen_frames))
+    moments = list(arguments.get("key_moments") or [])
+    return watching.gate.submit(lambda: ground(moments, footage, cast, watching.seen_frames), submitted=arguments)

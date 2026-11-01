@@ -81,13 +81,18 @@ class Submissions:
     count: int = 0
     accepted: list[Any] | None = None
 
-    def submit(self, check: Callable[[], list[Any]]) -> ToolResult:
+    def submit(self, check: Callable[[], list[Any]], submitted: Any = None) -> ToolResult:
+        """submitted, when given, is logged with a rejection so it can be read back. The Copywriter and the
+        Watcher pass their drafts, as sent. The Checker passes nothing, so a rejected verdict's reason stays out,
+        though its problems can quote the verdict's offending_text and spoiler_id. The Run Log is for the team and
+        can hold spoilers: post_checked keeps accepted verdicts in full."""
         self.count += 1
         try:
             result = check()
         except ChecksFailed as err:
             event = f"{self.noun.lower().replace(' ', '_')}_rejected"
-            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems)
+            sent = {} if submitted is None else {"submitted": submitted}
+            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems, **sent)
             if self.count >= self.limit:
                 raise AgentFailed(
                     f"the {self.agent.capitalize()}'s {self.noun} {self.failure} after {self.limit} tries"

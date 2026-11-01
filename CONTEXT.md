@@ -117,7 +117,7 @@ The Slack thread, started by the request that began a Run, where that Run posts 
 _Avoid_: Channel, conversation, campaign thread
 
 **Run Log**:
-The record a Run leaves of every model call, what each cost, and how the Run ended.
+The record a Run leaves of every model call, what each cost, and how the Run ended. It also keeps refused Key Moments and Social Posts as sent, and what the Checker said about each post, so it is for the team and can hold spoilers.
 _Avoid_: Trace, audit log, history
 
 **Eval Set**:

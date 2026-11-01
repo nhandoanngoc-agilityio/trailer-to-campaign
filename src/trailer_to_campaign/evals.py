@@ -397,26 +397,27 @@ def run_eval(
     for film in films:
         if film.key is None:
             done[film.slug] = FilmResult(film.slug, None)
-            print(f"{film.slug:20} skipped (not on this clone)", file=out, flush=True)
-
-    def say(film: str, line: Callable[[], str]) -> None:
-        """A Film's progress line: failing to print it (a closed pipe) must not cost any Film its Run."""
-        try:
-            print(f"{film:20} {line()}", file=out, flush=True)
-        except Exception as err:
-            log.warning("could not print %s's line: %r", film, err)
+            _say(f"{film.slug:20} skipped (not on this clone)", out)
 
     async def one(film: EvalFilm, slots: anyio.CapacityLimiter) -> None:
         assert film.key is not None
         async with slots:
-            say(film.slug, lambda: "running...")
+            _say(f"{film.slug:20} running...", out)
             try:
                 stages = make_stages(film)
                 result = await evaluate_film(film.slug, film.key, budget, runs_dir, stages, started)
-            except Exception as err:  # the Run couldn't start (its stages or Run Log): only this Film is lost
-                result = FilmResult(film.slug, film.key, stop="error", errors=[f"{type(err).__name__}: {err}"])
+            except Exception as err:  # its stages or Run Log failed: only this Film is lost, and what it spent is kept
+                meter = started.get(film.slug)
+                result = FilmResult(
+                    film.slug,
+                    film.key,
+                    stop="error",
+                    errors=[f"{type(err).__name__}: {err}"],
+                    cost=meter.spent if meter else Decimal(0),
+                    run_log=meter.run_log.path if meter else None,
+                )
             done[film.slug] = result  # first: it was paid for, whatever happens to its line
-            say(film.slug, lambda: _film_line(result))
+            _say(f"{film.slug:20} {_film_line(result)}", out)
 
     async def all_films() -> None:
         slots = anyio.CapacityLimiter(max(len(present), 1) if parallel is None else parallel)
@@ -449,13 +450,25 @@ def run_eval(
     return 0
 
 
+def _say(text: str, out: TextIO) -> None:
+    """Progress for a person: a closed pipe (t2c eval | head) must not cost a Film, the report or how the run ends."""
+    try:
+        print(text, file=out, flush=True)
+    except (OSError, ValueError) as err:  # ValueError: the stream is already closed
+        log.warning("could not print a progress line: %r", err)
+
+
 def _unfinished(unfinished: list[str], started: dict[str, FilmMeter]) -> dict[str, Any]:
     """What a report's totals leave out: Films cut short in flight, with their spend, and Films never begun."""
     if not unfinished:
         return {}
     in_flight = [film for film in unfinished if film in started]
     spent = sum((started[film].spent for film in in_flight), Decimal(0))
-    fields: dict[str, Any] = {"interrupted": in_flight, "interrupted_spent_usd": str(spent)}
+    fields: dict[str, Any] = {
+        "interrupted": in_flight,
+        "interrupted_spent_usd": str(spent),
+        "interrupted_run_logs": {film: str(started[film].run_log.path) for film in in_flight},
+    }
     not_started = [film for film in unfinished if film not in started]
     return {**fields, "not_started": not_started} if not_started else fields
 
@@ -472,8 +485,8 @@ def _write_report(
     (report_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (report_dir / "report.md").write_text(_report(summary, results), encoding="utf-8")
     for line in [*_totals_lines(summary), *_unfinished_lines(summary)]:
-        print(line, file=out)
-    print(f"Report: {report_dir / 'report.md'}", file=out)
+        _say(line, out)
+    _say(f"Report: {report_dir / 'report.md'}", out)
 
 
 def _unfinished_lines(summary: dict[str, Any]) -> list[str]:
@@ -483,7 +496,11 @@ def _unfinished_lines(summary: dict[str, Any]) -> list[str]:
     lines = []
     if in_flight:
         spent = Decimal(summary["interrupted_spent_usd"])
-        lines.append(f"Interrupted during {', '.join(in_flight)}: ${spent:.4f} spent, not in the cost above.")
+        logs = ", ".join(summary["interrupted_run_logs"].values())
+        lines.append(
+            f"Interrupted during {', '.join(in_flight)}: ${spent:.4f} charged, not in the cost above "
+            f"(a call cut off counts at its worst case). Run Logs: {logs}"
+        )
     if not_started:
         lines.append(f"Never started: {', '.join(not_started)}.")
     return [*lines, "The totals cover only the Films that finished."]

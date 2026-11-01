@@ -509,7 +509,10 @@ def test_ctrl_c_cancels_a_film_in_flight_and_reports_the_ones_that_finished(eval
     # In parallel a Film in flight can hold most of the spend, so the report says what the totals leave out.
     assert Decimal(data["interrupted_spent_usd"]) == Decimal(last["total_usd"])
     [report] = (tmp_path / "runs" / "_eval").glob("*/report.md")
-    assert "Interrupted during beta" in report.read_text()
+    text = report.read_text()
+    assert "Interrupted during beta" in text and "worst case" in text  # a call cut off isn't known to be billed
+    [beta_log] = (tmp_path / "runs" / "beta").glob("*/run.jsonl")
+    assert data["interrupted_run_logs"] == {"beta": str(beta_log)} and str(beta_log) in text
 
 
 def test_no_new_film_starts_after_ctrl_c(eval_dir: Path, tmp_path: Path) -> None:
@@ -532,19 +535,48 @@ def test_a_stray_cancellation_is_not_a_clean_run(eval_dir: Path, tmp_path: Path)
     assert "alpha" in out and "totals cover only" in out
 
 
-def test_a_closed_pipe_on_a_films_line_costs_no_film(eval_dir: Path, tmp_path: Path) -> None:
-    class ClosedForAlpha(io.StringIO):
-        def write(self, text: str) -> int:
-            if text.startswith("alpha") and "completed" in text:
-                raise BrokenPipeError
-            return super().write(text)
+class ClosedPipe(io.StringIO):
+    def write(self, text: str) -> int:
+        raise BrokenPipeError
 
+
+def test_a_closed_pipe_costs_no_film_and_no_exit_code(eval_dir: Path, tmp_path: Path) -> None:
     fake = SideBySide(delays={"alpha": 0.01, "beta": 0.1})
-    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", fake.stages, out=ClosedForAlpha())
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", fake.stages, out=ClosedPipe())
 
     data = summary(tmp_path)
     assert code == 0 and "interrupted" not in data
-    assert [(f["film"], f["stop"]) for f in data["films"]][:2] == [("alpha", "completed"), ("beta", "completed")]
+    assert [(f["film"], f["stop"]) for f in data["films"]] == [
+        ("alpha", "completed"),
+        ("beta", "completed"),
+        ("gamma", "skipped"),
+    ]
+
+
+def test_a_closed_pipe_does_not_hide_ctrl_c(eval_dir: Path, tmp_path: Path) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", CtrlC("beta").stages, out=ClosedPipe())
+    assert summary(tmp_path)["interrupted"] == ["beta"]
+
+
+def test_a_run_log_that_cannot_finish_keeps_the_films_cost(
+    eval_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trailer_to_campaign.run_log import RunLog
+
+    real_finish = RunLog.finish
+
+    def finish(self: RunLog, total_usd: Decimal, stop_reason: str) -> None:
+        if "alpha" in str(self.path):
+            raise OSError("the disk is full")
+        real_finish(self, total_usd, stop_reason)
+
+    monkeypatch.setattr(RunLog, "finish", finish)
+    code, _ = run_with(eval_dir, tmp_path, FakeStages())
+
+    alpha, beta, _gamma = summary(tmp_path)["films"]
+    assert code != 0 and alpha["stop"] == "error" and Decimal(alpha["cost_usd"]) > 0
+    assert alpha["run_log"] != "None" and beta["stop"] == "completed"
 
 
 def test_running_no_films_at_once_is_refused(eval_dir: Path, tmp_path: Path) -> None:

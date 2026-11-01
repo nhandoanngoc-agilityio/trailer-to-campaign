@@ -18,7 +18,7 @@ from typing import Any
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
-from trailer_to_campaign.agents.social_posts import ALL_PAIRS, SocialPost, trace
+from trailer_to_campaign.agents.social_posts import ALL_PAIRS, SocialPost, post_names, trace
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 
@@ -150,9 +150,9 @@ async def _write(
     client: Any,
     meter: FilmMeter,
 ) -> list[SocialPost]:
-    gate = Submissions(
-        meter, "copywriter", "Social Posts", "were not traced", load_prompt("copywriter_rejected"), MAX_SUBMISSIONS
-    )
+    # A rejection names every post still asked for, so it can't be read as only the one at fault (T18).
+    rejected = load_prompt("copywriter_rejected").replace("{required}", post_names(required))
+    gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", rejected, MAX_SUBMISSIONS)
     writing = _Writing(film, key_moments, required, gate)
 
     async def write(mcp: McpTools) -> list[SocialPost]:
@@ -193,5 +193,7 @@ def _submit(writing: _Writing, arguments: dict[str, Any]) -> ToolResult:
     catalog = writing.catalog
     if catalog is None:
         return ToolResult.error("call get_catalog before submitting")
-    submitted = list(arguments.get("posts") or [])
-    return writing.gate.submit(lambda: trace(submitted, writing.key_moments, catalog, writing.required))
+    posts = list(arguments.get("posts") or [])
+    return writing.gate.submit(
+        lambda: trace(posts, writing.key_moments, catalog, writing.required), submitted=arguments
+    )

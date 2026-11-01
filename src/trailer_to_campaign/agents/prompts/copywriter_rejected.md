@@ -1,2 +1,4 @@
-Not accepted. Fix these and submit all the posts asked for again ({left} left):
+Not accepted. Tries left: {left}.
+Send every post on this list again, together in one submit_social_posts call, including any with no problem: {required}
+Fix these problems first:
 {problems}

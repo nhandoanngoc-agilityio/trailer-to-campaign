@@ -4,21 +4,22 @@
 
 It is given the Key Moments as data and reads the Catalog Metadata through the
 catalog MCP server only: never the Spoiler List (ADR 0007), so spoiler text is
-never in a writer's context. It submits posts with a local tool; each submission
-is traced (social_posts.trace) and sent back with its problems until it passes,
-at most MAX_SUBMISSIONS times. Spoilers the trailer itself shows are the Checker's catch.
+never in a writer's context. It submits posts with a local tool. Each post is traced
+on its own (social_posts.trace_each) and kept if it passes, and the problems go back
+with only what's still needed (T21). MAX_SUBMISSIONS submissions that add nothing
+end it. Spoilers the trailer itself shows are the Checker's catch.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
-from trailer_to_campaign.agents.social_posts import ALL_PAIRS, SocialPost, post_names, trace
+from trailer_to_campaign.agents.social_posts import ALL_PAIRS, NotTraced, SocialPost, post_names, trace_each
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 
@@ -85,6 +86,7 @@ class _Writing:
     required: list[tuple[str, str]]
     gate: Submissions
     catalog: dict[str, Any] | None = None
+    kept: dict[tuple[str, str], SocialPost] = field(default_factory=dict)  # Traced, and never replaced
 
 
 def key_moments_data(key_moments: list[KeyMoment]) -> str:
@@ -150,9 +152,9 @@ async def _write(
     client: Any,
     meter: FilmMeter,
 ) -> list[SocialPost]:
-    # A rejection names every post still asked for, so it can't be read as only the one at fault (T18).
-    rejected = load_prompt("copywriter_rejected").replace("{required}", post_names(required))
-    gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", rejected, MAX_SUBMISSIONS)
+    gate = Submissions(
+        meter, "copywriter", "Social Posts", "were not traced", load_prompt("copywriter_rejected"), MAX_SUBMISSIONS
+    )
     writing = _Writing(film, key_moments, required, gate)
 
     async def write(mcp: McpTools) -> list[SocialPost]:
@@ -194,6 +196,25 @@ def _submit(writing: _Writing, arguments: dict[str, Any]) -> ToolResult:
     if catalog is None:
         return ToolResult.error("call get_catalog before submitting")
     posts = list(arguments.get("posts") or [])
-    return writing.gate.submit(
-        lambda: trace(posts, writing.key_moments, catalog, writing.required), submitted=arguments
-    )
+    return writing.gate.submit(lambda: _keep(writing, posts, catalog), submitted=arguments)
+
+
+def _keep(writing: _Writing, submitted: list[Any], catalog: dict[str, Any]) -> list[SocialPost]:
+    """Keep the posts still needed that pass. Return all those asked for once none is missing, or refuse."""
+    needed = [pair for pair in writing.required if pair not in writing.kept]
+    traced = trace_each(submitted, writing.key_moments, catalog, needed)
+    writing.kept.update(traced.posts)
+    still = [pair for pair in needed if pair not in writing.kept]
+    if still:
+        raise NotTraced(
+            traced.problems,
+            uses_a_try=not traced.posts,
+            details={"kept": post_names(writing.kept) or "none yet", "required": post_names(still)},
+            logged={
+                "kept": [f"{p} {lang}" for p, lang in ALL_PAIRS if (p, lang) in writing.kept],
+                "ignored": traced.ignored,
+            },
+        )
+    if traced.ignored:
+        writing.gate.meter.event("social_posts_ignored", agent="copywriter", posts=traced.ignored)
+    return [writing.kept[pair] for pair in ALL_PAIRS if pair in writing.required]

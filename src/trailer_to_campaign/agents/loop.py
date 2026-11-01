@@ -68,17 +68,18 @@ class Submissions:
     """The gate between an agent and the next stage of the Run.
 
     Each submission is checked in code (check raises ChecksFailed). A failed one is
-    logged and sent back with every problem, at most `limit` times; then the agent
-    has failed. Only an accepted submission moves on.
+    logged and sent back with every problem, until `limit` of them have used a try;
+    then the agent has failed. Only an accepted submission moves on.
     """
 
     meter: FilmMeter
     agent: str  # "watcher"
     noun: str  # what it submits: "Key Moments"
     failure: str  # how a failed check reads: "were not grounded"
-    rejected_prompt: str  # what the agent is told, with {left} and {problems}
+    rejected_prompt: str  # what the agent is told, with {left}, {problems} and the failure's details
     limit: int
-    count: int = 0
+    count: int = 0  # the tries used up
+    attempts: int = 0  # every submission, whether it used a try or not
     accepted: list[Any] | None = None
 
     def submit(self, check: Callable[[], list[Any]], submitted: Any = None) -> ToolResult:
@@ -86,19 +87,23 @@ class Submissions:
         Watcher pass their drafts, as sent. The Checker passes nothing, so a rejected verdict's reason stays out,
         though its problems can quote the verdict's offending_text and spoiler_id. The Run Log is for the team and
         can hold spoilers: post_checked keeps accepted verdicts in full."""
-        self.count += 1
+        self.attempts += 1
         try:
             result = check()
         except ChecksFailed as err:
+            self.count += err.uses_a_try
             event = f"{self.noun.lower().replace(' ', '_')}_rejected"
             sent = {} if submitted is None else {"submitted": submitted}
-            self.meter.event(event, agent=self.agent, attempt=self.count, problems=err.problems, **sent)
+            self.meter.event(
+                event, agent=self.agent, attempt=self.attempts, problems=err.problems, **sent, **err.logged
+            )
             if self.count >= self.limit:
                 raise AgentFailed(
-                    f"the {self.agent.capitalize()}'s {self.noun} {self.failure} after {self.limit} tries"
+                    f"the {self.agent.capitalize()}'s {self.noun} {self.failure} after {self.attempts} tries"
                 ) from err
             problems = "\n".join(f"- {p}" for p in err.problems)
-            return ToolResult.error(self.rejected_prompt.format(left=self.limit - self.count, problems=problems))
+            left = self.limit - self.count
+            return ToolResult.error(self.rejected_prompt.format(left=left, problems=problems, **err.details))
         self.accepted = result
         return ToolResult.text(f"Accepted {len(result)} {self.noun}.")
 

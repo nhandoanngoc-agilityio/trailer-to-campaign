@@ -19,7 +19,14 @@ from typing import Any
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import AgentFailed, AgentLoop, McpTools, Submissions, ToolResult
-from trailer_to_campaign.agents.social_posts import ALL_PAIRS, NotTraced, SocialPost, post_names, trace_each
+from trailer_to_campaign.agents.social_posts import (
+    ALL_PAIRS,
+    NotTraced,
+    SocialPost,
+    post_name_list,
+    post_names,
+    trace_each,
+)
 from trailer_to_campaign.budget import FilmMeter
 from trailer_to_campaign.config import Settings
 
@@ -206,15 +213,15 @@ def _keep(writing: _Writing, submitted: list[Any], catalog: dict[str, Any]) -> l
     writing.kept.update(traced.posts)
     still = [pair for pair in needed if pair not in writing.kept]
     if still:
+        told = [f"{name} wasn't asked for, so it was ignored" for name in traced.ignored]
         raise NotTraced(
-            traced.problems,
+            [*traced.problems, *told],
             uses_a_try=not traced.posts,
             details={"kept": post_names(writing.kept) or "none yet", "required": post_names(still)},
-            logged={
-                "kept": [f"{p} {lang}" for p, lang in ALL_PAIRS if (p, lang) in writing.kept],
-                "ignored": traced.ignored,
-            },
+            logged={"kept": post_name_list(writing.kept), "ignored": traced.ignored},
         )
-    if traced.ignored:
-        writing.gate.meter.event("social_posts_ignored", agent="copywriter", posts=traced.ignored)
+    if traced.ignored or traced.problems:  # accepted, but what it left out must stay readable
+        writing.gate.meter.event(
+            "social_posts_ignored", agent="copywriter", posts=traced.ignored, problems=traced.problems
+        )
     return [writing.kept[pair] for pair in ALL_PAIRS if pair in writing.required]

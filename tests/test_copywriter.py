@@ -11,7 +11,7 @@ import pytest
 from fake_claude import FakeClient, Step, reply, results, use
 from mcp import Client
 
-from trailer_to_campaign.agents.copywriter import MAX_SUBMISSIONS, MODEL, copywriter_servers, write_posts
+from trailer_to_campaign.agents.copywriter import MAX_SUBMISSIONS, MAX_TURNS, MODEL, copywriter_servers, write_posts
 from trailer_to_campaign.agents.key_moments import KeyMoment, Quote
 from trailer_to_campaign.agents.loop import AgentFailed
 from trailer_to_campaign.budget import FilmMeter
@@ -227,7 +227,7 @@ async def test_revise_rewrites_only_the_rejected_posts(films: Path, tmp_path: Pa
         assert SPOILER not in json.dumps(request, default=str)
 
 
-# T18: a rejected first draft is told to send all six posts again, by name, and the Run Log keeps what it sent.
+# T18: a rejected first draft is told what to send, by name, and the Run Log keeps what it sent.
 
 
 async def test_a_rejected_first_draft_is_told_what_was_kept_and_what_to_send(films: Path, tmp_path: Path) -> None:
@@ -393,3 +393,45 @@ async def test_the_spoiler_list_stays_out_of_every_retry(films: Path, tmp_path: 
     _, fake = await run.write([read_catalog, submit(1, text=TOO_LONG), sends(2, [the("tiktok", "en")])])
     for request in fake.requests:
         assert SPOILER not in json.dumps(request, default=str)
+
+
+async def test_the_copywriter_is_told_when_a_post_it_sent_was_ignored(films: Path, tmp_path: Path) -> None:
+    """Or it can send the same post again, use up its tries, and never know why."""
+    run = Run(films, tmp_path)
+    kept_again = sends(2, [the("facebook", "en"), {**the("facebook", "en"), "platform": "myspace"}])
+    _, fake = await run.write([read_catalog, submit(1, text=TOO_LONG), kept_again, sends(3, [the("tiktok", "en")])])
+
+    text = results(fake.requests[3])[0]["content"][0]["text"]
+    assert "facebook en" in text.split("Fix these problems first:")[1]
+    assert "myspace en" in text.split("Fix these problems first:")[1]
+    assert "ignored" in text
+
+
+async def test_a_malformed_post_beside_a_complete_set_stays_in_the_run_log(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    broken = {"platform": "tiktok", "language": "en"}
+    posts, _ = await run.write([read_catalog, submit(1, text=TOO_LONG), sends(2, [the("tiktok", "en"), broken])])
+
+    assert pairs(posts) == ALL_SIX
+    [event] = run.events("social_posts_ignored")
+    assert any("needs platform" in p for p in event["problems"])
+
+
+async def test_the_slowest_way_to_six_posts_fits_in_the_turns_allowed(films: Path, tmp_path: Path) -> None:
+    """One new post a try, plus every try that adds nothing but the last: 1 catalog read and 8 submissions."""
+    run = Run(films, tmp_path)
+    nothing = [sends(n, []) for n in (1, 2)]
+    one_at_a_time = [sends(10 + i, [the(*pair)]) for i, pair in enumerate(ALL_SIX)]
+    posts, fake = await run.write([read_catalog, *nothing, *one_at_a_time])
+
+    assert pairs(posts) == ALL_SIX
+    assert len(fake.requests) == 9 <= MAX_TURNS
+
+
+async def test_most_submissions_that_can_be_refused_before_giving_up(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    five = [sends(10 + i, [the(*pair)]) for i, pair in enumerate(ALL_SIX[:5])]
+    nothing = [sends(n, []) for n in range(MAX_SUBMISSIONS)]
+    with pytest.raises(AgentFailed, match="traced"):
+        await run.write([read_catalog, *five, *nothing])
+    assert len(run.events("social_posts_rejected")) == 5 + MAX_SUBMISSIONS

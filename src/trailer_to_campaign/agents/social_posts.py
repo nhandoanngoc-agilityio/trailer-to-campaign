@@ -58,10 +58,14 @@ class SocialPost:
     claims: list[Claim]
 
 
-def post_names(pairs: Iterable[tuple[str, str]]) -> str:
-    """Posts by name, in platform and language order: "facebook en, tiktok vi"."""
+def post_name_list(pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Posts by name, in platform and language order: ["facebook en", "tiktok vi"]."""
     wanted = set(pairs)
-    return ", ".join(f"{platform} {language}" for platform, language in ALL_PAIRS if (platform, language) in wanted)
+    return [f"{platform} {language}" for platform, language in ALL_PAIRS if (platform, language) in wanted]
+
+
+def post_names(pairs: Iterable[tuple[str, str]]) -> str:
+    return ", ".join(post_name_list(pairs))
 
 
 def trace(
@@ -72,8 +76,8 @@ def trace(
 ) -> list[SocialPost]:
     """Return the posts in platform and language order, or raise NotTraced listing every problem.
 
-    required is the (platform, language) posts asked for: all six for a first draft,
-    only the rejected ones for a rewrite.
+    required is the (platform, language) posts asked for. The Copywriter's own submissions go through
+    trace_each, which keeps what passes; this is for a post that must pass whole, like a marketer's edit.
     """
     wanted = set(required)
     title = nfc(str(catalog["title"]))

@@ -740,11 +740,27 @@ def test_eval_only_accepts_drafts(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "--only" in capsys.readouterr().err
 
 
-def test_eval_baseline_is_free_and_needs_no_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_eval_baseline_is_free_and_needs_no_api_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trailer_to_campaign import eval_baseline
+
+    monkeypatch.setattr(eval_baseline, "agents_hash_at", lambda ref: "a" * 64)  # CI's checkout has no main ref
     argv = ["eval", "--baseline", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs")]
     assert main(argv, env={}) == 1  # nothing saved yet
     assert "new run on main" in capsys.readouterr().out
     assert not (tmp_path / "runs").exists()  # looking writes nothing
+
+
+def test_eval_baseline_with_no_main_to_read_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trailer_to_campaign import eval_baseline
+
+    monkeypatch.setattr(eval_baseline, "agents_hash_at", lambda ref: None)  # as in a shallow or single-branch clone
+    argv = ["eval", "--baseline", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={}) == 1
+    assert "could not read main" in capsys.readouterr().out
 
 
 def test_eval_baseline_compares_with_the_films_on_this_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

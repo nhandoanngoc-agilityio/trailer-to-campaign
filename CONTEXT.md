@@ -124,6 +124,10 @@ _Avoid_: Trace, audit log, history
 A fixed group of released Films, with the posts actually published for them and planted Traps, that every change to the agents is tested against. In slice 1 these are openly licensed Films, whose studio's own published posts stand in for the team's.
 _Avoid_: Test data, benchmark
 
+**Baseline**:
+The newest saved whole Eval Set run of `main`'s agents, which a change is compared with. A new one is needed only when an agent's prompt, tool or model changes on `main`. A run cut short, or one that skipped an agent, is never a Baseline.
+_Avoid_: Reference run, golden run
+
 **Trap**:
 A deliberate error planted in an Eval Set Film (a Spoiler List item, a wrong cast name) that the Checker must catch. It is planted either in the Film's inputs, where it is caught only if a post falls into it, or in a Planted Draft. An input Trap no post touches is not triggered: it counts as neither caught nor missed, and only a person reading the posts can tell it from a miss.
 _Avoid_: Test case, gotcha

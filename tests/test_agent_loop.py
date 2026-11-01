@@ -58,17 +58,15 @@ def test_a_rejection_logs_the_submission_only_when_given_it(tmp_path: Path) -> N
     from trailer_to_campaign.agents.loop import Submissions
 
     meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
-    gate = Submissions(
-        meter, "checker", "verdicts", "did not hold", "{problems} {left} {what}", 3, details={"what": "x"}
-    )
+    gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", "{problems} {left}", 3)
 
     def fails() -> list[Any]:
-        raise ChecksFailed("verdicts did not hold", ["bad"])
+        raise ChecksFailed("Social Posts not traced", ["bad"])
 
-    assert gate.submit(fails).content[0]["text"] == "- bad 2 x"  # details fill the prompt
+    gate.submit(fails)
     gate.submit(fails, submitted=[{"post": 1}])
-    first, second = logged(meter.run_log.path, "verdicts_rejected")
-    assert "submitted" not in first  # the Checker's verdicts name the Spoiler List: never logged
+    first, second = logged(meter.run_log.path, "social_posts_rejected")
+    assert "submitted" not in first
     assert second["submitted"] == [{"post": 1}]
 
 

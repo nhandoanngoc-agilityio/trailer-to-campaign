@@ -57,6 +57,12 @@ class SocialPost:
     claims: list[Claim]
 
 
+def post_names(pairs: Iterable[tuple[str, str]]) -> str:
+    """Posts by name, in platform and language order: "facebook en, tiktok vi"."""
+    wanted = set(pairs)
+    return ", ".join(f"{platform} {language}" for platform, language in ALL_PAIRS if (platform, language) in wanted)
+
+
 def trace(
     submitted: list[Any],
     key_moments: list[KeyMoment],
@@ -89,8 +95,9 @@ def trace(
         n = sum(p.platform == platform and p.language == language for p in posts)
         if (platform, language) not in wanted:
             if n:
-                asked = ", ".join(f"{p} {lang}" for p, lang in ALL_PAIRS if (p, lang) in wanted)
-                problems.append(f"write only the posts asked for ({asked}), not the {platform} post in {language}")
+                problems.append(
+                    f"write only the posts asked for ({post_names(wanted)}), not the {platform} post in {language}"
+                )
         elif n == 0:
             problems.append(f"no {platform} post in {language}; write one")
         elif n > 1:

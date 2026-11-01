@@ -179,6 +179,15 @@ async def test_the_gate_sends_back_verdicts_that_do_not_hold(
     assert result[1].passed is False
 
 
+async def test_rejected_verdicts_are_not_logged_as_a_submission(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)  # T18 logs the writers' rejected drafts; the Checker's rejected verdicts stay out
+    invented = {"post": 2, "verdict": "reject", "problems": [problem(offending_text="he is captured")]}
+    await run.check([read_spoilers, submit([GOOD[0], invented]), submit(GOOD, 2)])
+
+    [event] = run.events("verdicts_rejected")
+    assert "submitted" not in event
+
+
 async def test_the_checker_gives_up_after_too_many_bad_submissions(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
     bad = [submit([GOOD[0]], i) for i in range(MAX_SUBMISSIONS)]

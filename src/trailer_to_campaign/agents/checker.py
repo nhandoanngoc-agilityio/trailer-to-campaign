@@ -1,11 +1,14 @@
-"""The Checker: reviews Social Posts against the Spoiler List and the brand before Approval.
+"""The Checker: reviews Social Posts against the Spoiler List, the cast and the brand before Approval.
 
     verdicts = await check_posts(film, posts, servers=checker_servers(settings), client=client, meter=meter)
 
-It is the only agent given the spoilers MCP server (ADR 0007), and it reads no
-catalog or Key Moments: only the posts and the list. It submits one verdict per
-post with a local tool; the verdicts are checked in code (judge) and sent back
-until they hold, at most MAX_SUBMISSIONS times. Every problem points at the words
+It is the only agent given the spoilers MCP server (ADR 0007). It also reads the
+catalog, because only the Film's cast can settle a name: a real actor in the wrong
+part, or a Film too new for the model to know (T15). It reads no Key Moments. A verdict
+counts only after both results have reached the model, so one reply can't read them and
+pass a post unseen, and a read that fails ends the Checker at once. It submits one
+verdict per post with a local tool; the verdicts are checked in code (judge) and
+sent back until they hold, at most MAX_SUBMISSIONS times. Every problem points at the words
 in the post that carry it, so a rewrite can be asked for without the Spoiler List
 ever reaching the Copywriter (review.py builds those requests).
 """
@@ -13,7 +16,7 @@ ever reaching the Copywriter (review.py builds those requests).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed, load_prompt
@@ -28,6 +31,7 @@ EFFORT = "high"  # the real guard against spoilers: a miss here reaches the publ
 MAX_TURNS = 10
 MAX_SUBMISSIONS = 3
 SUBMIT = "submit_verdicts"
+READS = {"get_spoiler_list": "the Spoiler List", "get_catalog": "the catalog"}
 BRAND_RULES = ("clickbait", "tone", "invented_detail", "other")
 
 
@@ -90,10 +94,12 @@ def submit_tool() -> dict[str, Any]:
 
 
 def checker_servers(settings: Settings) -> list[Any]:
-    """The Checker's servers: the Spoiler List only (ADR 0007)."""
+    """The Checker's servers: the Spoiler List, which no other agent gets (ADR 0007), and the catalog."""
+    from trailer_to_campaign.tools.catalog import create_catalog_server
     from trailer_to_campaign.tools.spoilers import create_spoiler_server
 
-    return [create_spoiler_server(settings.films_dir.resolve())]
+    films_dir = settings.films_dir.resolve()
+    return [create_spoiler_server(films_dir), create_catalog_server(films_dir)]
 
 
 def judge(submitted: list[Any], posts: list[SocialPost], spoiler_ids: set[str]) -> list[Verdict]:
@@ -166,6 +172,8 @@ class _Checking:
     posts: list[SocialPost]
     gate: Submissions
     spoiler_ids: set[str] | None = None
+    messages: list[Any] = field(default_factory=list)  # the conversation, as AgentLoop grows it
+    read_at: dict[str, int] = field(default_factory=dict)  # each read: how long the conversation was when it ran
 
 
 async def check_posts(
@@ -175,6 +183,10 @@ async def check_posts(
     checking = _Checking(film, posts, gate)
 
     async def check(mcp: McpTools) -> list[Verdict]:
+        for name, what in READS.items():
+            if name not in mcp:
+                raise AgentFailed(f"the Checker was not given {what}")
+
         async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if name == SUBMIT:
                 return _submit(checking, arguments)
@@ -183,12 +195,8 @@ async def check_posts(
             if arguments.get("film") != checking.film:
                 return ToolResult.error(f"this Run is for the Film {checking.film!r} only")
             result = await mcp.call(name, arguments)
-            if not result.is_error and name == "get_spoiler_list":
-                try:
-                    checking.spoiler_ids = {s["id"] for s in json.loads(result.content[0]["text"])["spoilers"]}
-                except (KeyError, IndexError, TypeError, ValueError) as err:
-                    # Fail closed: without the list nothing can be judged, so these posts get flagged.
-                    raise AgentFailed(f"the Checker could not read the Spoiler List ({type(err).__name__})") from err
+            if name in READS:
+                _remember_read(checking, name, result)
             return result
 
         loop = AgentLoop(
@@ -203,7 +211,8 @@ async def check_posts(
             nudge=load_prompt("checker_nudge"),
         )
         task = load_prompt("checker_task").format(film=film, posts=posts_data(posts))
-        await loop.run([{"role": "user", "content": task}], call_tool, lambda: gate.accepted is not None)
+        checking.messages.append({"role": "user", "content": task})
+        await loop.run(checking.messages, call_tool, lambda: gate.accepted is not None)
         assert gate.accepted is not None
         return gate.accepted
 
@@ -223,9 +232,38 @@ async def check_posts(
     return verdicts
 
 
+def _remember_read(checking: _Checking, name: str, result: ToolResult) -> None:
+    """Fail closed: without the list or the cast nothing can be judged, so these posts get flagged, at once.
+
+    Only the first good read counts: once the model has it, a later failed read costs nothing."""
+    if name in checking.read_at:
+        return
+    try:
+        if result.is_error:
+            raise ValueError(result.content[0]["text"])  # the tool's own words: they hold no local path
+        data = json.loads(result.content[0]["text"])
+        if name == "get_spoiler_list":
+            checking.spoiler_ids = {s["id"] for s in data["spoilers"]}
+        elif not _is_a_cast(data["cast"]):
+            raise ValueError("it has no cast")
+    except (KeyError, IndexError, TypeError, ValueError) as err:
+        checking.gate.meter.event("tool_call", agent="checker", tool=name, is_error=True)
+        raise AgentFailed(f"the Checker could not read {READS[name]}: {err}") from err
+    checking.read_at[name] = len(checking.messages)
+
+
+def _is_a_cast(cast: Any) -> bool:
+    return bool(cast) and isinstance(cast, list) and all(isinstance(m, dict) and m.get("character") for m in cast)
+
+
+def _has_seen_both(checking: _Checking) -> bool:
+    """A read's result joins the conversation after its reply, so a verdict in that same reply was written blind."""
+    return all(checking.read_at.get(name, len(checking.messages)) < len(checking.messages) for name in READS)
+
+
 def _submit(checking: _Checking, arguments: dict[str, Any]) -> ToolResult:
     spoiler_ids = checking.spoiler_ids
-    if spoiler_ids is None:
-        return ToolResult.error("call get_spoiler_list before giving verdicts")
+    if spoiler_ids is None or not _has_seen_both(checking):
+        return ToolResult.error("call get_spoiler_list and get_catalog, and read them, before giving verdicts")
     submitted = list(arguments.get("verdicts") or [])
     return checking.gate.submit(lambda: judge(submitted, checking.posts, spoiler_ids))

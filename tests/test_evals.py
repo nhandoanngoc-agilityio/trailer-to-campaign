@@ -849,7 +849,7 @@ async def test_the_real_checker_stage_reads_the_eval_sets_own_spoiler_list(eval_
     from trailer_to_campaign.run_log import RunLog
 
     steps = [
-        lambda params: reply(use("get_spoiler_list", film="alpha")),
+        lambda params: reply(use("get_spoiler_list", film="alpha"), use("get_catalog", film="alpha")),
         lambda params: reply(
             use(
                 "submit_verdicts",

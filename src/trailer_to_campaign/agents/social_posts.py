@@ -1,7 +1,8 @@
 """Social Posts, and the check that every fact in them traces back to its source.
 
-The Copywriter submits Social Posts as tool input; trace() turns them into
-SocialPost records or refuses the whole set with every problem it found. Traced means:
+The Copywriter submits Social Posts as tool input; trace_each() keeps the posts that
+pass, so a retry only has to send the others. trace() is all or nothing, for a post a
+marketer edited. Both apply the same checks and report every problem. Traced means:
 
 - one post per platform and language: Facebook, Instagram, TikTok, each in en and vi
 - each within its platform's limits, naming the Film exactly as the catalog does
@@ -19,7 +20,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from trailer_to_campaign.agents import ChecksFailed
@@ -39,8 +40,8 @@ VIETNAMESE_MARKS = {"̆", "̛", "̉", "̣"}
 
 
 class NotTraced(ChecksFailed):
-    def __init__(self, problems: list[str]) -> None:
-        super().__init__("Social Posts not traced", problems)
+    def __init__(self, problems: list[str], **fields: Any) -> None:
+        super().__init__("Social Posts not traced", problems, **fields)
 
 
 @dataclass(frozen=True)
@@ -57,10 +58,14 @@ class SocialPost:
     claims: list[Claim]
 
 
-def post_names(pairs: Iterable[tuple[str, str]]) -> str:
-    """Posts by name, in platform and language order: "facebook en, tiktok vi"."""
+def post_name_list(pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Posts by name, in platform and language order: ["facebook en", "tiktok vi"]."""
     wanted = set(pairs)
-    return ", ".join(f"{platform} {language}" for platform, language in ALL_PAIRS if (platform, language) in wanted)
+    return [f"{platform} {language}" for platform, language in ALL_PAIRS if (platform, language) in wanted]
+
+
+def post_names(pairs: Iterable[tuple[str, str]]) -> str:
+    return ", ".join(post_name_list(pairs))
 
 
 def trace(
@@ -71,8 +76,8 @@ def trace(
 ) -> list[SocialPost]:
     """Return the posts in platform and language order, or raise NotTraced listing every problem.
 
-    required is the (platform, language) posts asked for: all six for a first draft,
-    only the rejected ones for a rewrite.
+    required is the (platform, language) posts asked for. The Copywriter's own submissions go through
+    trace_each, which keeps what passes; this is for a post that must pass whole, like a marketer's edit.
     """
     wanted = set(required)
     title = nfc(str(catalog["title"]))
@@ -105,6 +110,59 @@ def trace(
     if problems:
         raise NotTraced(problems)
     return sorted(posts, key=lambda p: ALL_PAIRS.index((p.platform, p.language)))
+
+
+@dataclass
+class EachTraced:
+    posts: dict[tuple[str, str], SocialPost] = field(default_factory=dict)  # the needed posts that passed
+    problems: list[str] = field(default_factory=list)
+    ignored: list[str] = field(default_factory=list)  # posts sent that nobody needed, by name
+
+
+def trace_each(
+    submitted: list[Any],
+    key_moments: list[KeyMoment],
+    catalog: dict[str, Any],
+    needed: Iterable[tuple[str, str]],
+) -> EachTraced:
+    """Trace each post on its own. A post not needed is ignored, however broken, so it can't replace a kept one."""
+    wanted = set(needed)
+    title = nfc(str(catalog["title"]))
+    catalog_words = _catalog_words(catalog)
+    result = EachTraced()
+    sent: dict[tuple[str, str], list[SocialPost]] = {}
+    clean: list[SocialPost] = []
+    for i, raw in enumerate(submitted, start=1):
+        try:
+            post = _parse(raw)
+        except (KeyError, TypeError, AttributeError):
+            result.problems.append(
+                f"post {i}: needs platform, language, text and claims (each claim a text and a source)"
+            )
+            continue
+        pair = (post.platform, post.language)
+        if pair not in wanted:
+            result.ignored.append(f"{post.platform} {post.language}")
+            continue
+        sent.setdefault(pair, []).append(post)
+        found = _problems(post, title, catalog_words, key_moments)
+        result.problems += [f"post {i} ({post.platform} {post.language}): {p}" for p in found]
+        if not found:
+            clean.append(post)
+
+    for platform, language in ALL_PAIRS:
+        pair = (platform, language)
+        if pair not in wanted:
+            continue
+        n = len(sent.get(pair, []))
+        if n == 0:
+            result.problems.append(f"no {platform} post in {language}; write one")
+        elif n > 1:
+            result.problems.append(
+                f"the {platform} post in {language} is written {'twice' if n == 2 else f'{n} times'}"
+            )
+    result.posts = {(p.platform, p.language): p for p in clean if len(sent[(p.platform, p.language)]) == 1}
+    return result
 
 
 def _parse(raw: dict[str, Any]) -> SocialPost:

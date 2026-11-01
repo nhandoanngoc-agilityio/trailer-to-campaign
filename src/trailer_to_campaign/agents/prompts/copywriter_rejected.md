@@ -1,4 +1,5 @@
-Not accepted. Tries left: {left}.
-Send every post on this list again, together in one submit_social_posts call, including any with no problem: {required}
+Not accepted yet. Tries left: {left}.
+Kept, so don't send these again: {kept}
+Send only these, together in one submit_social_posts call: {required}
 Fix these problems first:
 {problems}

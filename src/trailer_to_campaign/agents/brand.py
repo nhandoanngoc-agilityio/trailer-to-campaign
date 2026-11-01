@@ -1,7 +1,7 @@
 """The brand rules code can check, from prompts/brand.md: no shouting, few emojis, a call to watch.
 
 The rest of brand.md (clickbait, tone, invented details) needs judgment and is the
-Checker's. These run inside trace(), so the Copywriter fixes them before the
+Checker's. These run inside tracing, so the Copywriter fixes them before the
 Checker ever sees the post. The Checker is told code has checked them, so they
 must be right: an emoji is counted as a person sees it, and the call to watch must
 be the Copywriter's own words at the end of the post, not a title or a quote.

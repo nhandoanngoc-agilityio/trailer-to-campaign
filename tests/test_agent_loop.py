@@ -70,6 +70,28 @@ def test_a_rejection_logs_the_submission_only_when_given_it(tmp_path: Path) -> N
     assert second["submitted"] == [{"post": 1}]
 
 
+def test_a_rejection_can_say_it_uses_no_try_and_fill_in_the_prompt(tmp_path: Path) -> None:
+    from trailer_to_campaign.agents import ChecksFailed
+    from trailer_to_campaign.agents.loop import AgentFailed, Submissions
+
+    meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
+    gate = Submissions(meter, "copywriter", "Social Posts", "were not traced", "{left} {problems} {what}", 2)
+
+    def progress() -> list[Any]:
+        raise ChecksFailed("no", ["bad"], uses_a_try=False, details={"what": "x"}, logged={"kept": ["y"]})
+
+    def nothing() -> list[Any]:
+        raise ChecksFailed("no", ["bad"], details={"what": "x"})
+
+    assert gate.submit(progress).content[0]["text"] == "2 - bad x"  # no try used
+    assert gate.submit(nothing).content[0]["text"] == "1 - bad x"
+    with pytest.raises(AgentFailed):
+        gate.submit(nothing)
+    events = logged(meter.run_log.path, "social_posts_rejected")
+    assert [e["attempt"] for e in events] == [1, 2, 3]  # every submission is numbered, counted or not
+    assert events[0]["kept"] == ["y"] and "kept" not in events[1]
+
+
 # T17: a model call that never answers ends the agent, and the meter keeps what it may have cost.
 
 

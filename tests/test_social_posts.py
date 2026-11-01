@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from trailer_to_campaign.agents.key_moments import KeyMoment, Quote, load_key_moments
-from trailer_to_campaign.agents.social_posts import Claim, NotTraced, SocialPost, trace
+from trailer_to_campaign.agents.social_posts import ALL_PAIRS, Claim, NotTraced, SocialPost, trace, trace_each
 
 TITLE = "Agent 327: Operation Barbershop"
 CATALOG: dict[str, Any] = {
@@ -289,3 +289,66 @@ def test_an_edit_with_a_control_character_is_refused_at_recheck() -> None:
         trace([asdict(edited)], MOMENTS, CATALOG, required={("facebook", "en")})
     [problem] = caught.value.problems
     assert "U+000C" in problem
+
+
+# T21: each post is traced on its own, so the good ones can be kept across tries.
+
+
+def each(submitted: list[Any], needed: Any = ALL_PAIRS) -> Any:
+    return trace_each(submitted, MOMENTS, CATALOG, needed)
+
+
+def test_a_clean_post_is_kept_and_a_bad_one_is_not() -> None:
+    result = each(six(text="no title here"))
+
+    assert set(result.posts) == set(ALL_PAIRS) - {("facebook", "en")}
+    assert any("facebook en" in p and "name the Film" in p for p in result.problems)
+    assert result.ignored == []
+
+
+def test_a_needed_post_not_sent_is_a_problem() -> None:
+    result = each([post("facebook", "en")], needed=[("facebook", "en"), ("tiktok", "vi")])
+
+    assert set(result.posts) == {("facebook", "en")}
+    assert result.problems == ["no tiktok post in vi; write one"]
+
+
+def test_a_post_not_needed_is_ignored_even_if_it_is_broken() -> None:
+    sent = [post("tiktok", "vi"), post("facebook", "en", text="y\ny", claims=[]), post("myspace", "en")]
+    result = each(sent, needed=[("tiktok", "vi")])
+
+    assert set(result.posts) == {("tiktok", "vi")}
+    assert result.problems == []
+    assert result.ignored == ["facebook en", "myspace en"]
+
+
+def test_a_needed_post_sent_twice_keeps_neither() -> None:
+    result = each([post("tiktok", "vi"), post("tiktok", "vi")], needed=[("tiktok", "vi")])
+
+    assert result.posts == {}
+    assert any("twice" in p for p in result.problems)
+
+
+@pytest.mark.parametrize("garbled", [{"text": "no platform"}, "just a string", None, {"platform": "tiktok"}])
+def test_a_garbled_post_is_a_problem_and_nothing_is_kept_for_it(garbled: Any) -> None:
+    result = each([garbled], needed=[("tiktok", "vi")])
+
+    assert result.posts == {}
+    assert any("needs platform" in p for p in result.problems)
+
+
+def test_trace_each_applies_every_check_trace_does() -> None:
+    bad = post("tiktok", "en", text=f'{TITLE}: "A line nobody said." Watch it now.', claims=[])
+    with pytest.raises(NotTraced) as whole:
+        trace([bad], MOMENTS, CATALOG, required=[("tiktok", "en")])
+    result = each([bad], needed=[("tiktok", "en")])
+
+    assert result.posts == {}
+    assert result.problems == whole.value.problems
+
+
+def test_trace_stays_all_or_nothing() -> None:
+    with pytest.raises(NotTraced):
+        trace(six()[:5], MOMENTS, CATALOG)
+    with pytest.raises(NotTraced):
+        trace(six(text="no title here"), MOMENTS, CATALOG)

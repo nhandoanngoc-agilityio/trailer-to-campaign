@@ -67,7 +67,7 @@ Said of a Social Post whose every factual claim cites its source, a Key Moment o
 _Avoid_: Sourced, fact-checked, verified
 
 **Flagged**:
-Said of a Social Post the Checker still rejects after the Copywriter's retries, or that couldn't be fully reviewed. It is kept, with the Checker's reasons, for a marketer to fix or drop at Approval, and never counts as passed.
+Said of a Social Post the Checker still rejects after the Copywriter's retries, or that couldn't be fully reviewed. It is kept, with the Checker's reasons, for a marketer to fix or drop at Approval, and never counts as passed. A marketer's edit is flagged the same way if its re-check objects. A marketer may still approve either: the record and the result say so.
 _Avoid_: Failed, blocked, escalated
 
 **Social Post**:

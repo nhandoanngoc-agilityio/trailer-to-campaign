@@ -63,6 +63,7 @@ The Side-by-Side Trial: one upcoming Film is prepared twice, so Time Saved, Appr
     This writes `runs/<film>/result.md`, plus `result.json` with the same numbers:
     - **Time Saved:** A's minutes minus B's. If B took longer, the page says so.
     - **Approval Rate:** from the Run whose Campaign was used. By default that's the last Run to finish that gave a Campaign (completed, with at least one Social Post approved). Otherwise `--run` names it.
+    - **Approved over a flag:** how many Social Posts were approved though they were Flagged: the Checker or tracing objected, or the post couldn't be reviewed. Beside it, how many edits were approved with no re-check. Counts only. Read them with the Approval Rate: a post approved unedited or with a Light Edit over a flag still counts in it, because the Marketer decided. A heavy edit doesn't count in the rate, but does count here. A re-check that passed doesn't cover a fact the Marketer added: no code can trace that, and they're told so.
     - **Cost per Film:** every Run of the Film added up, re-runs and failed Runs included, since the Film Budget caps each Run, not the Film. Eval Set and `dummy-run` Runs are left out, because they aren't launch work.
     - Each Run's Run Log time, beside the stopwatch, as a check.
 

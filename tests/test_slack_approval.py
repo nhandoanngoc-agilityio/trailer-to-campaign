@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -391,3 +392,90 @@ def test_an_edit_from_someone_who_is_not_a_marketer_changes_nothing() -> None:
     slack.click("t2c_approve", "run1:km1", MARKETER)
     assert slack.key_moment(1, 5, MOMENT) == KeyMomentDecision("approve", by=MARKETER)
     assert client.ephemeral[0]["user"] == PASSER_BY
+
+
+# T22: through a whole Run with the real SlackApprover, the record says what was approved over a flag.
+
+
+def whole_run(
+    tmp_path: Path, stages: Any, slack: SlackApprover, first_post: Callable[[], None]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Queue every click in the order the drafts are asked about: a click on another draft decides nothing."""
+    import io
+    import json
+    from decimal import Decimal
+
+    from trailer_to_campaign.pipeline import run_film
+
+    for i in range(1, 6):
+        slack.click("t2c_approve", f"run1:km{i}", MARKETER)
+    first_post()
+    for i in range(2, 7):
+        slack.click("t2c_approve", f"run1:post{i}", MARKETER)
+    run_film("sample", Decimal("2"), tmp_path / "runs", stages.stages(), slack, out=io.StringIO())
+    [log] = (tmp_path / "runs").glob("sample/*/run.jsonl")
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    return lines, json.loads(log.with_name("campaign.json").read_text())["social_posts"]
+
+
+def test_an_edit_approved_over_a_flag_in_slack_is_on_the_record(tmp_path: Path) -> None:
+    from test_pipeline import FakeStages
+
+    from trailer_to_campaign.agents.checker import Problem, Verdict
+    from trailer_to_campaign.approval import Recheck
+
+    edited = "An edited post. Stream it now."
+    reason = "This gives away that he is captured."
+    stages = FakeStages()
+    stages.rechecks[edited] = Recheck([], Verdict(False, [Problem("spoiler", "edited", reason, spoiler_id="the-end")]))
+    slack, client = approver()
+
+    def first_post() -> None:
+        slack.submit_edit("run1:post1", MARKETER, {"text": edited})
+        slack.click("t2c_approve_light", "run1:post1:v1", MARKETER)
+
+    lines, campaign = whole_run(tmp_path, stages, slack, first_post)
+
+    assert campaign[0]["edit_check"] == "flagged" and any(reason in p for p in campaign[0]["edit_problems"])
+    [rate] = [line for line in lines if line["event"] == "approval_rate"]
+    assert rate["approved_over_a_flag"] == ["facebook en"]
+    # The Checker's reasons can describe the spoiler (ADR 0007): the channel never sees them.
+    assert all(reason not in str(m) for m in [*client.posted, *client.updated])
+    assert any(reason in e["text"] for e in client.ephemeral if e["user"] == MARKETER)
+
+
+def test_a_post_flagged_then_restored_in_slack_has_no_edit_on_the_record(tmp_path: Path) -> None:
+    from test_pipeline import FakeStages
+
+    from trailer_to_campaign.agents.checker import Problem, Verdict
+    from trailer_to_campaign.approval import Recheck
+
+    edited = "An edited post. Stream it now."
+    stages = FakeStages()
+    stages.rechecks[edited] = Recheck([], Verdict(False, [Problem("brand", "edited", "Tone.", rule="tone")]))
+    slack, _ = approver()
+
+    def first_post() -> None:
+        slack.submit_edit("run1:post1", MARKETER, {"text": edited})
+        slack.submit_edit("run1:post1:v1", MARKETER, {"text": "facebook en post. Stream it now."})  # the original
+        slack.click("t2c_approve", "run1:post1:v2", MARKETER)
+
+    lines, campaign = whole_run(tmp_path, stages, slack, first_post)
+
+    assert campaign[0]["decision"] == "approve" and "edit_check" not in campaign[0]
+    assert campaign[0]["final_text"] == "facebook en post. Stream it now."
+    [rate] = [line for line in lines if line["event"] == "approval_rate"]
+    assert rate["approved_over_a_flag"] == []
+
+
+def test_a_slack_edit_with_spaces_around_it_still_finds_its_recheck(tmp_path: Path) -> None:
+    from test_pipeline import FakeStages
+
+    slack, _ = approver()
+
+    def first_post() -> None:
+        slack.submit_edit("run1:post1", MARKETER, {"text": "  An edited post. Stream it now.  "})
+        slack.click("t2c_approve_light", "run1:post1:v1", MARKETER)
+
+    _, campaign = whole_run(tmp_path, FakeStages(), slack, first_post)
+    assert campaign[0]["edit_check"] == "passed"

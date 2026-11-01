@@ -27,7 +27,7 @@ import anyio
 
 from trailer_to_campaign.agents.key_moments import KeyMoment
 from trailer_to_campaign.agents.loop import AgentFailed
-from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview
+from trailer_to_campaign.agents.review import CheckedPost, FilmBudgetReachedMidReview, for_the_marketer
 from trailer_to_campaign.agents.social_posts import SocialPost
 from trailer_to_campaign.approval import (
     ApprovalAborted,
@@ -84,9 +84,12 @@ def real_stages(film: str, source: str, settings: Settings, make_client: Callabl
             problems = []
         except NotTraced as err:
             problems = err.problems
-        async with stage_client(make_client) as client:
-            servers = checker.checker_servers(settings)
-            [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
+        try:
+            async with stage_client(make_client) as client:
+                servers = checker.checker_servers(settings)
+                [verdict] = await checker.check_posts(film, [post], servers=servers, client=client, meter=meter)
+        except Exception as err:  # what tracing found still counts, and the Marketer still decides
+            return Recheck(problems, None, note=_not_rechecked(err))
         return Recheck(problems, verdict, note=UNTRACED_EDIT)
 
     return Stages(watch=watch, write_and_check=write_and_check, recheck=recheck)
@@ -163,8 +166,8 @@ class _Run:
         text = json.dumps(data, ensure_ascii=False, indent=2)
         try:
             path.write_text(text, encoding="utf-8")
-        except OSError as err:  # paid for and decided: print it rather than lose it
-            self.say(text)
+        except OSError as err:  # paid for and decided: print it rather than lose it, and never to self.out:
+            print(text, file=sys.stderr)  # in Slack that's the channel, and reasons can describe a spoiler (ADR 0007)
             print(f"could not save {name} ({type(err).__name__}); printed above", file=sys.stderr)
 
     def go(self, stages: Stages, approver: Approver) -> None:
@@ -204,7 +207,9 @@ class _Run:
             self.save("social_posts.json", [asdict(c) for c in checked])
             self.say(f"\nApproval of {len(checked)} Social Posts")
             for i, c in enumerate(checked, start=1):
-                decision = approver.social_post(i, len(checked), c, self._rechecker(stages, c, approved))
+                rechecks: dict[str, Recheck] = {}
+                decision = approver.social_post(i, len(checked), c, self._rechecker(stages, c, approved, rechecks))
+                outcome = _edit_outcome(decision, rechecks)
                 changed = decision.changed  # as shown to the Marketer; measured here only if the approver didn't
                 if changed is None and decision.decision == "edit" and decision.text is not None:
                     changed = measured_change(c.post.text, decision.text)
@@ -220,8 +225,9 @@ class _Run:
                     language=c.post.language,
                     status=c.status,
                     text=decision.text,
+                    **outcome,
                 )
-                self.posts_record.append({**asdict(c), **_post_fields(c, decision)})
+                self.posts_record.append({**asdict(c), **_post_fields(c, decision), **outcome})
         else:
             self.say("\nNo Key Moment was approved, so no Social Posts are written.")
 
@@ -230,16 +236,18 @@ class _Run:
             campaign = {"film": self.film, "stop_reason": stop, "key_moments": self.km_record}
             self.save("campaign.json", {**campaign, "social_posts": self.posts_record})
 
-    def _rechecker(self, stages: Stages, c: CheckedPost, approved: list[KeyMoment]) -> Callable[[str], Recheck]:
+    def _rechecker(
+        self, stages: Stages, c: CheckedPost, approved: list[KeyMoment], rechecks: dict[str, Recheck]
+    ) -> Callable[[str], Recheck]:
+        """Re-check a marketer's edit, and remember the result by its text, for the record of what they decide."""
+
         def recheck(text: str) -> Recheck:
             try:
-                return anyio.run(stages.recheck, replace(c.post, text=text), approved, self.meter)
-            except FilmBudgetReached:
-                return Recheck([], None, note="not re-checked: the Film Budget was reached")
-            except AgentFailed as err:
-                return Recheck([], None, note=f"not re-checked: {err}")
+                result = anyio.run(stages.recheck, replace(c.post, text=text), approved, self.meter)
             except Exception as err:  # a re-check informs the marketer; it never ends their Run
-                return Recheck([], None, note=f"not re-checked: {type(err).__name__}: {err}")
+                result = Recheck([], None, note=_not_rechecked(err))
+            rechecks[text] = result
+            return result
 
         return recheck
 
@@ -270,6 +278,8 @@ class _Run:
         self.save_campaign(stop)
         rates = {stage: _rate(d) for stage, d in self.decisions.items()}
         rates["overall"] = _rate([x for d in self.decisions.values() for x in d])
+        over_a_flag = [_name(p) for p in self.posts_record if _approved_over_a_flag(p)]
+        not_rechecked = [_name(p) for p in self.posts_record if p.get("edit_check") == "not_rechecked"]
         light = [e["changed"] for e in self.edits if e["light"]]
         heavy = [e["changed"] for e in self.edits if not e["light"]]
         outliers = [
@@ -285,6 +295,8 @@ class _Run:
                 heavy_edit_change=_mean(heavy),
                 light_edit_flag=LIGHT_EDIT_FLAG,
                 light_edits_over_flag=outliers,
+                approved_over_a_flag=over_a_flag,
+                approved_not_rechecked=not_rechecked,
             )
         self.run_log.finish(self.meter.spent, stop)
         self.say(f"\nRun {stop}: spent ${self.meter.spent:.4f} of ${self.meter.limit}.")
@@ -303,6 +315,10 @@ class _Run:
             self.say(
                 f"Light Edits that changed over {LIGHT_EDIT_FLAG:.0%} of the words, worth a second look: {listed}."
             )
+        if over_a_flag:  # names only: in Slack the channel reads this, and reasons can name a spoiler
+            self.say(f"Social Posts approved over a flag: {', '.join(over_a_flag)}.")
+        if not_rechecked:
+            self.say(f"Social Posts approved with no re-check: {', '.join(not_rechecked)}.")
         self.say(f"Files are next to the Run Log, in {self.where}/")
         return code
 
@@ -328,6 +344,40 @@ def _apply(moment: KeyMoment, decision: KeyMomentDecision) -> KeyMoment | None:
             moment, what_happens=decision.what_happens or moment.what_happens, mood=decision.mood or moment.mood
         )
     return None
+
+
+def _not_rechecked(err: Exception) -> str:
+    if isinstance(err, FilmBudgetReached):
+        return "not re-checked: the Film Budget was reached"
+    return f"not re-checked: {err}" if isinstance(err, AgentFailed) else f"not re-checked: {type(err).__name__}: {err}"
+
+
+def _edit_outcome(decision: PostDecision, rechecks: dict[str, Recheck]) -> dict[str, Any]:
+    """How the re-check of an approved edit's final text ended: an objection first, then a gap.
+
+    passed means the Checker passed it and code's checks found nothing. It doesn't mean a fact the
+    Marketer added was traced: the Marketer is told so (UNTRACED_EDIT), and no code can check that.
+    """
+    if decision.decision != "edit":
+        return {}
+    result = rechecks.get(decision.text or "")
+    if result is None:
+        return {"edit_check": "not_rechecked", "edit_problems": ["no re-check of the final text"]}
+    found = [*result.problems, *(for_the_marketer(result.verdict) if result.verdict else [])]
+    if result.verdict is None:
+        why = [*found, result.note or "not re-checked"]
+        return {"edit_check": "flagged" if found else "not_rechecked", "edit_problems": why}
+    flagged = found or not result.verdict.passed
+    return {"edit_check": "flagged" if flagged else "passed", "edit_problems": found}
+
+
+def _name(record: dict[str, Any]) -> str:
+    return f"{record['post']['platform']} {record['post']['language']}"
+
+
+def _approved_over_a_flag(record: dict[str, Any]) -> bool:
+    """An edit its re-check flagged, or a Flagged post approved as it stood. A rejected one doesn't go out."""
+    return record.get("edit_check") == "flagged" or (record["decision"] == "approve" and record["status"] == "flagged")
 
 
 def _post_fields(c: CheckedPost, decision: PostDecision) -> dict[str, Any]:

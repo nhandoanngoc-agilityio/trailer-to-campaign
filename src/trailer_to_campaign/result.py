@@ -263,7 +263,8 @@ def _page(r: FilmResult) -> str:
 
 def _flag_count(approval: dict[str, Any], key: str) -> int | None:
     """How many posts, or None for a Run from before T22 (or none used): unknown is not zero."""
-    return len(approval[key]) if key in approval else None
+    names = approval.get(key)
+    return len(names) if isinstance(names, list) else None
 
 
 def _count_or_unknown(approval: dict[str, Any], key: str) -> str:

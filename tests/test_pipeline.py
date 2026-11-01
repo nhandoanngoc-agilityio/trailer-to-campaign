@@ -607,6 +607,7 @@ def test_an_edit_whose_recheck_could_not_run_records_not_rechecked(tmp_path: Pat
 
     assert first["edit_check"] == "not_rechecked" and first["edit_problems"]  # it says why
     assert rate["approved_not_rechecked"] == ["facebook en"] and rate["approved_over_a_flag"] == []
+    assert "approved with no re-check: facebook en" in run.out  # type: ignore[attr-defined]
 
 
 def test_an_edit_decided_with_no_recheck_of_its_text_records_not_rechecked(tmp_path: Path) -> None:
@@ -697,4 +698,102 @@ def test_the_run_says_what_was_approved_over_a_flag_by_name_and_not_why(tmp_path
 
 def test_a_clean_run_says_nothing_about_flags(tmp_path: Path) -> None:
     edit_of_first_post(FakeStages(), tmp_path, [EDITED])
-    assert "over a flag" not in run.out and "not re-checked" not in run.out  # type: ignore[attr-defined]
+    assert "over a flag" not in run.out and "no re-check" not in run.out  # type: ignore[attr-defined]
+
+
+def test_a_tracing_problem_stays_on_the_record_when_the_checker_could_not_run(tmp_path: Path) -> None:
+    stages = FakeStages()
+    stages.rechecks[EDITED] = Recheck(["quote 'x' is not a Key Moment's line"], None, note="not re-checked: it failed")
+    _, first, rate = edit_of_first_post(stages, tmp_path, [EDITED])
+
+    assert first["edit_check"] == "flagged"  # a known objection, not just a gap
+    assert first["edit_problems"] == ["quote 'x' is not a Key Moment's line", "not re-checked: it failed"]
+    assert rate["approved_over_a_flag"] == ["facebook en"] and rate["approved_not_rechecked"] == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AgentFailed("the Checker gave up"),
+        FilmBudgetReached(Decimal("1.9"), Decimal("2"), Decimal("0.3")),
+        ValueError("oops"),
+    ],
+)
+def test_the_real_recheck_keeps_what_tracing_found_when_the_checker_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    import anyio
+    from fake_claude import FakeClient
+
+    from trailer_to_campaign.agents import checker
+    from trailer_to_campaign.config import Settings
+    from trailer_to_campaign.pipeline import real_stages
+    from trailer_to_campaign.run_log import RunLog
+
+    film = tmp_path / "films" / "sample"
+    film.mkdir(parents=True)
+    (film / "film.toml").write_text(
+        '[catalog]\ntitle = "Sample Film"\nsynopsis = "A spy."\ngenre = ["comedy"]\nlanguage = "en"\n'
+        'runtime_minutes = 4\n\n[[catalog.cast]]\ncharacter = "Agent 327"\n\n'
+        '[[spoilers]]\nid = "ending"\ntext = "He is captured."\n',
+        encoding="utf-8",
+    )
+
+    async def fails(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(checker, "check_posts", fails)
+    stages = real_stages("sample", "trailer.mp4", Settings(films_dir=tmp_path / "films"), lambda: FakeClient([]))
+    meter = FilmMeter(Decimal("2"), RunLog.create(tmp_path / "runs", "sample"))
+    no_title = SocialPost("tiktok", "en", "A spy walks in. Stream it now.", [])
+    result = anyio.run(stages.recheck, no_title, [moment(1)], meter)
+
+    assert any("name the Film" in p for p in result.problems)  # tracing's finding survives
+    assert result.verdict is None and "not re-checked" in (result.note or "")
+
+
+def test_a_failed_save_never_prints_the_checkers_reasons_to_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """In Slack, what the Run says goes to the channel, and a reason can describe the spoiler (ADR 0007)."""
+    real_write = Path.write_text
+
+    def write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if self.name == "campaign.json":
+            raise OSError("the disk is full")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    decision = PostDecision("edit", text=EDITED, light=True)
+    code, _, _ = run(tmp_path, stages, EditsAgain([EDITED], decision))
+
+    assert code == 0 and "A word is missing." not in run.out  # type: ignore[attr-defined]
+    assert "A word is missing." in capsys.readouterr().err  # paid for and decided: still not lost
+
+
+def test_an_edit_approved_over_a_flag_in_the_terminal_is_on_the_record(tmp_path: Path) -> None:
+    from trailer_to_campaign.approval import TerminalApprover
+
+    answers = iter(["a"] * 5 + ["e", EDITED, ".", "a", "l"] + ["a"] * 5)
+    stages = FakeStages()
+    stages.rechecks[EDITED] = CHECKER_FLAGGED
+    approver = TerminalApprover(input=lambda prompt: next(answers), out=io.StringIO())
+    _, lines, run_dir = run(tmp_path, stages, approver)
+
+    first = json.loads((run_dir / "campaign.json").read_text())["social_posts"][0]
+    assert first["edit_check"] == "flagged" and first["final_text"] == EDITED
+    assert events(lines, "approval_rate")[0]["approved_over_a_flag"] == ["facebook en"]
+
+
+def test_a_terminal_edit_with_spaces_around_it_still_finds_its_recheck(tmp_path: Path) -> None:
+    """The record finds a re-check by its text, so an Approver that tidied one side would lose it."""
+    from trailer_to_campaign.approval import TerminalApprover
+
+    answers = iter(["a"] * 5 + ["e", f"  {EDITED}  ", ".", "a", "l"] + ["a"] * 5)
+    approver = TerminalApprover(input=lambda prompt: next(answers), out=io.StringIO())
+    _, _, run_dir = run(tmp_path, FakeStages(), approver)
+
+    first = json.loads((run_dir / "campaign.json").read_text())["social_posts"][0]
+    assert first["edit_check"] == "passed"

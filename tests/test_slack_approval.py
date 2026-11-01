@@ -466,3 +466,16 @@ def test_a_post_flagged_then_restored_in_slack_has_no_edit_on_the_record(tmp_pat
     assert campaign[0]["final_text"] == "facebook en post. Stream it now."
     [rate] = [line for line in lines if line["event"] == "approval_rate"]
     assert rate["approved_over_a_flag"] == []
+
+
+def test_a_slack_edit_with_spaces_around_it_still_finds_its_recheck(tmp_path: Path) -> None:
+    from test_pipeline import FakeStages
+
+    slack, _ = approver()
+
+    def first_post() -> None:
+        slack.submit_edit("run1:post1", MARKETER, {"text": "  An edited post. Stream it now.  "})
+        slack.click("t2c_approve_light", "run1:post1:v1", MARKETER)
+
+    _, campaign = whole_run(tmp_path, FakeStages(), slack, first_post)
+    assert campaign[0]["edit_check"] == "passed"

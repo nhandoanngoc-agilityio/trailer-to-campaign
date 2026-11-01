@@ -232,3 +232,14 @@ def test_a_run_from_before_the_flag_count_says_not_recorded(tmp_path: Path, film
     assert "Social Posts approved over a flag: not recorded" in page  # unknown is not zero
     data = json.loads(path.with_name("result.json").read_text(encoding="utf-8"))
     assert data["approved_over_a_flag"] is None and data["approved_not_rechecked"] is None
+
+
+def test_a_flag_count_that_is_not_a_list_reads_not_recorded(tmp_path: Path, films: Path) -> None:
+    runs = tmp_path / "runs"
+    odd = {**RATE, "approved_over_a_flag": None, "approved_not_rechecked": "x"}
+    a_run(runs, "20261102T040000Z", costs=["0.45"], end="completed", minutes=75, rate=odd)
+    path = write_result(film_result(FILM, runs, films, old_minutes=240, new_minutes=60), runs)
+
+    assert "approved over a flag: not recorded; approved with no re-check: not recorded" in path.read_text(
+        encoding="utf-8"
+    )

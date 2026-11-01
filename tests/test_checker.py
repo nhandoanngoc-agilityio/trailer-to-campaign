@@ -14,7 +14,6 @@ from mcp import Client
 from trailer_to_campaign.agents import load_prompt
 from trailer_to_campaign.agents.checker import (
     MAX_SUBMISSIONS,
-    MAX_TURNS,
     MODEL,
     Problem,
     Verdict,
@@ -194,10 +193,75 @@ async def test_a_catalog_that_cannot_be_read_never_lets_a_post_pass(films: Path,
 
     run = Run(films, tmp_path)
     run.servers = [create_spoiler_server(films), broken]
-    keep_passing = [submit(GOOD, n) for n in range(MAX_TURNS)]
-    with pytest.raises(AgentFailed):
-        await run.check([read_both, *keep_passing])  # fail closed: these posts go to a person, flagged
+    with pytest.raises(AgentFailed, match="catalog"):
+        await run.check([read_both, submit(GOOD)])  # fail closed: these posts go to a person, flagged
     assert run.events("post_checked") == []
+    assert len(run.events("model_call")) == 1  # it can't judge without the cast, so no more paid turns
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"film": "sample"}, {"film": "sample", "cast": []}, {"film": "sample", "cast": None}],
+)
+async def test_a_catalog_with_no_cast_never_opens_the_gate(films: Path, tmp_path: Path, answer: dict[str, Any]) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    broken = MCPServer("catalog")
+
+    @broken.tool()
+    def get_catalog(film: str) -> dict:
+        return answer
+
+    run = Run(films, tmp_path)
+    run.servers = [create_spoiler_server(films), broken]
+    with pytest.raises(AgentFailed, match="catalog"):
+        await run.check([read_both, submit(GOOD)])
+    assert run.events("post_checked") == []
+
+
+async def test_a_spoiler_list_tool_error_fails_at_once(films: Path, tmp_path: Path) -> None:
+    from mcp.server.mcpserver import MCPServer
+
+    broken = MCPServer("spoilers")
+
+    @broken.tool()
+    def get_spoiler_list(film: str) -> dict:
+        raise ValueError("the film.toml is damaged")
+
+    run = Run(films, tmp_path)
+    run.servers = [broken, create_catalog_server(films)]
+    with pytest.raises(AgentFailed, match="Spoiler List"):
+        await run.check([read_both, submit(GOOD)])
+    assert len(run.events("model_call")) == 1
+
+
+@pytest.mark.parametrize("reads", [("get_spoiler_list", "get_catalog"), ("get_catalog", "get_spoiler_list")])
+async def test_verdicts_in_the_same_reply_as_the_reads_are_refused(
+    films: Path, tmp_path: Path, reads: tuple[str, str]
+) -> None:
+    """They were written before the model saw the Spoiler List or the cast, so they can't be judgments of either."""
+    run = Run(films, tmp_path)
+    blind = [{"post": 1, "verdict": "pass", "problems": []}, {"post": 2, "verdict": "pass", "problems": []}]
+    all_at_once = lambda params: reply(  # noqa: E731
+        use(reads[0], film="sample"), use(reads[1], film="sample"), use("submit_verdicts", 0, verdicts=blind)
+    )
+    verdicts, fake = await run.check([all_at_once, submit(GOOD)])
+
+    refused = results(fake.requests[1])[-1]
+    assert refused["is_error"] and "get_catalog" in refused["content"][0]["text"]
+    assert run.events("verdicts_rejected") == []  # not counted: it never got to be judged
+    assert verdicts[1].passed is False  # what counts is the verdict given after reading
+
+
+async def test_a_read_seen_on_an_earlier_turn_counts_after_another_read(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    spoilers = lambda params: reply(use("get_spoiler_list", film="sample"))  # noqa: E731
+    catalog_and_verdicts = lambda params: reply(  # noqa: E731
+        use("get_catalog", film="sample"), use("submit_verdicts", 0, verdicts=GOOD)
+    )
+    _, fake = await run.check([spoilers, catalog_and_verdicts, submit(GOOD)])
+
+    assert results(fake.requests[2])[-1]["is_error"]  # the cast was still unseen
 
 
 async def test_another_films_catalog_is_refused(films: Path, tmp_path: Path) -> None:
@@ -213,6 +277,7 @@ def test_the_prompt_asks_for_the_cast_check() -> None:
     prompt = load_prompt("checker")
     assert "get_catalog" in prompt and "invented_detail" in prompt
     assert "cast" in prompt.casefold() and "null" in prompt  # the wording is the Eval Set's to judge
+    assert "get_catalog" in load_prompt("checker_nudge")  # or the nudge sends it to a refusal
 
 
 def problem(**over: Any) -> dict[str, Any]:

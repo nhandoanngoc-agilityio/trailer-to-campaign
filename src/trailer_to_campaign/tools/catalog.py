@@ -2,8 +2,9 @@
 
     get_catalog(film) -> title, synopsis, genre, language, runtime_minutes, cast, trailer
 
-For the Watcher and Copywriter. The Spoiler List is a separate server
-(tools/spoilers.py, ADR 0007), so it is never offered alongside the catalog.
+For the Watcher, the Copywriter and the Checker. The Spoiler List is a separate
+server (tools/spoilers.py, ADR 0007), so the writers can read this without ever
+being offered it. Only the Checker gets both.
 """
 
 from __future__ import annotations

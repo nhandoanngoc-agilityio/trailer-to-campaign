@@ -183,6 +183,10 @@ async def check_posts(
     checking = _Checking(film, posts, gate)
 
     async def check(mcp: McpTools) -> list[Verdict]:
+        for name, what in READS.items():
+            if name not in mcp:
+                raise AgentFailed(f"the Checker was not given {what}")
+
         async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if name == SUBMIT:
                 return _submit(checking, arguments)
@@ -229,18 +233,27 @@ async def check_posts(
 
 
 def _remember_read(checking: _Checking, name: str, result: ToolResult) -> None:
-    """Fail closed: without the list or the cast nothing can be judged, so these posts get flagged, at once."""
+    """Fail closed: without the list or the cast nothing can be judged, so these posts get flagged, at once.
+
+    Only the first good read counts: once the model has it, a later failed read costs nothing."""
+    if name in checking.read_at:
+        return
     try:
         if result.is_error:
-            raise ValueError("the tool failed")
+            raise ValueError(result.content[0]["text"])  # the tool's own words: they hold no local path
         data = json.loads(result.content[0]["text"])
         if name == "get_spoiler_list":
             checking.spoiler_ids = {s["id"] for s in data["spoilers"]}
-        elif not data["cast"]:
-            raise ValueError("no cast")
+        elif not _is_a_cast(data["cast"]):
+            raise ValueError("it has no cast")
     except (KeyError, IndexError, TypeError, ValueError) as err:
-        raise AgentFailed(f"the Checker could not read {READS[name]} ({type(err).__name__})") from err
-    checking.read_at.setdefault(name, len(checking.messages))
+        checking.gate.meter.event("tool_call", agent="checker", tool=name, is_error=True)
+        raise AgentFailed(f"the Checker could not read {READS[name]}: {err}") from err
+    checking.read_at[name] = len(checking.messages)
+
+
+def _is_a_cast(cast: Any) -> bool:
+    return bool(cast) and isinstance(cast, list) and all(isinstance(m, dict) and m.get("character") for m in cast)
 
 
 def _has_seen_both(checking: _Checking) -> bool:

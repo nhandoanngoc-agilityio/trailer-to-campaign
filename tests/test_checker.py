@@ -201,7 +201,15 @@ async def test_a_catalog_that_cannot_be_read_never_lets_a_post_pass(films: Path,
 
 @pytest.mark.parametrize(
     "answer",
-    [{"film": "sample"}, {"film": "sample", "cast": []}, {"film": "sample", "cast": None}],
+    [
+        {"film": "sample"},
+        {"film": "sample", "cast": []},
+        {"film": "sample", "cast": None},
+        {"film": "sample", "cast": "unknown"},
+        {"film": "sample", "cast": {"x": 1}},
+        {"film": "sample", "cast": [{}]},
+        {"film": "sample", "cast": [{"name": "No Character"}]},
+    ],
 )
 async def test_a_catalog_with_no_cast_never_opens_the_gate(films: Path, tmp_path: Path, answer: dict[str, Any]) -> None:
     from mcp.server.mcpserver import MCPServer
@@ -253,7 +261,69 @@ async def test_verdicts_in_the_same_reply_as_the_reads_are_refused(
     assert verdicts[1].passed is False  # what counts is the verdict given after reading
 
 
-async def test_a_read_seen_on_an_earlier_turn_counts_after_another_read(films: Path, tmp_path: Path) -> None:
+async def test_a_second_read_in_the_same_reply_as_verdicts_does_not_undo_the_first(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    read_again_and_judge = lambda params: reply(  # noqa: E731
+        use("get_catalog", 2, film="sample"), use("submit_verdicts", 0, verdicts=GOOD)
+    )
+    verdicts, fake = await run.check([read_both, read_again_and_judge])
+
+    assert len(fake.requests) == 2  # accepted in that reply: both reads had already reached the model
+    assert verdicts[1].passed is False and len(run.events("post_checked")) == 2
+
+
+async def test_a_failed_read_after_a_good_one_does_not_lose_the_review(films: Path, tmp_path: Path) -> None:
+    """Once the model has both, a later failed read costs nothing: the verdicts are what was paid for."""
+    from mcp.server.mcpserver import MCPServer
+
+    flaky = MCPServer("catalog")
+    answers = [{"film": "sample", "cast": [{"character": "Agent 327", "name": None}]}]
+
+    @flaky.tool()
+    def get_catalog(film: str) -> dict:
+        if answers:
+            return answers.pop()
+        raise ValueError("the film.toml is being saved")
+
+    run = Run(films, tmp_path)
+    run.servers = [create_spoiler_server(films), flaky]
+    read_again_and_judge = lambda params: reply(  # noqa: E731
+        use("get_catalog", 2, film="sample"), use("submit_verdicts", 0, verdicts=GOOD)
+    )
+    verdicts, _ = await run.check([read_both, read_again_and_judge])
+    assert verdicts[1].passed is False
+
+
+async def test_a_failed_read_says_why_and_stays_in_the_run_log(films: Path, tmp_path: Path) -> None:
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    broken = MCPServer("catalog")
+
+    @broken.tool()
+    def get_catalog(film: str) -> dict:
+        raise ToolError("the Film's catalog has no title")
+
+    run = Run(films, tmp_path)
+    run.servers = [create_spoiler_server(films), broken]
+    with pytest.raises(AgentFailed, match="no title"):  # a person reads this on the flag
+        await run.check([read_both, submit(GOOD)])
+    calls = run.events("tool_call")
+    assert {"get_catalog": True, "get_spoiler_list": False} == {c["tool"]: c["is_error"] for c in calls}
+
+
+@pytest.mark.parametrize("given", ["spoilers", "catalog"])
+async def test_a_checker_not_given_both_tools_fails_before_any_paid_call(
+    films: Path, tmp_path: Path, given: str
+) -> None:
+    run = Run(films, tmp_path)
+    run.servers = [create_spoiler_server(films) if given == "spoilers" else create_catalog_server(films)]
+    with pytest.raises(AgentFailed, match="not given"):
+        await run.check([read_both, submit(GOOD)])
+    assert run.events("model_call") == []
+
+
+async def test_a_read_unseen_when_verdicts_are_given_still_shuts_the_gate(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
     spoilers = lambda params: reply(use("get_spoiler_list", film="sample"))  # noqa: E731
     catalog_and_verdicts = lambda params: reply(  # noqa: E731
@@ -278,6 +348,9 @@ def test_the_prompt_asks_for_the_cast_check() -> None:
     assert "get_catalog" in prompt and "invented_detail" in prompt
     assert "cast" in prompt.casefold() and "null" in prompt  # the wording is the Eval Set's to judge
     assert "get_catalog" in load_prompt("checker_nudge")  # or the nudge sends it to a refusal
+    cast_rule = next(line for line in prompt.splitlines() if line.startswith("Cast:"))
+    assert "hashtag" in cast_rule  # not only "its own words": no code compares a hashtag with the cast
+    assert "code has checked" not in cast_rule  # it can't vouch for every quote style, or for a marketer's edit
 
 
 def problem(**over: Any) -> dict[str, Any]:
@@ -339,7 +412,7 @@ async def test_offending_text_matches_in_either_unicode_form(films: Path, tmp_pa
     assert not verdicts[0].passed
 
 
-async def test_a_spoiler_list_that_cannot_be_read_fails_the_checker_not_the_run(tmp_path: Path) -> None:
+async def test_a_spoiler_list_that_cannot_be_read_fails_the_checker_not_the_run(films: Path, tmp_path: Path) -> None:
     from mcp.server.mcpserver import MCPServer
 
     broken = MCPServer("spoilers")
@@ -349,6 +422,7 @@ async def test_a_spoiler_list_that_cannot_be_read_fails_the_checker_not_the_run(
         return {"film": film, "items": []}  # not the shape the Checker reads
 
     run_log = RunLog.create(tmp_path / "runs", "sample")
-    client = FakeClient([lambda params: reply(use("get_spoiler_list", film="sample")), submit(GOOD)])
+    client = FakeClient([read_both, submit(GOOD)])
+    servers = [broken, create_catalog_server(films)]
     with pytest.raises(AgentFailed, match="Spoiler List"):
-        await check_posts("sample", POSTS, servers=[broken], client=client, meter=FilmMeter(Decimal("2"), run_log))
+        await check_posts("sample", POSTS, servers=servers, client=client, meter=FilmMeter(Decimal("2"), run_log))

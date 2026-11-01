@@ -21,6 +21,9 @@ def a_package(root: Path) -> Path:
         "agents/prompts/checker.md": "Check it.\n",
         "tools/catalog.py": "tool = 1\n",
         "footage/frames.py": "frames = 1\n",
+        "catalog.py": "catalog = 1\n",
+        "config.py": 'DEFAULT_WHISPER_MODEL = "small"\n',
+        "pricing.py": "price = 1\n",
         "evals.py": "score = 1\n",
     }.items():
         path = package / name
@@ -30,7 +33,16 @@ def a_package(root: Path) -> Path:
 
 
 @pytest.mark.parametrize(
-    "changed", ["agents/prompts/checker.md", "agents/checker.py", "tools/catalog.py", "footage/frames.py"]
+    "changed",
+    [
+        "agents/prompts/checker.md",
+        "agents/checker.py",
+        "tools/catalog.py",
+        "footage/frames.py",
+        "catalog.py",  # what get_catalog and get_spoiler_list read
+        "config.py",  # the Whisper model
+        "pricing.py",  # what cost per Film is worked out from
+    ],
 )
 def test_the_hash_changes_with_an_agents_prompt_model_or_tool(tmp_path: Path, changed: str) -> None:
     package = a_package(tmp_path)
@@ -97,7 +109,13 @@ def report(reports: Path, name: str, **over: Any) -> Path:
         "agents_hash": HASH,
         "skipped": [],
         "films": [
-            {"film": "alpha", "stop": "completed", "cost_usd": "0.40", "errors": []},
+            {
+                "film": "alpha",
+                "stop": "completed",
+                "cost_usd": "0.40",
+                "errors": [],
+                "planted": {"caught": 2, "total": 2},
+            },
             {"film": "gamma", "stop": "skipped"},
         ],
         "totals": {
@@ -171,6 +189,8 @@ def test_show_baseline_prints_the_numbers_to_compare_with(tmp_path: Path) -> Non
     text = out.getvalue()
     assert str(path) in text and "abc1234" in text
     assert "Planted Drafts: caught 2 of 2" in text and "$0.40" in text and "alpha" in text
+    assert "Without the Watcher: $0.2000" in text  # what a --key-moments-from run can be compared with
+    assert "differ" not in text  # same Films as nothing to compare: no warning
 
 
 def test_show_baseline_says_only_when_a_main_run_is_needed(tmp_path: Path) -> None:
@@ -181,12 +201,46 @@ def test_show_baseline_says_only_when_a_main_run_is_needed(tmp_path: Path) -> No
     assert "new run on main" in out.getvalue()
 
 
-def test_show_baseline_says_when_it_could_not_read_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import trailer_to_campaign.evals as evals
+def test_show_baseline_says_why_a_run_may_not_match(tmp_path: Path) -> None:
+    out = io.StringIO()
+    assert show_baseline(tmp_path / "runs", "v0", out=out, main_hash=lambda: HASH) == 1
+    assert "uncommitted or untracked" in out.getvalue()  # or each repeat costs $2 with no hint why
 
-    report(tmp_path / "runs" / "_eval", "20261101T000000Z")
-    monkeypatch.setattr(evals, "agents_hash", lambda: HASH)
+
+def test_without_main_nothing_stands_in_for_it(tmp_path: Path) -> None:
+    report(tmp_path / "runs" / "_eval", "20261101T000000Z")  # this checkout's own run must not pass for main's
     out = io.StringIO()
 
-    assert show_baseline(tmp_path / "runs", "v0", out=out, main_hash=lambda: None) == 0
-    assert "this checkout" in out.getvalue()  # a fallback must not pass for main's numbers
+    assert show_baseline(tmp_path / "runs", "v0", out=out, main_hash=lambda: None) == 1
+    assert "could not read main" in out.getvalue() and "Baseline for" not in out.getvalue()
+
+
+def test_a_baseline_of_other_films_says_so(tmp_path: Path) -> None:
+    report(tmp_path / "runs" / "_eval", "20261101T000000Z")  # ran alpha
+    out = io.StringIO()
+
+    code = show_baseline(tmp_path / "runs", "v0", out=out, main_hash=lambda: HASH, present=["alpha", "song-lang"])
+    assert code == 0
+    # Song Lang is gitignored, so two checkouts can differ: their totals can't be compared, but each Film can.
+    assert "Films differ" in out.getvalue() and "song-lang" in out.getvalue()
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"totals": {}},
+        {"at": None, "totals": None},
+        {
+            "films": [
+                {"film": "alpha", "stop": "completed", "cost_usd": "lots", "errors": [], "planted": {}},
+            ]
+        },
+    ],
+)
+def test_a_report_of_an_unexpected_shape_is_passed_over(tmp_path: Path, over: dict[str, Any]) -> None:
+    good = report(tmp_path / "runs" / "_eval", "20261101T000000Z")
+    report(tmp_path / "runs" / "_eval", "20261102T000000Z", **over)
+    out = io.StringIO()
+
+    assert show_baseline(tmp_path / "runs", "v0", out=out, main_hash=lambda: HASH) == 0
+    assert str(good) in out.getvalue()

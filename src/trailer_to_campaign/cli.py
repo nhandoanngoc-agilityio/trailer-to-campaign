@@ -352,7 +352,12 @@ def run_eval_set(
     from trailer_to_campaign import evals
 
     if baseline:
-        return evals.show_baseline(runs_dir, settings.watcher)
+        try:
+            present = [film.slug for film in evals.prepare(eval_dir) if film.key is not None]
+        except ValueError as err:
+            print(err, file=sys.stderr)
+            return 2
+        return evals.show_baseline(runs_dir, settings.watcher, present=present)
     try:
         api_key = settings.require_api_key()
         films = evals.prepare(eval_dir)  # every Answer Key is checked before the first paid call

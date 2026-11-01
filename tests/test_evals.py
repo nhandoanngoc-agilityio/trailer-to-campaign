@@ -642,6 +642,18 @@ def test_only_drafts_fails_when_the_checker_does(eval_dir: Path, tmp_path: Path)
     assert data["films"][0]["planted"]["not_reviewed"] == 2 and data["films"][0]["errors"]
 
 
+def test_a_film_that_could_not_start_in_only_drafts_shows_no_input_traps(eval_dir: Path, tmp_path: Path) -> None:
+    def no_stages(film: EvalFilm) -> EvalStages:
+        raise OSError("could not start")
+
+    out = io.StringIO()
+    code = run_eval(prepare(eval_dir), Decimal("2.00"), tmp_path / "runs", no_stages, out=out, only_drafts=True)
+
+    assert code == 1 and "input Traps" not in out.getvalue()
+    alpha = summary(tmp_path)["films"][0]
+    assert alpha["input_traps"] == {"caught": 0, "total": 0, "not_caught": []}  # not run, so not missed
+
+
 def test_a_report_records_what_it_was_measured_on(eval_dir: Path, tmp_path: Path) -> None:
     from trailer_to_campaign.eval_baseline import agents_hash
 
@@ -702,6 +714,17 @@ def test_a_run_on_reused_key_moments_saves_them_again(eval_dir: Path, tmp_path: 
     _, _, _, source = run_in(eval_dir, tmp_path / "first", FakeStages())
     _, _, _, second = run_in(eval_dir, tmp_path / "second", FakeStages(), reused=load_reused(source, prepare(eval_dir)))
     assert load_reused(second, prepare(eval_dir)).by_film["alpha"] == [moment()]
+
+
+def test_reusing_a_reused_report_keeps_the_commit_of_the_watcher_that_ran(eval_dir: Path, tmp_path: Path) -> None:
+    _, _, _, first = run_in(eval_dir, tmp_path / "first", FakeStages())
+    _, _, data, second = run_in(
+        eval_dir, tmp_path / "second", FakeStages(), reused=load_reused(first, prepare(eval_dir))
+    )
+    data["commit"], data["key_moments_commit"] = "later-commit", "watcher-commit"
+    (second / "summary.json").write_text(json.dumps(data), encoding="utf-8")
+
+    assert load_reused(second, prepare(eval_dir)).commit == "watcher-commit"
 
 
 def test_key_moments_are_found_after_the_runs_folder_moves(eval_dir: Path, tmp_path: Path) -> None:

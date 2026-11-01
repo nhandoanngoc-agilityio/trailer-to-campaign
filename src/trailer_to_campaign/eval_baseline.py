@@ -2,8 +2,8 @@
 
 `main`'s numbers don't change until an agent's prompt, tool or model changes on `main`, so a
 saved report can stand in for a new run. The hash covers every .py and .md file of the agents,
-their tools and the footage they watch, which holds the prompts, tool code and model names.
-Nothing else moves it: not a test, a doc or evals.py.
+their tools and the footage they watch, which holds the prompts, tool code and model names, and
+what those read and are priced by. Nothing else moves it: not a test, a doc or evals.py.
 
 It is built from each file's path and git blob id, so the same value comes from the files on
 disk and from a git ref. That is what lets a branch that changed a prompt still find `main`'s
@@ -17,12 +17,13 @@ import hashlib
 import json
 import logging
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
 PACKAGE = Path(__file__).parent
-AGENT_DIRS = ("agents", "tools", "footage")
+# catalog.py feeds the catalog and Spoiler List tools, config.py names the Whisper model, pricing.py sets the cost.
+AGENT_PATHS = ("agents", "tools", "footage", "catalog.py", "config.py", "pricing.py")
 AGENT_SUFFIXES = {".py", ".md"}
 MAIN_REFS = ("origin/main", "main")
 GIT_TIMEOUT_S = 10
@@ -43,8 +44,8 @@ def _combined(entries: Iterable[tuple[str, str]]) -> str:
 def agents_hash(package: Path = PACKAGE) -> str:
     """The hash of the agents as they are on disk."""
     entries = []
-    for name in AGENT_DIRS:
-        for path in (package / name).rglob("*"):
+    for name in AGENT_PATHS:
+        for path in [package / name, *(package / name).rglob("*")]:
             relative = path.relative_to(package).as_posix()
             if path.is_file() and _is_agent_file(relative):
                 data = path.read_bytes()
@@ -54,7 +55,7 @@ def agents_hash(package: Path = PACKAGE) -> str:
 
 def agents_hash_at(ref: str, package: Path = PACKAGE) -> str | None:
     """The same hash for a git ref, or None if git can't answer."""
-    listing = _git(["ls-tree", "-r", "-z", ref, "--", *AGENT_DIRS], package)
+    listing = _git(["ls-tree", "-r", "-z", ref, "--", *AGENT_PATHS], package)
     if listing is None:
         return None
     entries = []
@@ -86,18 +87,23 @@ def _git(args: list[str], cwd: Path) -> str | None:
     return done.stdout.strip("\n") if done.returncode == 0 else None
 
 
-def find_baseline(reports_dir: Path, wanted_hash: str, watcher: str) -> tuple[Path, dict[str, Any]] | None:
-    """The newest saved report that can stand for these agents, or None."""
+def baselines(reports_dir: Path, wanted_hash: str, watcher: str) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """The saved reports that can stand for these agents, newest first."""
     if not reports_dir.is_dir():
-        return None
+        return
     for path in sorted((p for p in reports_dir.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
         try:
             summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
-            if _stands_for(summary, wanted_hash, watcher):
-                return path, summary
+            stands = _stands_for(summary, wanted_hash, watcher)
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
             log.debug("passing over %s: %r", path, err)
-    return None
+            continue
+        if stands:
+            yield path, summary
+
+
+def find_baseline(reports_dir: Path, wanted_hash: str, watcher: str) -> tuple[Path, dict[str, Any]] | None:
+    return next(baselines(reports_dir, wanted_hash, watcher), None)
 
 
 def _stands_for(summary: dict[str, Any], wanted_hash: str, watcher: str) -> bool:

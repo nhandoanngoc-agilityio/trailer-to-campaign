@@ -82,8 +82,12 @@ A full run costs about $2. Pay only for what a change touches:
 | `t2c eval` | everything | $2.00 | the Watcher, or anything shared |
 | `t2c eval --baseline` | nothing: free, and needs no API key | $0 | finding the numbers to compare with |
 
-`--baseline` prints the newest saved report of `main`'s agents, or says a new run on `main` is needed. It compares a hash of `agents/`, `tools/` and `footage/`, so a branch that changed a prompt still finds `main`'s report. Only a whole, clean, full run on the same Watcher counts. It knows `main` as last fetched, so run `git fetch` first.
+`--baseline` prints the newest saved report of `main`'s agents, or says a new run on `main` is needed. It compares a hash of `agents/`, `tools/`, `footage/`, `catalog.py`, `config.py` and `pricing.py`, so a branch that changed a prompt still finds `main`'s report. Only a whole, clean, full run on the same Watcher counts. It knows `main` as last fetched, so run `git fetch` first.
+
+**Scoped runs compare only in part.** A `--only drafts` run has no input Traps, and its cost isn't a Baseline's, so run it on `main` too when cost matters. Compare a `--key-moments-from` run's cost with the Baseline's "Without the Watcher" line. Its Key Moments must come from a report of `main`: the report names the source and the commit, but nothing checks that.
 
 - **Reports live in each checkout's `runs/`.** From a worktree, use `--runs-dir ../other-checkout/runs`.
 - **Reports from before T20 have no hash,** so they never match.
-- **The hash doesn't cover the Eval Set itself or `evals.py`.** After a change to the Answer Key, a `film.toml` or the scoring, run `main` again.
+- **Two checkouts can have different Films,** because Song Lang is gitignored. `--baseline` warns when they differ: compare Film by Film, not the totals.
+- **The hash doesn't cover the Eval Set itself, `evals.py` or `T2C_WHISPER_MODEL`.** After a change to the Answer Key, a `film.toml` or the scoring, run `main` again. Run a Baseline with the default Whisper model.
+- **Uncommitted or untracked files under those folders give a run its own hash,** so it never matches `main`. Save a Baseline from a clean checkout.

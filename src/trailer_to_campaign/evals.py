@@ -48,7 +48,7 @@ from trailer_to_campaign.agents.social_posts import LANGUAGES, PLATFORM_LIMITS, 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
 from trailer_to_campaign.catalog import load_film
 from trailer_to_campaign.config import Settings
-from trailer_to_campaign.eval_baseline import agents_hash, current_commit, find_baseline, main_agents_hash
+from trailer_to_campaign.eval_baseline import agents_hash, baselines, current_commit, main_agents_hash
 from trailer_to_campaign.run_log import (
     EXIT_AGENT_FAILED,
     EXIT_FILM_BUDGET_REACHED,
@@ -349,7 +349,8 @@ def load_reused(report_dir: Path, films: list[EvalFilm]) -> ReusedKeyMoments:
             by_film[film.slug] = load_key_moments(runs.joinpath(*parts).with_name("key_moments.json"))
         except ValueError as err:
             raise ValueError(f"{film.slug}: no Key Moments to reuse from {report_dir}: {err}") from err
-    return ReusedKeyMoments(report_dir, summary.get("commit"), by_film)
+    # A reused report's own commit never ran a Watcher: keep the commit of the one that did.
+    return ReusedKeyMoments(report_dir, summary.get("key_moments_commit") or summary.get("commit"), by_film)
 
 
 def _save_key_moments(path: Path, moments: list[KeyMoment]) -> None:
@@ -485,6 +486,7 @@ def run_eval(
                     errors=[f"{type(err).__name__}: {err}"],
                     cost=meter.spent if meter else Decimal(0),
                     run_log=meter.run_log.path if meter else None,
+                    drafts_only=only_drafts,
                 )
             done[film.slug] = result  # first: it was paid for, whatever happens to its line
             _say(f"{film.slug:20} {_film_line(result)}", out)
@@ -701,30 +703,55 @@ def show_baseline(
     watcher: str,
     out: TextIO | None = None,
     main_hash: Callable[[], str | None] = main_agents_hash,
+    present: list[str] | None = None,
 ) -> int:
     """Print the newest saved report of `main`'s agents, or say a new run is needed. Free: no model is called.
 
-    Returns 0 if there is one to compare with, and 1 if not."""
+    present is the Films on this clone, to warn when the Baseline ran others. Returns 0 if there is one to
+    compare with, and 1 if not: without `main` to read, this checkout's own run must not pass for its numbers."""
     out = out or sys.stdout
-    wanted, whose = main_hash(), "main's agents"
+    wanted = main_hash()
     if wanted is None:
-        wanted, whose = agents_hash(), "this checkout's agents, as git could not read main"
-    reports = runs_dir / REPORTS
-    found = find_baseline(reports, wanted, watcher)
-    if found is None:
-        _say(
-            f"No whole report in {reports} matches {whose} on the {watcher} Watcher: a new run on main is needed.", out
-        )
+        _say("git could not read main (origin/main or main), so there is nothing to compare with.", out)
         return EXIT_AGENT_FAILED
-    path, summary = found
+    reports = runs_dir / REPORTS
+    for path, summary in baselines(reports, wanted, watcher):
+        try:
+            lines = _baseline_lines(path, summary, present)
+        except (KeyError, TypeError, ValueError, AttributeError, ArithmeticError) as err:
+            log.debug("passing over %s: %r", path, err)  # an older shape, or a hand-trimmed report
+            continue
+        for line in lines:
+            _say(line, out)
+        return 0
+    _say(
+        f"No whole report in {reports} matches main's agents on the {watcher} Watcher: a new run on main is needed. "
+        "A run with uncommitted or untracked files under the agents' folders has a hash of its own and never matches.",
+        out,
+    )
+    return EXIT_AGENT_FAILED
+
+
+def _baseline_lines(path: Path, summary: dict[str, Any], present: list[str] | None) -> list[str]:
     commit = (summary.get("commit") or "unknown")[:7]
-    _say(f"Baseline for {whose}: {path} (commit {commit}, run at {summary['at']})", out)
-    for film in summary["films"]:
-        if film["stop"] != "skipped":
-            _say(f"{film['film']:20} ${Decimal(film['cost_usd']):.4f}", out)
-    for line in _totals_lines(summary):
-        _say(line, out)
-    return 0
+    lines = [f"Baseline for main's agents: {path} (commit {commit}, run at {summary['at']})"]
+    ran = [film for film in summary["films"] if film["stop"] != "skipped"]
+    for film in ran:
+        planted = film["planted"]
+        lines.append(
+            f"{film['film']:20} ${Decimal(film['cost_usd']):.4f}  Planted Drafts {planted['caught']}/{planted['total']}"
+        )
+    lines += _totals_lines(summary)
+    t = summary["totals"]
+    without_watcher = Decimal(t["cost_usd"]) - Decimal(t["watcher"]["cost_usd"])
+    lines.append(f"Without the Watcher: ${without_watcher:.4f}, to compare with a --key-moments-from run")
+    names = {film["film"] for film in ran}
+    if present is not None and names != set(present):
+        lines.append(
+            f"Films differ: this Baseline ran {', '.join(sorted(names))}; this clone has {', '.join(sorted(present))}. "
+            "Compare Film by Film, not the totals."
+        )
+    return lines
 
 
 def _report_dir(runs_dir: Path) -> Path:

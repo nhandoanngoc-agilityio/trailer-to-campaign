@@ -741,10 +741,27 @@ def test_eval_only_accepts_drafts(tmp_path: Path, capsys: pytest.CaptureFixture[
 
 
 def test_eval_baseline_is_free_and_needs_no_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    code = main(["eval", "--baseline", "--runs-dir", str(tmp_path / "runs")], env={})
-    assert code == 1  # nothing saved yet
+    argv = ["eval", "--baseline", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={}) == 1  # nothing saved yet
     assert "new run on main" in capsys.readouterr().out
     assert not (tmp_path / "runs").exists()  # looking writes nothing
+
+
+def test_eval_baseline_compares_with_the_films_on_this_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from trailer_to_campaign import evals
+
+    seen: list[Any] = []
+    monkeypatch.setattr(evals, "show_baseline", lambda *args, **kwargs: seen.append(kwargs) or 0)
+    argv = ["eval", "--baseline", "--eval-dir", str(an_eval_set(tmp_path)), "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env={}) == 0
+    assert seen[0]["present"] == ["alpha"]  # song-lang is in the Eval Set but not on this clone
+
+
+def test_eval_baseline_refuses_a_bad_eval_set(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    eval_dir = an_eval_set(tmp_path)
+    (eval_dir / "expected" / "alpha.toml").write_text("[[planted_drafts]]\nid = 1\n", encoding="utf-8")
+    assert main(["eval", "--baseline", "--eval-dir", str(eval_dir)], env={}) == 2
+    assert "alpha.toml" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("flag", "expected"), [([], None), (["--parallel", "2"], 2)])

@@ -2,13 +2,12 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    # Once per PR, not on every push: /code-review runs locally too, and a re-review costs usage.
+    # To review later commits, comment `@claude` on the PR (claude.yml).
+    types: [opened, ready_for_review, reopened]
+    # Only docs/, not every *.md: the agents' prompts are Markdown files and must still be reviewed.
+    paths-ignore:
+      - "docs/**"
 
 jobs:
   claude-review:

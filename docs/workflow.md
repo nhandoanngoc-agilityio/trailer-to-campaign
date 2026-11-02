@@ -35,7 +35,7 @@ Instructions in `CLAUDE.md` guide Claude; these make the important ones determin
 | A prompt change runs the Eval Set | `prompt_changed.py` reminds Claude after any edit under `prompts/` |
 | Code is formatted the same way | `format_on_edit.py` runs ruff on every Python edit; CI checks it |
 | Security issues specific to this product get caught | Security plugins + `.claude/claude-security-guidance.md` |
-| Every PR is tested and reviewed | `ci.yml` (lint, tests, hook tests), `claude-code-review.yml` |
+| Every PR is tested, and reviewed once when it opens unless it only changes `docs/` (`@claude` re-reviews) | `ci.yml` (lint, tests, hook tests), `claude-code-review.yml` |
 | You know when Claude is waiting | `notify_on_finish.py` desktop notification |
 
 The hooks have their own tests (`tests/test_hooks.py`), so a guardrail can't silently stop working.

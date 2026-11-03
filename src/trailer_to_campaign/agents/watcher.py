@@ -170,6 +170,7 @@ def _remember(watching: _Watching, name: str, arguments: dict[str, Any], result:
         data = json.loads(result.content[0]["text"])
         if name == "watch_footage":
             watching.footage = data
+            watching.gate.meter.event("footage_read", source=watching.source, footage_id=data["footage_id"])
         else:
             watching.cast = [CastMember(c["character"], c.get("name")) for c in data["cast"]]
 

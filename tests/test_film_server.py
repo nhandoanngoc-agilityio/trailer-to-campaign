@@ -42,6 +42,18 @@ async def test_the_catalog_server_offers_only_the_catalog() -> None:
     assert set(await tools_of(create_catalog_server(FILMS))) == {"get_catalog"}
 
 
+async def test_get_catalog_leaves_out_a_local_trailer_file(tmp_path: Path) -> None:
+    folder = tmp_path / "agent-327"
+    folder.mkdir()
+    toml = (FILMS / "agent-327" / "film.toml").read_text(encoding="utf-8")
+    (folder / "film.toml").write_text(
+        toml.replace('trailer = "', 'trailer_file = "cut.mp4"\ntrailer = "', 1), encoding="utf-8"
+    )
+    catalog = body(await call(create_catalog_server(tmp_path), "get_catalog", film="agent-327"))
+    assert catalog["trailer"].startswith("https://")
+    assert "trailer_file" not in catalog
+
+
 async def test_the_spoilers_server_offers_only_the_spoiler_list() -> None:
     assert set(await tools_of(create_spoiler_server(FILMS))) == {"get_spoiler_list"}
 

@@ -275,6 +275,50 @@ def test_watch_needs_a_trailer(
     assert fake.calls == []
 
 
+def film_with_local_trailer(tmp_path: Path, file_exists: bool = True) -> dict[str, str]:
+    film = tmp_path / "films" / "agent-327"
+    (film / "source").mkdir(parents=True)
+    toml = (FILMS / "agent-327" / "film.toml").read_text()
+    (film / "film.toml").write_text(toml.replace('trailer = "', 'trailer_file = "cut.mp4"\ntrailer = "', 1))
+    if file_exists:
+        (film / "source" / "cut.mp4").write_bytes(b"fake video")
+    return {**KEY_ENV, "T2C_FILMS_DIR": str(tmp_path / "films")}
+
+
+def test_watch_defaults_to_the_films_local_trailer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeWatcher(monkeypatch)
+    env = film_with_local_trailer(tmp_path)
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")], env=env) == 0
+    assert fake.calls[0]["source"] == "cut.mp4"
+
+
+def test_source_overrides_the_films_local_trailer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeWatcher(monkeypatch)
+    env = film_with_local_trailer(tmp_path)
+    argv = ["watch", "--film", "agent-327", "--source", "other.mp4", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env=env) == 0
+    assert fake.calls[0]["source"] == "other.mp4"
+
+
+def test_a_missing_local_trailer_stops_before_any_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeWatcher(monkeypatch)
+    env = film_with_local_trailer(tmp_path, file_exists=False)
+    assert main(["watch", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")], env=env) == 2
+    assert "cut.mp4" in capsys.readouterr().err
+    assert fake.calls == []
+    assert not (tmp_path / "runs").exists()
+
+
+def test_run_defaults_to_the_films_local_trailer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline(monkeypatch)
+    env = film_with_local_trailer(tmp_path)
+    assert main(["run", "--film", "agent-327", "--runs-dir", str(tmp_path / "runs")], env=env) == 0
+    _, _, source, _ = fake.calls[0]["stages"]
+    assert source == "cut.mp4"
+
+
 def test_the_watchers_client_never_retries_a_call_on_its_own() -> None:
     from trailer_to_campaign.cli import make_client
 

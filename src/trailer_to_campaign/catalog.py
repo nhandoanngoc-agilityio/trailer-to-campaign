@@ -14,13 +14,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from trailer_to_campaign.footage.sources import SourceRejected, check_url
+from trailer_to_campaign.footage.sources import SourceRejected, check_name, check_url, source_dir
 from trailer_to_campaign.run_log import check_film_slug
 
 MAX_FILE_BYTES = 64 * 1024
 MAX_TEXT_CHARS = 2000  # a synopsis or spoiler, not a pasted document
 LANGUAGE_TAG = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")  # en, vi, pt-BR, zh-Hant
 SPOILER_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+TRAILER_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]*")  # a plain name: no folder, no link, no line break
 
 
 class FilmFileError(ValueError):
@@ -56,6 +57,8 @@ class Film:
     slug: str
     catalog: Catalog
     spoilers: list[Spoiler] = field(default_factory=list)
+    # A local copy of the public trailer, in source/. Kept off Catalog so it never reaches an agent as Catalog Metadata.
+    trailer_file: str | None = None
 
 
 def film_file(films_dir: Path, film: str) -> Path:
@@ -79,7 +82,11 @@ def load_film(films_dir: Path, film: str) -> Film:
 
     _only(data, {"catalog", "spoilers"}, "film.toml")
     catalog = _table(data, "catalog", "film.toml")
-    _only(catalog, {"title", "synopsis", "genre", "language", "runtime_minutes", "cast", "trailer"}, "[catalog]")
+    _only(
+        catalog,
+        {"title", "synopsis", "genre", "language", "runtime_minutes", "cast", "trailer", "trailer_file"},
+        "[catalog]",
+    )
 
     language = _text(catalog, "language", "[catalog]")
     if not LANGUAGE_TAG.fullmatch(language):
@@ -111,7 +118,36 @@ def load_film(films_dir: Path, film: str) -> Film:
             trailer=trailer,
         ),
         spoilers=_spoilers(data),
+        trailer_file=_trailer_file(catalog, trailer),
     )
+
+
+def default_source(film: Film, films_dir: Path) -> str | None:
+    """The trailer a Run reads when nobody names one: the Film's local copy, else its public link.
+
+    Checked here so that a missing file refuses the request before any Run starts. Its message
+    may reach Slack, so it names the file and never the folder.
+    """
+    if film.trailer_file is None:
+        return film.catalog.trailer
+    if not (source_dir(films_dir, film.slug) / film.trailer_file).is_file():
+        raise FilmFileError(f"its trailer_file {film.trailer_file!r} isn't in the Film's source folder")
+    return film.trailer_file
+
+
+def _trailer_file(catalog: dict[str, Any], trailer: str | None) -> str | None:
+    name = _text(catalog, "trailer_file", "[catalog]", required=False)
+    if name is None:
+        return None
+    if trailer is None:  # slice 1 takes public trailers only (ADR 0005), so the link must exist too
+        raise FilmFileError("[catalog] trailer_file needs the public trailer link beside it, as trailer")
+    if not TRAILER_FILE.fullmatch(name) or ".." in name:
+        raise FilmFileError(f"[catalog] trailer_file must be a plain file name in the source folder, got {name!r}")
+    try:
+        check_name(name)
+    except SourceRejected as err:
+        raise FilmFileError(f"[catalog] trailer_file: {err}") from err
+    return name
 
 
 def _cast(catalog: dict[str, Any]) -> list[CastMember]:

@@ -117,6 +117,11 @@ def tool_gate(watching: _Watching, mcp: McpTools) -> Callable[[str, dict[str, An
         result = await mcp.call(name, arguments)
         if not result.is_error:
             _remember(watching, name, arguments, result)
+        if name == "watch_footage":
+            footage_id = None if result.is_error or watching.footage is None else watching.footage.get("footage_id")
+            watching.gate.meter.event(
+                "footage_read", agent="watcher", source=watching.source, footage_id=footage_id, is_error=result.is_error
+            )
         return result
 
     return call_tool
@@ -170,7 +175,6 @@ def _remember(watching: _Watching, name: str, arguments: dict[str, Any], result:
         data = json.loads(result.content[0]["text"])
         if name == "watch_footage":
             watching.footage = data
-            watching.gate.meter.event("footage_read", source=watching.source, footage_id=data["footage_id"])
         else:
             watching.cast = [CastMember(c["character"], c.get("name")) for c in data["cast"]]
 

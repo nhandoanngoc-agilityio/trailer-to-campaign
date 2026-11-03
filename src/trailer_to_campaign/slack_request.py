@@ -78,7 +78,7 @@ def _catalog_trailer(film: Film, films_dir: Path, usage: str) -> RunRequest | Re
     try:
         source = default_source(film, films_dir)
     except ValueError as err:  # FilmFileError: its messages name the Film, never the path
-        return Refusal(f"{film.slug} can't run yet: {err}.")
+        return Refusal(f"{err}.")
     if not source:
         return Refusal(f"{film.slug} has no trailer link in its catalog. Add one to your message. {usage}")
     return RunRequest(film.slug, source)

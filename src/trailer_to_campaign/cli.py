@@ -11,8 +11,8 @@ Copywriter and the Checker, then the Approval of the Social Posts, in this
 terminal, under one Film Budget and one Run Log.
 dummy-run sends fake model calls through the Film Budget meter, so the hard
 stop and the run log can be checked without an API key or any spend.
-watch runs the Watcher on a Film's trailer (the catalog's link unless --source
-names one) and writes its Key Moments next to the Run Log. write runs the
+watch runs the Watcher on a Film's trailer (its trailer_file, else the catalog's
+link, unless --source names one) and writes its Key Moments next to the Run Log. write runs the
 Copywriter and the Checker on those Key Moments and writes the Social Posts the
 same way: no post leaves it unchecked. watch and write are single stages, each a
 Run of its own, for trying one agent; run is the Run a marketer uses.
@@ -99,13 +99,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser("run", help="one Run for a Film: watch, approve, write and check, approve")
     run.add_argument("--film", type=_film_arg, required=True)
-    run.add_argument("--source", help="a file in films/<film>/source/ or a trailer link (default: the catalog's)")
+    run.add_argument(
+        "--source",
+        help="a file in films/<film>/source/ or a trailer link (default: trailer_file, else the catalog's link)",
+    )
     run.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     run.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
 
     watch = commands.add_parser("watch", help="run the Watcher on a Film's trailer and write its Key Moments")
     watch.add_argument("--film", type=_film_arg, required=True)
-    watch.add_argument("--source", help="a file in films/<film>/source/ or a trailer link (default: the catalog's)")
+    watch.add_argument(
+        "--source",
+        help="a file in films/<film>/source/ or a trailer link (default: trailer_file, else the catalog's link)",
+    )
     watch.add_argument("--budget", type=_budget_arg, help="Film Budget in USD (default: FILM_BUDGET_USD or 2.00)")
     watch.add_argument("--runs-dir", type=Path, help="where run logs go (default: runs/)")
 

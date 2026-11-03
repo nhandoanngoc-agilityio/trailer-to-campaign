@@ -14,14 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from trailer_to_campaign.footage.sources import SourceRejected, check_name, check_url, source_dir
+from trailer_to_campaign.footage.sources import SourceRejected, check_name, check_url, local_trailer
 from trailer_to_campaign.run_log import check_film_slug
 
 MAX_FILE_BYTES = 64 * 1024
 MAX_TEXT_CHARS = 2000  # a synopsis or spoiler, not a pasted document
 LANGUAGE_TAG = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")  # en, vi, pt-BR, zh-Hant
 SPOILER_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-TRAILER_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]*")  # a plain name: no folder, no link, no line break
+# It reaches the Watcher's task prompt: no folder, no link, and nothing that reads as a sentence.
+TRAILER_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 
 
 class FilmFileError(ValueError):
@@ -130,8 +131,13 @@ def default_source(film: Film, films_dir: Path) -> str | None:
     """
     if film.trailer_file is None:
         return film.catalog.trailer
-    if not (source_dir(films_dir, film.slug) / film.trailer_file).is_file():
-        raise FilmFileError(f"its trailer_file {film.trailer_file!r} isn't in the Film's source folder")
+    try:
+        local_trailer(films_dir, film.slug, film.trailer_file)
+    except (SourceRejected, OSError) as err:  # never pass these messages on: they can hold the local path
+        raise FilmFileError(
+            f"{film.slug} can't read its trailer_file {film.trailer_file!r}: it is missing from the Film's source "
+            "folder, too large, or a link to somewhere else. Put the trailer there, or name another trailer"
+        ) from err
     return film.trailer_file
 
 
@@ -142,7 +148,10 @@ def _trailer_file(catalog: dict[str, Any], trailer: str | None) -> str | None:
     if trailer is None:  # slice 1 takes public trailers only (ADR 0005), so the link must exist too
         raise FilmFileError("[catalog] trailer_file needs the public trailer link beside it, as trailer")
     if not TRAILER_FILE.fullmatch(name) or ".." in name:
-        raise FilmFileError(f"[catalog] trailer_file must be a plain file name in the source folder, got {name!r}")
+        raise FilmFileError(
+            "[catalog] trailer_file must be a plain file name in the source folder: at most 120 letters, digits, "
+            f"dots, hyphens and underscores, starting with a letter or digit. Rename the file; got {name!r}"
+        )
     try:
         check_name(name)
     except SourceRejected as err:

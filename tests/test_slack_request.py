@@ -124,3 +124,15 @@ def test_a_missing_local_trailer_starts_no_run_and_names_no_path(with_file: Path
     assert isinstance(result, Refusal)
     assert "cut.mp4" in result.reason
     assert str(with_file) not in result.reason
+
+
+def test_a_symlinked_local_trailer_starts_no_run(with_file: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "full-film.mp4"
+    outside.write_bytes(b"the full film")
+    trailer = with_file / "city-film" / "source" / "cut.mp4"
+    trailer.unlink()
+    trailer.symlink_to(outside)
+    result = parse_request("<@U0BOT> city-film", with_file)
+    assert isinstance(result, Refusal)
+    assert "city-film" in result.reason
+    assert str(tmp_path) not in result.reason

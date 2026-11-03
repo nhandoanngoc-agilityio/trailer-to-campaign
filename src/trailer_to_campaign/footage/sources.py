@@ -73,13 +73,19 @@ def resolve_source(film: str, source: str, kind: str | None, films_dir: Path, do
     check_kind(kind)
     check_name(source)
     dest = source_dir(films_dir, film)
-    if "://" in source:
-        check_url(source)
-        path = downloader(source, dest)
-        check_name(path.name)
-    else:
-        path = _local(dest, source)
-        check_name(path.name)  # a symlink in source/ must not hide a screener's real name
+    if "://" not in source:
+        return local_trailer(films_dir, film, source)
+    check_url(source)
+    path = downloader(source, dest)
+    check_name(path.name)
+    check_size(path)
+    return path
+
+
+def local_trailer(films_dir: Path, film: str, source: str) -> Path:
+    """A trailer in the Film's source folder, or why it can't be read. Its messages may hold local paths."""
+    path = _local(source_dir(films_dir, film), source)
+    check_name(path.name)  # a symlink in source/ must not hide a screener's real name
     check_size(path)
     return path
 

@@ -292,12 +292,27 @@ def test_watch_defaults_to_the_films_local_trailer(tmp_path: Path, monkeypatch: 
     assert fake.calls[0]["source"] == "cut.mp4"
 
 
-def test_source_overrides_the_films_local_trailer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_source_overrides_the_films_local_trailer_for_watch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeWatcher(monkeypatch)
     env = film_with_local_trailer(tmp_path)
     argv = ["watch", "--film", "agent-327", "--source", "other.mp4", "--runs-dir", str(tmp_path / "runs")]
     assert main(argv, env=env) == 0
     assert fake.calls[0]["source"] == "other.mp4"
+
+
+def test_source_overrides_the_films_local_trailer_for_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakePipeline(monkeypatch)
+    env = film_with_local_trailer(tmp_path)
+    argv = ["run", "--film", "agent-327", "--source", "other.mp4", "--runs-dir", str(tmp_path / "runs")]
+    assert main(argv, env=env) == 0
+    _, _, source, _ = fake.calls[0]["stages"]
+    assert source == "other.mp4"
+
+
+def test_the_help_says_a_film_can_have_a_local_trailer(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["watch", "--help"])
+    assert "trailer_file" in capsys.readouterr().out
 
 
 def test_a_missing_local_trailer_stops_before_any_run(

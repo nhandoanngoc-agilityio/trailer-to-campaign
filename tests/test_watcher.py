@@ -185,8 +185,22 @@ async def test_the_run_log_records_which_trailer_the_watcher_read(films: Path, t
     run = Run(films, tmp_path)
     _, fake = await run.watch([look, see_every_frame, submit()])
     [read] = run.events("footage_read")
+    assert read["agent"] == "watcher"
     assert read["source"] == "trailer.mp4"
     assert read["footage_id"] == footage_of(fake.requests[-1])["footage_id"]
+    assert read["is_error"] is False
+
+
+async def test_the_run_log_records_a_trailer_the_watcher_could_not_read(films: Path, tmp_path: Path) -> None:
+    missing = lambda params: reply(use("watch_footage", film="sample", source="missing.mp4", kind="trailer"))  # noqa: E731
+    chat = lambda params: reply({"type": "text", "text": "Still thinking."}, stop="end_turn")  # noqa: E731
+    run = Run(films, tmp_path)
+    with pytest.raises(AgentFailed):
+        await run.watch([missing, *[chat] * (MAX_TURNS - 1)], source="missing.mp4")
+    [read] = run.events("footage_read")
+    assert read["source"] == "missing.mp4"
+    assert read["footage_id"] is None
+    assert read["is_error"] is True
 
 
 async def test_frames_reach_the_model_as_images_and_history_is_resent_unchanged(films: Path, tmp_path: Path) -> None:

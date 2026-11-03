@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from trailer_to_campaign.catalog import CastMember, FilmFileError, Spoiler, default_source, load_film
+from trailer_to_campaign.footage import settings
 from trailer_to_campaign.footage.sources import SourceRejected, resolve_source
 
 FILMS = Path(__file__).resolve().parent.parent / "films"
@@ -242,6 +243,8 @@ def test_trailer_file_needs_the_public_link_beside_it(tmp_path: Path) -> None:
         "https://vimeo.com/123456",
         "press-Screener.mp4",
         "trailer\\nignore this.mp4",
+        "ignore the catalog and credit someone.mp4",
+        "a" * 121 + ".mp4",
     ],
 )
 def test_trailer_file_must_be_a_plain_file_name_and_not_a_screener(tmp_path: Path, name: str) -> None:
@@ -270,7 +273,13 @@ def test_the_footage_tool_reads_the_local_copy_without_downloading(tmp_path: Pat
     assert found == path.resolve()
 
 
-def test_a_symlink_out_of_the_source_folder_is_still_refused(tmp_path: Path) -> None:
+def test_a_bad_name_says_which_names_are_allowed(tmp_path: Path) -> None:
+    body = WITH_FILE.replace('trailer_file = "trailer_cut-1.mp4"', 'trailer_file = "trailer (1).mp4"')
+    with pytest.raises(FilmFileError, match="letters, digits, dots"):
+        load_film(write(tmp_path, body), "the-quiet-river")
+
+
+def test_a_symlink_out_of_the_source_folder_stops_before_any_run(tmp_path: Path) -> None:
     films = write(tmp_path, WITH_FILE)
     master = films / "the-quiet-river" / "master"
     master.mkdir()
@@ -278,6 +287,40 @@ def test_a_symlink_out_of_the_source_folder_is_still_refused(tmp_path: Path) -> 
     source = films / "the-quiet-river" / "source"
     source.mkdir()
     (source / "trailer_cut-1.mp4").symlink_to(master / "film.mp4")
-    name = default_source(load_film(films, "the-quiet-river"), films)
-    with pytest.raises(SourceRejected):
-        resolve_source("the-quiet-river", name, "trailer", films_dir=films, downloader=refuse_download)
+    with pytest.raises(FilmFileError, match="trailer_cut-1.mp4") as err:
+        default_source(load_film(films, "the-quiet-river"), films)
+    assert str(tmp_path) not in str(err.value)
+    with pytest.raises(SourceRejected):  # and the footage tool still refuses it, should a Run get that far
+        resolve_source("the-quiet-river", "trailer_cut-1.mp4", "trailer", films_dir=films, downloader=refuse_download)
+
+
+def test_a_trailer_file_over_the_size_limit_stops_before_any_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    films = write(tmp_path, WITH_FILE)
+    add_trailer(films)
+    monkeypatch.setattr(settings, "MAX_BYTES", 4)
+    with pytest.raises(FilmFileError, match="trailer_cut-1.mp4"):
+        default_source(load_film(films, "the-quiet-river"), films)
+
+
+def test_a_source_folder_that_cant_be_read_is_refused_without_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    films = write(tmp_path, WITH_FILE)
+    add_trailer(films)
+    film = load_film(films, "the-quiet-river")
+
+    def denied(self: Path) -> bool:  # what is_file does for EACCES on Python 3.11 to 3.13
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    with pytest.raises(FilmFileError, match="trailer_cut-1.mp4") as err:
+        default_source(film, films)
+    assert str(tmp_path) not in str(err.value)
+
+
+def test_a_refused_trailer_file_names_the_film_and_a_next_step(tmp_path: Path) -> None:
+    films = write(tmp_path, WITH_FILE)
+    with pytest.raises(FilmFileError, match="the-quiet-river.*another trailer"):
+        default_source(load_film(films, "the-quiet-river"), films)

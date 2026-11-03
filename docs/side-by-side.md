@@ -16,6 +16,7 @@ The Side-by-Side Trial: one upcoming Film is prepared twice, so Time Saved, Appr
    - The catalog facts come from the platform, and the Film's team writes the Spoiler List.
    - Both, with the trailer link, become `films/<film>/film.toml` (see `films/README.md` and `films/agent-327/film.toml`).
    - That folder is gitignored, because the Spoiler List is unreleased plot.
+   - If the app's machine can't fetch the link, put the same public cut in `films/<film>/source/` and name it as `trailer_file` beside the `trailer` link, then re-check the cut's length. Never the full Film, if that isn't public (ADR 0005).
    - Neither marketer times this work: it is the same input on both sides.
 3. **Choose the two marketers.**
    - A is whoever normally writes launch posts, so the baseline is real.

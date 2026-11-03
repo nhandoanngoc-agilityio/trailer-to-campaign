@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from trailer_to_campaign.budget import FilmBudgetReached, FilmMeter
-from trailer_to_campaign.catalog import load_film
+from trailer_to_campaign.catalog import default_source, load_film
 from trailer_to_campaign.config import (
     WATCHERS,
     MissingApiKey,
@@ -255,7 +255,7 @@ def _key_and_trailer(film: str, source: str | None, settings: Settings) -> tuple
     """The API key and the trailer to watch, checked before any Run starts; None after saying what's wrong."""
     try:
         api_key = settings.require_api_key()
-        source = source or load_film(settings.films_dir, film).catalog.trailer
+        source = source or default_source(load_film(settings.films_dir, film), settings.films_dir)
     except (MissingApiKey, ValueError) as err:  # ValueError: a bad or missing film.toml
         print(err, file=sys.stderr)
         return None

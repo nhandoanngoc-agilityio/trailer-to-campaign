@@ -81,3 +81,46 @@ def test_no_run_starts_without_one_film_one_trailer_and_its_spoiler_list(films: 
     assert isinstance(result, Refusal)
     assert says in result.reason
     assert str(films) not in result.reason  # replies go to Slack: never a local path
+
+
+# --- trailer_file: a local copy of the public trailer (T23) --------------------
+
+
+@pytest.fixture
+def with_file(tmp_path: Path) -> Path:
+    films = tmp_path / "films"
+    write_film(films, "city-film")
+    toml = films / "city-film" / "film.toml"
+    link = f'trailer = "{TRAILER}"'
+    toml.write_text(
+        toml.read_text(encoding="utf-8").replace(link, f'{link}\ntrailer_file = "cut.mp4"'), encoding="utf-8"
+    )
+    (films / "city-film" / "source").mkdir()
+    (films / "city-film" / "source" / "cut.mp4").write_bytes(b"fake video")
+    return films
+
+
+def test_a_slug_runs_the_films_local_trailer(with_file: Path) -> None:
+    assert parse_request("<@U0BOT> city-film", with_file) == RunRequest("city-film", "cut.mp4")
+
+
+def test_the_catalogs_own_link_with_the_slug_uses_the_local_trailer(with_file: Path) -> None:
+    assert parse_request(f"<@U0BOT> city-film <{TRAILER}>", with_file) == RunRequest("city-film", "cut.mp4")
+
+
+def test_the_catalogs_own_link_alone_uses_the_local_trailer(with_file: Path) -> None:
+    assert parse_request(f"<@U0BOT> <{TRAILER}|the trailer>", with_file) == RunRequest("city-film", "cut.mp4")
+
+
+def test_a_different_link_still_wins_over_the_local_trailer(with_file: Path) -> None:
+    other = "https://vimeo.com/999"
+    assert parse_request(f"<@U0BOT> city-film <{other}>", with_file) == RunRequest("city-film", other)
+
+
+@pytest.mark.parametrize("text", ["<@U0BOT> city-film", f"<@U0BOT> <{TRAILER}>"])
+def test_a_missing_local_trailer_starts_no_run_and_names_no_path(with_file: Path, text: str) -> None:
+    (with_file / "city-film" / "source" / "cut.mp4").unlink()
+    result = parse_request(text, with_file)
+    assert isinstance(result, Refusal)
+    assert "cut.mp4" in result.reason
+    assert str(with_file) not in result.reason

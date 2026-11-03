@@ -878,3 +878,12 @@ async def test_the_real_checker_stage_reads_the_eval_sets_own_spoiler_list(eval_
     post = SocialPost("facebook", "en", "The sprites were the heroes all along.", [])
     [verdict] = await stages.check([post], meter)
     assert verdict.problems[0].spoiler_id == "the-twist"
+
+
+def test_an_eval_set_film_keeps_its_link_even_with_a_local_trailer(eval_dir: Path) -> None:
+    toml = eval_dir / "films" / "alpha" / "film.toml"
+    text = toml.read_text(encoding="utf-8")
+    assert 'trailer = "https://' in text
+    toml.write_text(text.replace('trailer = "', 'trailer_file = "cut.mp4"\ntrailer = "', 1), encoding="utf-8")
+    alpha = prepare(eval_dir)[0]
+    assert alpha.slug == "alpha" and alpha.trailer.startswith("https://")

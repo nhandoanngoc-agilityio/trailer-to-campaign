@@ -181,6 +181,14 @@ async def test_the_watcher_returns_grounded_key_moments(films: Path, tmp_path: P
     assert run.downloads.urls == []
 
 
+async def test_the_run_log_records_which_trailer_the_watcher_read(films: Path, tmp_path: Path) -> None:
+    run = Run(films, tmp_path)
+    _, fake = await run.watch([look, see_every_frame, submit()])
+    [read] = run.events("footage_read")
+    assert read["source"] == "trailer.mp4"
+    assert read["footage_id"] == footage_of(fake.requests[-1])["footage_id"]
+
+
 async def test_frames_reach_the_model_as_images_and_history_is_resent_unchanged(films: Path, tmp_path: Path) -> None:
     run = Run(films, tmp_path)
     _, fake = await run.watch([look, see_every_frame, submit()])

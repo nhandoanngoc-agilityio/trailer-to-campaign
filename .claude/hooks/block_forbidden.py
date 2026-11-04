@@ -46,7 +46,6 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import subprocess
 import sys
 
@@ -60,7 +59,8 @@ ANSWER_KEY_REASON = (
     "the Answer Key (evals/expected/) is human-owned: change the code or the prompt, never the expected answers"
 )
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
-OPERATOR_CHARS = ";&|<>()\n"  # split off as their own tokens, as a shell does, unless quoted
+# Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
+OPERATOR = re.compile(r"&>>|<<<|>>|>\||>&|&>|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
 REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
@@ -97,36 +97,60 @@ class Op(str):
 
 
 def tokenize(command: str) -> list[str]:
-    """The command's words, with its unquoted operators as Op tokens.
+    """The command's words, with its unquoted operators as Op tokens, read by a shell's quoting rules.
 
-    Lexed twice, with and without quote removal: only the second shows which `>` was quoted.
+    shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
+    operator (T24). Quotes left open run to the end of the command, which only hides text the
+    shell wouldn't run either.
     """
+    tokens: list[str] = []
+    word: str | None = None  # None between words: '' is an empty argument, and a word of its own
+    i, end = 0, len(command)
 
-    def lex(posix: bool) -> list[str]:
-        lexer = shlex.shlex(command, posix=posix, punctuation_chars=OPERATOR_CHARS)
-        lexer.whitespace = " \t\r"  # a newline separates commands; it is not a space
-        lexer.whitespace_split = True
-        return list(lexer)
+    def finish_word() -> None:
+        nonlocal word
+        if word is not None:
+            tokens.append(word)
+        word = None
 
-    try:
-        words, raw = lex(True), lex(False)
-    except ValueError:  # shlex can't read the quotes, though a shell may ("\""): split at every operator, by text
-        rough = re.findall(r"[;&|<>()\n]+|[^\s;&|<>()]+", command)
-        return [Op(t) if set(t) <= set(OPERATOR_CHARS) else re.sub(r"[\"'\\]", "", t) for t in rough]
-    if len(raw) != len(words):  # the two lexings don't line up (escapes): judge by text
-        raw = words
-    return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw)]
-
-
-def split_parens(tokens: list[str]) -> list[str]:
-    """Parentheses apart from the operators they touch: `)>` is a group's end and a redirect, not one operator."""
-    split: list[str] = []
-    for tok in tokens:
-        if isinstance(tok, Op):
-            split.extend(Op(part) for part in re.findall(r"[()]|[^()]+", tok))
+    while i < end:
+        char = command[i]
+        operator = OPERATOR.match(command, i)
+        if char in " \t\r":
+            finish_word()
+            i += 1
+        elif char == "#" and word is None:  # a comment runs to the end of the line
+            newline = command.find("\n", i)
+            i = end if newline == -1 else newline
+        elif char == "'":  # nothing is special inside single quotes
+            closing = command.find("'", i + 1)
+            closing = end if closing == -1 else closing
+            word = (word or "") + command[i + 1 : closing]
+            i = closing + 1
+        elif char == '"':  # a backslash only escapes these inside double quotes
+            word = word or ""
+            i += 1
+            while i < end and command[i] != '"':
+                if command[i] == "\\" and i + 1 < end and command[i + 1] in '$`"\\\n':
+                    word += "" if command[i + 1] == "\n" else command[i + 1]
+                    i += 2
+                else:
+                    word += command[i]
+                    i += 1
+            i += 1
+        elif char == "\\":
+            if i + 1 < end and command[i + 1] != "\n":  # backslash-newline joins two lines
+                word = (word or "") + command[i + 1]
+            i += 2
+        elif operator:
+            finish_word()
+            tokens.append(Op(operator.group()))
+            i = operator.end()
         else:
-            split.append(tok)
-    return split
+            word = (word or "") + char
+            i += 1
+    finish_word()
+    return tokens
 
 
 def split_segments(command: str) -> list[list[str]]:
@@ -136,7 +160,7 @@ def split_segments(command: str) -> list[list[str]]:
     `grep ">" f` is not, a newline separates commands, and `( )` group without hiding them.
     """
     segments, current = [], []
-    for tok in split_parens(tokenize(drop_heredoc_bodies(command))):
+    for tok in tokenize(drop_heredoc_bodies(command)):
         # '' is an empty argument, not a separator; > >> &> >| are redirects, kept with their command
         if isinstance(tok, Op) and set(tok) <= SEPARATOR_CHARS:
             if current:

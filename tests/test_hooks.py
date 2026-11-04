@@ -272,12 +272,33 @@ def test_a_payload_with_no_command_blocks(payload: str) -> None:
         '(echo "\\"")>evals/expected/x.toml',  # ")>" is a separator and a redirect, not one operator
         "(echo hi)>evals/expected/x.toml",  # the same, where shlex can read it
         "(echo hi)>>evals/expected/x.toml",
+        'bash -c "git reset --hard"; echo "\\""',  # a quoted -c payload stays one word (security review)
+        "cat <(git reset --hard)",
+        "echo >(git reset --hard)",
+        "echo hi;>evals/expected/x.toml",
+        "echo hi|>evals/expected/x.toml",
+        "git reset --hard # a comment with a stray ' quote",
     ],
 )
 def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: str) -> None:
     """A shell reads "\\"" fine, but shlex raises, and the fallback must not hide what follows (T24 /code-review)."""
     result = run_hook("block_forbidden.py", {"command": command}, repo)
     assert result.returncode == 2, result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "a | git reset --hard" "\\""',  # operators inside quotes are text
+        "echo 'a; git reset --hard'",
+        'grep "\\"" notes.md',
+        "echo git\\ reset\\ --hard",
+        "echo hi # git reset --hard",
+    ],
+)
+def test_quoted_text_is_not_a_command(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
 
 
 def wired_hook_command() -> str:

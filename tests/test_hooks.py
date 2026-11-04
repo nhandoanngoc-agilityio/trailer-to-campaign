@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -333,6 +335,274 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
 )
 def test_quoted_text_is_not_a_command(repo: Path, command: str) -> None:
     result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+# T27: a forbidden command nested in other shell syntax is still that command. Both sides, per CLAUDE.md.
+
+NESTED_FORBIDDEN = [
+    # command substitution inside double quotes
+    'echo "$(git reset --hard)"',
+    'echo "a $(git reset --hard) b"',
+    'x="$(git reset --hard)"',
+    'echo "`git reset --hard`"',
+    'echo "$(echo "$(git reset --hard)")"',
+    'echo "${x:-$(git reset --hard)}"',
+    "echo \"$(echo ')'; git reset --hard)\"",  # a ) in quotes doesn't close it
+    'echo "$(# )\ngit reset --hard)"',  # nor does one in a comment
+    'echo "$(case x in a) git reset --hard;; esac)"',  # a case's ) would close it early, so it's refused
+    'echo "$(if true; then case x in a) git reset --hard;; esac; fi)"',
+    "git commit -m \"$(cat <<'EOF'\nhi\nEOF\ngit reset --hard\n)\"",  # a command after the heredoc still counts
+    'bash -c "echo \\"\\$(git reset --hard)\\""',
+    # the heredoc pass reads quotes and comments now
+    "echo '<<EOF'\ngit reset --hard",
+    'echo "<<EOF"\ngit reset --hard',
+    "# <<EOF\ngit reset --hard",
+    "echo \\<<EOF\ngit reset --hard",
+    "python3 -c 'x = 1 << y'\ngit reset --hard",
+    # << is a shift in arithmetic, not a heredoc
+    "echo $((1<<y))\ngit reset --hard",
+    'echo "$((1<<y))"\ngit reset --hard',
+    "((x<<y))\ngit reset --hard",
+    # what looks like a heredoc but never closes can't be judged: $[...] and let shift too
+    "echo $[1<<y]\ngit reset --hard",
+    "let x=1<<y\ngit reset --hard",
+    "cat <<EOF\ngit reset --hard",
+    # commands after a real heredoc, however its delimiter is written
+    "cat <<\\EOF\nhi\nEOF\ngit reset --hard",
+    "cat <<END-OF-TEXT\nhi\nEND-OF-TEXT\ngit reset --hard",
+    "cat <<EOF # note\nhi\nEOF\ngit reset --hard",
+    "cat <<EOF; git reset --hard\nhi\nEOF",
+    "cat <<A <<B\nhi\nA\nthere\nB\ngit reset --hard",
+    # shell keywords aren't the program's name
+    "if true; then git reset --hard; fi",
+    "if git reset --hard; then echo hi; fi",
+    "if true\nthen\n  git reset --hard\nfi",
+    "if a; then b; else git reset --hard; fi",
+    "if a; then b; elif git reset --hard; then c; fi",
+    "while true; do git push -f origin t1-skeleton; done",
+    "while git reset --hard; do break; done",
+    "until git reset --hard; do break; done",
+    "for f in a b; do rm -rf build; done",
+    "{ git reset --hard; }",
+    "! git reset --hard",
+    "if true; then sudo git reset --hard; fi",
+    "if true; then X=1 git reset --hard; fi",
+    # eval runs its arguments as a command
+    "eval 'git reset --hard'",
+    'eval "git reset --hard"',
+    "eval git reset --hard",
+    "eval -- 'git reset --hard'",
+    "eval \"bash -lc 'git reset --hard'\"",
+    # -c clustered with other flags, and flags between it and the command
+    "bash -lc 'git reset --hard'",
+    "bash -cl 'git reset --hard'",
+    "sh -ec 'git reset --hard'",
+    "zsh -lc 'git reset --hard'",
+    "bash -l -c 'git reset --hard'",
+    "bash -c -l 'git reset --hard'",
+    "bash -o pipefail -c 'git reset --hard'",
+    "bash -c -o pipefail 'git reset --hard'",
+    "bash -ceo pipefail 'git reset --hard'",
+    "bash -c -- 'git reset --hard'",
+    # an expansion as the program or subcommand, when what's visible already looks forbidden
+    "${x:-git} reset --hard",
+    "$x reset --hard",
+    "git ${x:-reset} --hard",
+    '"$x" reset --hard',
+    "$(echo git) reset --hard",
+    '"$(echo git)" reset --hard',
+    '"`which git`" reset --hard',
+    "git $(echo reset) --hard",
+    'git "$x" --hard',
+    "git -C repo $x --hard",
+    "$x $y --hard",
+    "sudo $x reset --hard",
+    "if true; then $x reset --hard; fi",
+    "$x push --force origin t1-skeleton",
+    "$x push origin main",
+    "$x add .env",
+    "git $x --force origin t1-skeleton",
+    "git $x origin main",
+    "git $x .env",
+    "$x -rf build",
+    "$SUDO git reset --hard",
+    "$SUDO rm -rf build",
+]
+
+
+@pytest.mark.parametrize("command", NESTED_FORBIDDEN)
+def test_blocks_a_forbidden_command_nested_in_shell_syntax(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "$(cd evals/expected && touch x.toml)"',
+        'echo "$(echo x > evals/expected/a.toml)"',
+        "if true; then touch evals/expected/x.toml; fi",
+        "eval 'touch evals/expected/x.toml'",
+        "eval 'cd evals/expected'; touch x.toml",  # eval runs in this shell, so its cd carries on
+        "bash -lc 'touch evals/expected/x.toml'",
+        "$x checkout -- evals/expected/a.toml",
+        "$x checkout .",
+        "$x touch evals/expected/a.toml",
+    ],
+)
+def test_blocks_a_nested_write_to_the_answer_key(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
+def test_a_cd_in_a_substitution_ends_with_its_shell(repo: Path) -> None:
+    command = 'x="$(cd evals && pwd)"; rm -r expected'  # this `expected` isn't the Answer Key's
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda c: f"bash -c {shlex.quote(c)}", lambda c: f"eval {shlex.quote(c)}", lambda c: f'echo "$({c})"'],
+    ids=["bash -c", "eval", "substitution"],
+)
+def test_nesting_too_deep_to_read_blocks(repo: Path, wrap: Callable[[str], str]) -> None:
+    """Past the limit the command can't be judged, so it isn't waved through."""
+    command = "echo hi"
+    for _ in range(8):
+        command = wrap(command)
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "wasn't checked" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # a real heredoc's body stays text, however its delimiter is written
+        "git commit -m \"$(cat <<'EOF'\nNever run git reset --hard; it's bad (really).\nEOF\n)\"",
+        "gh pr create --title x --body \"$(cat <<'EOF'\nrm -rf build\n`git reset --hard`\n$(git push -f)\nEOF\n)\"",
+        "cat <<\\EOF\ngit reset --hard\nEOF",
+        'cat <<"EOF"\ngit reset --hard\nEOF',
+        "cat <<EOF\ngit reset --hard\nEOF",
+        "cat <<-EOF\n\tgit reset --hard\n\tEOF",
+        "cat <<- EOF\n\tgit reset --hard\n\tEOF",
+        "cat <<END-OF-TEXT\nrm -rf build\nEND-OF-TEXT",
+        "cat <<'---'\nrm -rf build\n---",
+        "cat <<A <<B\ngit reset --hard\nA\nrm -rf build\nB",
+        "cat <<EOF\n  EOF\ngit reset --hard\nEOF",  # an indented delimiter closes only <<-
+        "python3 - <<'PY'\nprint(\"it's rm -rf build\")\nPY",
+        "cat > notes.md <<'EOF'\nif true; then git reset --hard; fi\neval 'git reset --hard'\nEOF",
+        # quoted text and plain arguments aren't commands
+        "echo '$(git reset --hard)'",
+        'echo "\\$(git reset --hard)"',
+        'echo "\\`git reset --hard\\`"',
+        "echo 'then git reset --hard'",
+        "echo then git reset --hard",
+        "echo if git reset --hard",
+        "echo eval git reset --hard",
+        "echo bash -lc git reset --hard",
+        "grep -r 'bash -lc' docs",
+        'echo "$x" reset --hard',
+        # what only looks like a heredoc, with commands after it
+        "echo '<<EOF'\necho next",
+        'echo "<<EOF"\necho next',
+        "# <<EOF\necho next",
+        "echo $((1<<2))\necho next",
+        'echo "$((1<<2))"\necho next',
+        "((x<<2))\necho next",
+        "echo $[1<<2]",
+        "let x=1<<2",
+        "cat <<< 'git reset --hard'",
+        # substitutions that do nothing forbidden
+        'echo "$(git status)"',
+        'x="$(git rev-parse --show-toplevel)"',
+        'echo "`date`"',
+        'echo "$(dirname "$(pwd)")"',
+        "echo \"$(echo ')')\"",
+        'echo "$(grep case notes.md)"',
+        "echo $(date)",
+        "echo $((1+2))",
+        # keywords around allowed commands
+        "if true; then git status; fi",
+        'for f in a b; do echo "$f"; done',
+        'while read -r line; do echo "$line"; done < notes.md',
+        "{ echo a; echo b; } > notes.md",
+        "! git diff --quiet",
+        "case x in a) echo hi;; esac",
+        # eval and shells around allowed commands
+        "eval 'echo hi'",
+        'eval "$x"',
+        'eval "$(ssh-agent -s)"',
+        "bash -lc 'uv run pytest -q'",
+        "bash -ec 'echo hi'",
+        "bash -l script.sh",
+        "bash -x script.sh",
+        "bash --norc script.sh",
+        # an expansion that could be anything: normal commands stay allowed
+        '"$py" --version',
+        "$py --version",
+        '"$py" -m pytest -q',
+        "\"$py\" -c 'print(1)'",
+        '"$py" commit.py',
+        '"$py" reset.py --hard-mode',
+        "${PYTHON:-python3} -m pytest -q",
+        '"$(which python3)" --version',
+        "$(git rev-parse --show-toplevel)/scripts/check.sh --all",
+        "$HOME/bin/tool run",
+        '"$root/.venv/bin/python" -m pytest',
+        "$x",
+        '"$x" status',
+        "$x reset",
+        "$x reset --soft",
+        '"$pip" install -r requirements.txt -f links',
+        '"$py" evals/expected/charge.toml',
+        '"$EDITOR" evals/expected/charge.toml',
+        'git "$@"',
+        "git $x",
+        "git $x --oneline",
+        "git $x -- src/",
+        'git -C "$dir" status',
+        'git --git-dir "$dir" status',
+        'git log --format="$x"',
+    ],
+)
+def test_allows_what_only_looks_nested(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+    assert "permissionDecision" not in result.stdout
+
+
+def test_asks_before_a_dependency_added_in_a_nested_command(repo: Path) -> None:
+    for command in ('echo "$(uv add anthropic)"', "if true; then uv add anthropic; fi", "eval 'uv add anthropic'"):
+        result = run_hook("block_forbidden.py", {"command": command}, repo)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_an_expansion_doesnt_read_as_a_commit_off_main(repo: Path) -> None:
+    result = run_hook("block_forbidden.py", {"command": "$x commit -m hi"}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_an_expansion_reads_as_a_commit_on_main(repo: Path) -> None:
+    git_switch_main(repo)
+    result = run_hook("block_forbidden.py", {"command": "$x commit -m hi"}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+def test_an_unknown_subcommand_on_main_is_not_a_bare_push(repo: Path) -> None:
+    git_switch_main(repo)
+    for command in ("git $x", 'git "$@"', 'git --git-dir "$dir" status'):
+        result = run_hook("block_forbidden.py", {"command": command}, repo)
+        assert result.returncode == 0, result.stderr
+
+
+def test_an_expansion_doesnt_carry_a_branch_switch(repo: Path) -> None:
+    """`$x` may not be git, so `$x checkout main` says nothing about the branch the commit lands on."""
+    result = run_hook("block_forbidden.py", {"command": "$x checkout main && git commit -m hi"}, repo)
     assert result.returncode == 0, result.stderr
 
 

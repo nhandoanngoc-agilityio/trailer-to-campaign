@@ -1133,8 +1133,9 @@ def test_the_result_help_names_the_flag_and_claims_no_stopwatch(
     with pytest.raises(SystemExit) as shown:
         main(["result", "--help"])
     assert shown.value.code == 0
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())
     assert "--old-way-source {stopwatch,memory}" in out
+    assert "stopwatch: timed" in out and "memory: remembered, so Time Saved is labelled an estimate" in out
     assert "from that marketer's stopwatch" not in out and "timed the same way" not in out
 
 
@@ -1154,4 +1155,6 @@ def test_the_docs_give_the_result_command_with_the_flag(doc: str) -> None:
 
 def test_the_protocol_says_memory_makes_time_saved_an_estimate() -> None:
     text = (FILMS.parent / "docs/side-by-side.md").read_text(encoding="utf-8")
-    assert "from memory" in text and "estimate" in text
+    sentences = " ".join(text.split()).split(". ")
+    # One sentence has to pair them: "from memory" and "estimate" also appear apart elsewhere on the page.
+    assert any("use `memory`" in s and "from memory" in s and "Time Saved as an estimate" in s for s in sentences)

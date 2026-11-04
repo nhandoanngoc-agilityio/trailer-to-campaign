@@ -124,7 +124,9 @@ cmd_status() {
     if [ -L "$SERVICE_HOME/current" ]; then
         echo "release: $(basename "$(readlink "$SERVICE_HOME/current")")"
     fi
-    launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid|last exit code) =' || echo "launchd has no state for $LABEL"
+    # One tab: launchd's lines about the service itself, not the nested ones about its endpoints.
+    launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E "^$(printf '\t')(state|pid|last exit code) =" ||
+        echo "launchd has no state for $LABEL"
 }
 
 cmd_logs() {

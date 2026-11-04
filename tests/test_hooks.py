@@ -292,6 +292,14 @@ def test_a_payload_with_no_command_blocks(payload: str) -> None:
         "echo `echo a # b`; git reset --hard",  # no comment starts inside backticks
         "echo `git reset --hard`",  # and what's inside them runs
         "echo `true; git reset --hard`",
+        "git `echo x` reset --hard",  # unquoted backticks can't be judged, wherever they sit
+        "echo `date`#x; git reset --hard",
+        "echo `echo \\`git reset --hard\\``",
+        "echo ${x:-$(git reset --hard)}",  # so can't a ${...} holding more than plain text
+        "echo ${x:-`git reset --hard`}",
+        "echo ${x:-'}'; git reset --hard}",
+        "echo ${x:-\\}}; git reset --hard # }",
+        "echo ${x:-${y}}; git reset --hard # }",
         "bash -c $'echo\\ngit reset --hard'",  # $'...' escapes aren't decoded, so they can't be judged
         "bash -c $'\\x67it reset --hard'",
         "echo hi &! git reset --hard",  # zsh's &! and &| end a command as & does
@@ -317,7 +325,8 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
         "echo ${x:-a # b}",
         "echo ${x} # a comment after a variable",
         "for f in ${files}; do echo $f; done # note",
-        "echo `date` # a comment after backticks",
+        'echo "`date`" # a comment after quoted backticks',  # inside double quotes: T27
+        "echo ${#files} ${x:-a b} ${y%.txt}",
         "echo git\\ reset\\ --hard",
         "echo hi # git reset --hard",
     ],

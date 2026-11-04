@@ -102,8 +102,10 @@ def tokenize(command: str) -> list[str]:
     """The command's words, with its unquoted operators as Op tokens, read by a shell's quoting rules.
 
     shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
-    operator (T24). What it can't follow, such as a quote left open, raises, and main() blocks.
-    It's a tripwire, not a shell: it doesn't look inside $(...) in double quotes (T27).
+    operator (T24). What it can't follow raises, and main() blocks: a quote left open, unquoted
+    backticks, a ${...} holding more than plain text. Refusing these is deliberate: each attempt
+    to parse them opened new gaps. It's a tripwire, not a shell: it doesn't look inside $(...)
+    or backticks in double quotes (T27).
     """
     tokens: list[str] = []
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
@@ -124,26 +126,14 @@ def tokenize(command: str) -> list[str]:
         elif char == "#" and word is None:  # a comment runs to the end of the line
             newline = command.find("\n", i)
             i = end if newline == -1 else newline
-        elif char == "$" and command[i + 1 : i + 2] == "{":  # ${...} is one word: nothing inside starts a comment
-            closing, depth = i + 2, 1
-            while closing < end and depth:
-                if command.startswith("${", closing):
-                    depth, closing = depth + 1, closing + 2
-                else:
-                    depth, closing = depth - (command[closing] == "}"), closing + 1
-            if depth:
-                raise ValueError("a ${ left open")
-            word = (word or "") + command[i:closing]
-            i = closing
-        elif char == "`":  # what's inside backticks runs, as a command of its own
-            closing = i + 1
-            while closing < end and command[closing] != "`":
-                closing += 2 if command[closing] == "\\" else 1
-            if closing >= end:
-                raise ValueError("a ` left open")
-            finish_word()
-            tokens.extend([Op(";"), *tokenize(command[i + 1 : closing]), Op(";")])
+        elif char == "$" and command[i + 1 : i + 2] == "{":  # plain ${...} is one word: no comment starts inside it
+            closing = command.find("}", i)
+            if closing == -1 or re.search(r"[\"'\\`$;&|<>(){\n]", command[i + 2 : closing]):
+                raise ValueError("a ${...} holding more than plain text")
+            word = (word or "") + command[i : closing + 1]
             i = closing + 1
+        elif char == "`":  # what runs inside them, and how they join the words around them, can't be judged here
+            raise ValueError("unquoted backticks")
         elif char == "$" and command[i + 1 : i + 2] == "'":  # $'...': a backslash escapes anything, even a quote
             closing = i + 2
             while closing < end and command[closing] != "'":

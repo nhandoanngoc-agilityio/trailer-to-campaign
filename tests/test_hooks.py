@@ -5,8 +5,6 @@ Each hook reads a tool call as JSON on stdin, the way Claude Code sends it.
 
 from __future__ import annotations
 
-import importlib.util
-import io
 import json
 import os
 import shutil
@@ -26,9 +24,12 @@ def hook_python() -> str:
     """
     if override := os.environ.get("T2C_HOOK_PYTHON"):
         return override
-    venv_bin = str(Path(sys.prefix) / "bin")
-    path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p != venv_bin)
-    return shutil.which("python3", path=path) or sys.executable
+    venv_bin = (Path(sys.prefix) / "bin").resolve()
+    path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if Path(p).resolve() != venv_bin)
+    found = shutil.which("python3", path=path)
+    if not found:  # falling back to the project's Python would hide the very thing these tests are for
+        raise RuntimeError("no python3 outside the virtualenv: set T2C_HOOK_PYTHON to test the hooks")
+    return found
 
 
 def run_hook(name: str, tool_input: dict, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -218,30 +219,93 @@ def test_ignores_malformed_input() -> None:
     assert result.returncode == 0
 
 
-def load_block_forbidden():
-    spec = importlib.util.spec_from_file_location("block_forbidden", HOOKS / "block_forbidden.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_a_crash_while_judging_blocks_the_command(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_a_crash_while_judging_blocks_the_command() -> None:
     """Exit 1 lets a command run, so a guard that crashes would wave everything through (T24)."""
-    hook = load_block_forbidden()
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HOOKS)!r})\n"
+        "import block_forbidden as hook\n"
+        "def crash(*args, **kwargs):\n"
+        "    raise TypeError('zip() takes no keyword arguments')\n"
+        "hook.find_violation = crash\n"
+        "sys.exit(hook.main())\n"
+    )
+    result = subprocess.run(
+        [hook_python(), "-B", "-c", script],
+        input=json.dumps({"tool_input": {"command": "git status"}}),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "wasn't checked" in result.stderr
+    assert "ask" in result.stderr  # a block means stop and ask, not edit the guard (CLAUDE.md)
 
-    def crash(*args, **kwargs):
-        raise TypeError("zip() takes no keyword arguments")
 
-    monkeypatch.setattr(hook, "find_violation", crash)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": "git status"}})))
-    assert hook.main() == 2
-    assert "wasn't checked" in capsys.readouterr().err
+@pytest.mark.parametrize(
+    "payload",
+    ["[]", "{}", '{"tool_input": {}}', '{"tool_input": {"cmd": "git push -f"}}', '{"tool_input": {"command": 1}}'],
+)
+def test_a_payload_with_no_command_blocks(payload: str) -> None:
+    """This hook only sees Bash calls, so no command means Claude Code's payload changed (T24)."""
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "block_forbidden.py")], input=payload, capture_output=True, text=True
+    )
+    assert result.returncode == 2
 
 
-def test_json_of_the_wrong_shape_blocks_rather_than_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    hook = load_block_forbidden()
-    monkeypatch.setattr(sys, "stdin", io.StringIO("[]"))
-    assert hook.main() == 2
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "\\""|git reset --hard',
+        'echo "\\""||git push --force origin main',
+        'echo "\\""&git reset --hard',
+        '(git reset --hard;echo "\\"")',
+        'echo "\\"">evals/expected/x.toml',
+    ],
+)
+def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: str) -> None:
+    """A shell reads "\\"" fine, but shlex raises, and the fallback must not hide what follows (T24 /code-review)."""
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+def wired_hook_command() -> str:
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    return settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
+def test_the_wiring_blocks_when_the_hook_exits_with_anything_else(tmp_path: Path) -> None:
+    """A syntax error or an older Python never reaches main(), so the settings must turn exit 1 into a block (T24)."""
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "block_forbidden.py").write_text("import sys\nsys.exit(1)\n")
+    python_dir = Path(hook_python()).parent
+    env = {"PATH": f"{python_dir}:/usr/bin:/bin", "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    result = subprocess.run(
+        ["/bin/sh", "-c", wired_hook_command()], input="{}", text=True, capture_output=True, env=env
+    )
+    assert result.returncode == 2
+
+
+def test_the_wiring_blocks_when_there_is_no_python3(tmp_path: Path) -> None:
+    env = {"PATH": str(tmp_path), "CLAUDE_PROJECT_DIR": str(tmp_path)}
+    result = subprocess.run(
+        ["/bin/sh", "-c", wired_hook_command()], input="{}", text=True, capture_output=True, env=env
+    )
+    assert result.returncode == 2
+
+
+def test_the_wiring_lets_an_allowed_command_through(repo: Path) -> None:
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(HOOKS.parent.parent),
+        "PATH": f"{Path(hook_python()).parent}:/usr/bin:/bin",
+    }
+    payload = json.dumps({"tool_input": {"command": "git status"}, "cwd": str(repo)})
+    result = subprocess.run(
+        ["/bin/sh", "-c", wired_hook_command()], input=payload, text=True, capture_output=True, env=env
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_ruff_judges_the_hooks_as_python_39() -> None:
@@ -249,7 +313,17 @@ def test_ruff_judges_the_hooks_as_python_39() -> None:
     source = "words = [1]\nraw = [2]\npairs = list(zip(words, raw))\n"
     project = HOOKS.parent.parent
     result = subprocess.run(
-        ["ruff", "check", "--select", "B905", "--stdin-filename", str(HOOKS / "any_hook.py"), "-"],
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--select",
+            "B905",
+            "--stdin-filename",
+            str(HOOKS / "any_hook.py"),
+            "-",
+        ],
         input=source,
         capture_output=True,
         text=True,

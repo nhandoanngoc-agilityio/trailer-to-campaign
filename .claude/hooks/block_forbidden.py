@@ -35,8 +35,9 @@ Paths are read from the shell's directory (the payload's cwd, then any cd).
 Uses only the standard library, so no jq or extra dependency is needed.
 
 Runs on the machine's python3, not the project's, and macOS ships 3.9, so the hooks must
-stay 3.9-compatible. Only exit 2 blocks: a crash (exit 1) would let the command run, so
-a crash while judging a command blocks it too (T24).
+stay 3.9-compatible. Only exit 2 blocks, and a crash exits 1, which would let the command
+run. So a failure while judging a command blocks it here, and `|| exit 2` in
+.claude/settings.json blocks whatever never reaches that code, such as no python3 (T24).
 """
 
 from __future__ import annotations
@@ -109,9 +110,9 @@ def tokenize(command: str) -> list[str]:
 
     try:
         words, raw = lex(True), lex(False)
-    except ValueError:  # unbalanced quotes: fall back to a rough split, judged by text
-        words = command.replace(";", " ; ").replace("&&", " && ").replace("\n", " ; ").split()
-        raw = words
+    except ValueError:  # shlex can't read the quotes, though a shell may ("\""): split at every operator, by text
+        rough = re.findall(r"[;&|<>()\n]+|[^\s;&|<>()]+", command)
+        return [Op(t) if set(t) <= set(OPERATOR_CHARS) else re.sub(r"[\"'\\]", "", t) for t in rough]
     if len(raw) != len(words):  # the two lexings don't line up (escapes): judge by text
         raw = words
     return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw)]
@@ -459,12 +460,14 @@ def main() -> int:
     command = ""
     state: dict = {}
     try:
-        command = (payload.get("tool_input") or {}).get("command") or ""
+        command = payload["tool_input"]["command"]  # this hook only sees Bash: no command means the payload changed
+        if not isinstance(command, str) or not command:
+            raise ValueError("the payload has no command")
         reason = find_violation(command, payload.get("cwd"), state=state)
     except Exception as error:  # a guard that crashes must not wave the command through
         print(
-            f"Blocked: the guardrail hook crashed ({error!r}), so this command wasn't checked. "
-            f"Fix .claude/hooks/block_forbidden.py.\nCommand: {command}",
+            f"Blocked: the guardrail hook failed ({error!r}), so this command wasn't checked. "
+            f"Stop and ask a person; don't edit the hook to get past it.\nCommand: {command}",
             file=sys.stderr,
         )
         return 2

@@ -30,7 +30,9 @@ jobs:
       - name: Test the hooks on Python 3.9
         run: |
           uv python install 3.9
-          T2C_HOOK_PYTHON="$(uv python find 3.9)" uv run pytest -q tests/test_hooks.py
+          py="$(uv python find 3.9)"  # on its own line, so a failure stops the step
+          "$py" --version | grep -F "Python 3.9."
+          T2C_HOOK_PYTHON="$py" uv run pytest -q tests/test_hooks.py
 
   # The Answer Key is human-owned (CLAUDE.md, T14). This can't block a merge on this plan,
   # but it shows red at review, whoever or whatever changed it: another machine, @claude, a person.

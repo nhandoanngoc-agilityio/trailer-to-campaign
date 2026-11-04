@@ -150,7 +150,7 @@ cmd_install() {
         sleep 1
         waited=$((waited + 1))
     done
-    echo "$tag is running. Check it with: deploy/t2c-service status"
+    echo "$tag started. A bad token only shows a few seconds later, so confirm with: deploy/t2c-service status"
 }
 
 cmd_add_film() {

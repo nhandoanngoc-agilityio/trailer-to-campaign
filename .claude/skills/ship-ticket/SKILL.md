@@ -35,9 +35,9 @@ Find the ticket from what you were given:
 5. **Ship.** Do the **Pre-PR checks** in `CLAUDE.md`, integrate main, and run `git push -u origin t<t>-<slug>`. Then open the PR with `gh pr create --base main --title "T<t>: <what changed>" --body-file <file>`, from `.github/pull_request_template.md`: `Closes #<issue>`, one evidence row per **Done when**, **Risky** ticked if it applies, and Human review left blank. Wait for CI.
 6. **Review.** Run `review-checklist` and `/code-review` against `main`, then fix or answer those findings and the CI review's. After pushing a batch of code fixes, wait for CI and ask `@claude` to review it (see **Ask `@claude`**). If findings are still open after three batches, stop and report them. If **Risky** is ticked, ask the human for an ultrareview, and wait for its findings before step 7.
 7. **Close the loop.** In the PR, finish `docs/tickets/T<t>.md` with its provenance block left blank, add the lesson, update `CONTEXT.md`, offer an ADR if one meets the bar, and tick the template's boxes. Integrate main if it has moved, push, and wait for CI.
-8. **Merge gate 🧑.** This is the loop's Review gate too: the human reviews here, once the record is in the PR. Stop once `gh pr view <pr> --json headRefOid,statusCheckRollup` shows `headRefOid` is your local `HEAD`, and that every check passed, including `test` and `answer-key`. An empty list means CI hasn't run, not that it passed. Another check may be skipped, but `test` and `answer-key` may not. If the SHA differs or a check is pending, wait for CI again. The one red check you may stop on is `answer-key` (see **Wait for CI**), and you say so in the report. Report the PR link, that SHA, the evidence, anything not run, the caveats, and what's left for the human: Human review, the provenance block and the merge.
+8. **Merge gate 🧑.** This is the loop's Review gate too: the human reviews here, once the record is in the PR. Stop once `gh pr view <pr> --json headRefOid,statusCheckRollup` shows `headRefOid` is your local `HEAD`, and that every check passed, including `test` and `answer-key`. An empty list means CI hasn't run, not that it passed. Another check may be skipped, but `test` and `answer-key` may not. If the SHA differs or a check is pending, wait for CI again. The only red checks you may stop on are `answer-key` and `claude-review`, once `test` has passed (see **Wait for CI**), and you name them in the report. Report the PR link, that SHA, the evidence, anything not run, the caveats, and what's left for the human: Human review, the provenance block and the merge.
 
-   The human merges. If they raise findings here, fix them, redo step 7 and wait for CI again. Once they say it's merged, confirm the issue closed.
+   The human merges. If they raise findings here, go back to the earliest step the fix affects (Verify for a code change), come forward through step 7, and wait for CI again. Once they say it's merged, confirm the issue closed.
 
 ## Integrate main
 
@@ -62,33 +62,34 @@ echo "not finished on this commit after 15 minutes"; exit 2
 It checks every 30 seconds for up to 15 minutes, and reads the checks only once the PR is on your commit, so the previous commit's green can't count. `gh` exits 8 while checks are pending, and 1 for a failed check or none reported, so the first three tries allow for checks that haven't registered yet.
 
 - **Exit 0:** green on this commit.
-- **Exit 1, `test` failed:** read the failing log, fix the cause, push and wait again. After three rounds on the same failure, stop and report it.
-- **Exit 1, `answer-key` failed:** this check goes red on any change to `evals/expected/`, even a person's deliberate one. That folder is human-owned, so leave it exactly as it is, with no edit and no revert, and report the red check to the human at step 8.
-- **Exit 1, `claude-review` failed:** the review job broke, for example on an API error, so there's no code to fix. Report it.
-- **Exit 1, no checks reported:** look for a merge conflict, because GitHub doesn't run `pull_request` workflows on one. Integrate main and push. If there's no conflict, report it.
+- **Exit 1:** the code doesn't say which check, so run `gh pr checks <pr>` and read the output. Handle whichever applies, `test` first:
+  - **`test` failed:** read the failing log, fix the cause, push and wait again. After three rounds on the same failure, stop and report it.
+  - **`answer-key` failed:** this check goes red on any change to `evals/expected/`, even a person's deliberate one. That folder is human-owned, so leave it exactly as it is, with no edit and no revert. It stays red on every push, so this wait can't reach exit 0 and retrying won't help. Instead, check `gh pr checks <pr>` every 30 seconds, for up to 15 minutes, in a background loop that ends itself, until `test` has finished. Then report the red check at step 8.
+  - **`claude-review` failed:** the review job broke, for example on an API error, so there's no code to fix. Report it at step 8.
+  - **No checks reported:** look for a merge conflict, because GitHub doesn't run `pull_request` workflows on one. Integrate main and push. If there's no conflict, report it.
 - **Exit 2:** read the job's status with `gh pr view <pr> --json headRefOid,statusCheckRollup`, then report what you find. The slowest of the last 31 PR runs took under 4 minutes, so:
   - **The PR is on another commit:** the push is missing.
-  - **The job is queued:** GitHub or its runners are the likely cause, not the code. Check githubstatus.com, and wait one more round if Actions has an incident.
+  - **The job is queued:** GitHub or its runners are the likely cause, not the code. Check githubstatus.com. If Actions has an incident, wait one more round. If it has none, or the job is still queued after that, report it.
   - **The job is in progress:** this may be a hung test, because no workflow sets a timeout.
 
 ## Ask `@claude`
 
 Each comment costs usage, so post one per batch of code fixes, at most three, and none for a batch that only changes docs. Name the commits since the last review and what to look for.
 
-The reply isn't a PR check, and it arrives by editing a "working…" comment, so watch that comment. Run statuses can lag behind it, and a skipped run also appears for the bot's own comment.
+The reply isn't a PR check, and it arrives by rewriting one comment as it goes, so watch that comment until it starts with the `**Claude finished` header. Run statuses can lag behind it, and a skipped run also appears for the bot's own comment.
 
-Take `<since>` from your comment's `createdAt` in `gh pr view <pr> --json comments`, then run this with `run_in_background`:
+Your comment posts under the human's account. So right after posting, take `<since>` from the `createdAt` of the last comment in `gh pr view <pr> --json comments`, then run this with `run_in_background`:
 
 ```sh
 for i in {1..30}; do
   reply=$(gh pr view <pr> --json comments --jq '[.comments[] | select(.author.login == "claude" and .createdAt > "<since>")] | first | .body // ""')
   case "$reply" in
-    "" | "Claude Code is working"*) sleep 30 ;;
-    *) exit 0 ;;
+    "**Claude finished"*) exit 0 ;;
+    *) sleep 30 ;;
   esac
 done
 echo "no finished reply after 15 minutes"; exit 2
 ```
 
-- **Exit 0:** read the reply with `gh pr view <pr> --json comments`. It may report an error instead of a review; if so, report that.
-- **Exit 2:** check `gh run list --workflow claude.yml --limit 5 --json databaseId,status,conclusion,createdAt`. If the first run after your comment ended skipped, the comment didn't trigger a review. Report what you find.
+- **Exit 0:** read the reply with `gh pr view <pr> --json comments`.
+- **Exit 2:** a failed run may never write that header. Check `gh run list --workflow claude.yml --limit 5 --json databaseId,status,conclusion,createdAt`. If the first run after your comment ended skipped, the comment didn't trigger a review. Report what you find.

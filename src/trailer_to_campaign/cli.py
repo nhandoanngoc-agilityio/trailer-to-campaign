@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, replace
@@ -410,14 +411,26 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     log.info(
         "Slack front door is up for %d Marketer(s); runs go to %s. Ctrl-C to stop.", len(settings.marketers), runs_dir
     )
+
+    def stop(signum: int, frame: Any) -> None:  # launchd stops a service with SIGTERM: treat it as Ctrl-C (T26)
+        raise KeyboardInterrupt
+
+    handler = SocketModeHandler(app, app_token)
+    before = signal.signal(signal.SIGTERM, stop)
     try:
-        SocketModeHandler(app, app_token).start()
+        handler.start()
     except KeyboardInterrupt:
         # A Run waiting on Approval ends now. One mid-stage finishes that stage (inside its Film Budget)
         # and ends at its next Approval point: stopping it mid-call would lose its Run Log's total.
         log.info("stopping: a Run waiting on Approval ends now, in an error; one mid-stage ends at its next Approval")
     finally:
+        try:
+            handler.close()  # first: no mention may start a Run that door.close() won't reach
+        except Exception:
+            log.warning("could not close the Slack connection", exc_info=True)
         door.close()
+        signal.signal(signal.SIGTERM, before)  # a second SIGTERM stops the wait below, as launchd's limit would
+        slack_app.wait_for_runs()
     return 0
 
 

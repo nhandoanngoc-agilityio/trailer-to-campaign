@@ -17,6 +17,7 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
 - `docs/tickets/T<n>.md`: one record per ticket (spec, plan, tests, review, evidence, close), from `docs/tickets/TEMPLATE.md`.
 - `.claude/hooks/`: guardrails wired in `.claude/settings.json`, tested in `tests/test_hooks.py`. A hook block or approval prompt is team policy: change the approach (branch, PR, specific files) rather than reaching the same result another way.
+- `.claude/skills/review-checklist/`: this project's own review checks, from its rules and shipped bugs.
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.
 - `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
 - `.github/workflows/`: `ci.yml` (lint and tests), `claude-code-review.yml` (Claude reviews each PR once when it opens, unless it only changes `docs/`), `claude.yml` (`@claude` in issues and PRs).
@@ -45,7 +46,7 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
    _Done when:_ every Done-when check has passed, with its evidence (output, numbers, screenshot) ready for the PR.
 5. **Ship.** Open a PR with `.github/pull_request_template.md`, `Closes #<n>`, and the evidence from Verify. Watch CI to green.
    _Done when:_ the PR is open, CI is green, and every template section is filled.
-6. **Review** 🧑. Run `/code-review` against `main` and fix what it finds; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
+6. **Review** 🧑. Run the `review-checklist` skill and `/code-review` against `main`, and fix what they find; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
    _Done when:_ the human merges.
 7. **Close the loop.** Finish `docs/tickets/T<n>.md` (plan, tests, review outcomes, evidence, close) in the ticket's PR, leaving its provenance block for the human. Update `CONTEXT.md` for any term the ticket settled. Offer an ADR only for a decision that is hard to reverse, surprising, and a real trade-off. Add one **lesson** to `docs/lessons.md`: what the ticket taught about building agents, in a line or two.
    _Done when:_ the ticket record, glossary, ADRs and lessons reflect the ticket, the human has reviewed the record, and the issue is closed.

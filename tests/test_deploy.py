@@ -54,8 +54,33 @@ class Kit:
         self.git("add", ".")
         self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one")
         self.git("tag", "v0.1.0")
-        for tool in ("launchctl", "uv", "plutil"):
-            fake_tool(self.bin, tool, f'echo "{tool} $*" >> "{self.calls}"\nexit 0')
+        self.loaded = tmp / "loaded"
+        fake_tool(self.bin, "plutil", f'echo "plutil $*" >> "{self.calls}"\nexit 0')
+        # uv's sync makes the release's entry point, as the real one does.
+        fake_tool(
+            self.bin,
+            "uv",
+            f'''echo "uv $*" >> "{self.calls}"
+for last; do :; done
+mkdir -p "$last/.venv/bin" && : > "$last/.venv/bin/t2c"''',
+        )
+        self.fake_launchctl()
+
+    def fake_launchctl(self, stuck: bool = False, never_runs: bool = False) -> None:
+        """Like launchd, it knows only a loaded service: print fails once it's gone."""
+        unload = ":" if stuck else f'rm -f "{self.loaded}"'
+        state = "spawn scheduled" if never_runs else "running"
+        fake_tool(
+            self.bin,
+            "launchctl",
+            f'''echo "launchctl $*" >> "{self.calls}"
+case "$1" in
+bootstrap) : > "{self.loaded}" ;;
+bootout) {unload} ;;
+print) [ -f "{self.loaded}" ] || exit 113; printf '\\tstate = {state}\\n\\t\\tstate = active\\n' ;;
+esac
+exit 0''',
+        )
 
     def git(self, *args: str) -> None:
         subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
@@ -165,7 +190,7 @@ def test_the_plist_runs_the_current_release_from_the_service_home(kit: Kit) -> N
     assert plist["Label"] == LABEL
     assert plist["ProgramArguments"] == ["/bin/sh", str(kit.t2c_home / "current" / "deploy" / "run-slack.sh")]
     assert plist["WorkingDirectory"] == str(kit.t2c_home)
-    assert plist["KeepAlive"] == {"SuccessfulExit": False}
+    assert plist["KeepAlive"] is True  # a stray SIGTERM exits 0, and must not leave the bot offline
     assert plist["ExitTimeOut"] > 600  # a stage mid-call finishes first: the model call timeout is 600 s
     assert "/opt/homebrew/bin" in plist["EnvironmentVariables"]["PATH"]
 
@@ -212,6 +237,104 @@ def test_a_broken_plist_is_refused_before_the_service_changes(kit: Kit) -> None:
     assert "launchctl bootstrap" not in kit.calls_made()
 
 
+def test_install_waits_for_the_old_service_to_stop_and_keeps_it_if_it_wont(kit: Kit) -> None:
+    kit.write_secrets()
+    assert kit.service("install", "v0.1.0").returncode == 0
+    kit.git("tag", "v0.2.0")
+    kit.fake_launchctl(stuck=True)
+    result = kit.service("install", "v0.2.0", T2C_STOP_WAIT="1")
+    assert result.returncode != 0
+    assert "still stopping" in result.stderr
+    assert (kit.t2c_home / "current").resolve().name == "v0.1.0"
+
+
+def test_install_says_so_when_the_release_doesnt_start(kit: Kit) -> None:
+    kit.write_secrets()
+    kit.fake_launchctl(never_runs=True)
+    result = kit.service("install", "v0.1.0", T2C_START_WAIT="1")
+    assert result.returncode != 0
+    assert "logs" in result.stderr
+    assert "is running" not in result.stdout
+
+
+def test_install_refuses_a_tag_without_the_service_script_before_stopping_anything(kit: Kit) -> None:
+    kit.write_secrets()
+    assert kit.service("install", "v0.1.0").returncode == 0
+    (kit.repo / "deploy" / "run-slack.sh").unlink()
+    kit.git("add", ".")
+    kit.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "older")
+    kit.git("tag", "v0.0.9")
+    calls_before = kit.calls_made().count("bootout")
+    result = kit.service("install", "v0.0.9")
+    assert result.returncode != 0
+    assert "run-slack.sh" in result.stderr
+    assert kit.calls_made().count("bootout") == calls_before
+    assert (kit.t2c_home / "current").resolve().name == "v0.1.0"
+    assert not (kit.t2c_home / "releases" / "v0.0.9").exists()
+
+
+def test_a_leftover_from_an_interrupted_install_doesnt_block_the_next(kit: Kit) -> None:
+    kit.write_secrets()
+    (kit.t2c_home / "releases" / "v0.1.0.new").mkdir(parents=True)
+    assert kit.service("install", "v0.1.0").returncode == 0
+
+
+def test_install_refuses_a_tag_that_moved(kit: Kit) -> None:
+    kit.write_secrets()
+    assert kit.service("install", "v0.1.0").returncode == 0
+    (kit.repo / "new.txt").write_text("x")
+    kit.git("add", ".")
+    kit.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "two")
+    kit.git("tag", "-f", "v0.1.0")
+    result = kit.service("install", "v0.1.0")
+    assert result.returncode != 0
+    assert "moved" in result.stderr
+    assert not (kit.t2c_home / "releases" / "v0.1.0" / "new.txt").exists()
+
+
+# --- settings beyond the secrets --------------------------------------------------
+
+
+def test_optional_settings_set_in_the_shell_reach_the_service(kit: Kit) -> None:
+    assert kit.service("secrets", **SECRET_VALUES, FILM_BUDGET_USD="0.50", T2C_WATCHER="sdk").returncode == 0
+    text = (kit.t2c_home / "env").read_text()
+    assert "FILM_BUDGET_USD='0.50'" in text
+    assert "T2C_WATCHER='sdk'" in text
+    assert "T2C_WHISPER_MODEL" not in text
+
+
+# --- a stale Spoiler List ---------------------------------------------------------
+
+
+def test_status_warns_when_the_services_film_differs_from_the_repos(kit: Kit) -> None:
+    assert kit.service("add-film", "demo-film").returncode == 0
+    assert "differs" not in kit.service("status").stderr
+    (kit.repo / "films" / "demo-film" / "film.toml").write_text("title='changed'\n")
+    result = kit.service("status")
+    assert "demo-film" in result.stderr
+    assert "differs" in result.stderr
+
+
+def test_install_warns_when_the_services_film_differs_from_the_repos(kit: Kit) -> None:
+    kit.write_secrets()
+    assert kit.service("add-film", "demo-film").returncode == 0
+    (kit.repo / "films" / "demo-film" / "film.toml").write_text("title='changed'\n")
+    result = kit.service("install", "v0.1.0")
+    assert result.returncode == 0
+    assert "demo-film" in result.stderr
+
+
+def test_a_second_add_film_updates_the_list_and_keeps_what_the_service_cached(kit: Kit) -> None:
+    assert kit.service("add-film", "demo-film").returncode == 0
+    target = kit.t2c_home / "films" / "demo-film"
+    (target / "frames").mkdir()
+    (target / "frames" / "0001.jpg").write_text("cached")
+    (kit.repo / "films" / "demo-film" / "film.toml").write_text("title='changed'\n")
+    assert kit.service("add-film", "demo-film").returncode == 0
+    assert (target / "film.toml").read_text() == "title='changed'\n"
+    assert (target / "frames" / "0001.jpg").read_text() == "cached"
+
+
 # --- add-film --------------------------------------------------------------------
 
 
@@ -223,7 +346,7 @@ def test_add_film_copies_one_film_into_the_service_home(kit: Kit) -> None:
     assert (copied / "source" / "trailer.webm").read_text() == "footage"
 
 
-@pytest.mark.parametrize("slug", ["../secret", "a/b", "/etc", "..", ".", "-rf", "", "no-such-film", "a b"])
+@pytest.mark.parametrize("slug", ["../secret", "a/b", "/etc", "..", ".", "-rf", "", "no-such-film", "a b", "My_Film"])
 def test_add_film_refuses_a_slug_that_is_a_path_or_not_a_film(kit: Kit, slug: str) -> None:
     result = kit.service("add-film", slug)
     assert result.returncode != 0
@@ -250,7 +373,8 @@ def test_uninstall_stops_the_service_and_keeps_the_home(kit: Kit) -> None:
     assert kit.service("uninstall").returncode == 0
     assert not kit.plist.exists()
     assert f"launchctl bootout gui/{os.getuid()}/{LABEL}" in kit.calls_made()
-    assert (kit.t2c_home / "env").exists()  # Run Logs and Films may be the only copy
+    assert not (kit.t2c_home / "env").exists()  # credentials don't outlive the service
+    assert (kit.t2c_home / "releases").exists()  # Run Logs and Films may be the only copy
 
 
 def test_an_unknown_command_says_how_to_use_it(kit: Kit) -> None:

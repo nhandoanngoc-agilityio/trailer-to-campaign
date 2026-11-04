@@ -34,8 +34,18 @@ log = logging.getLogger(__name__)
 Runner = Callable[[RunRequest, SlackApprover, SlackThread], int]
 
 
+RUN_THREAD = "t2c-run"
+
+
 def _in_a_thread(work: Callable[[], None]) -> None:
-    threading.Thread(target=work, name="t2c-run", daemon=False).start()
+    threading.Thread(target=work, name=RUN_THREAD, daemon=False).start()
+
+
+def wait_for_runs() -> None:
+    """Until a Run mid-stage has ended: the interpreter's shutdown would break its next connection."""
+    for thread in threading.enumerate():
+        if thread.name == RUN_THREAD:
+            thread.join()
 
 
 class FrontDoor:

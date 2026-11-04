@@ -327,7 +327,7 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
         "echo ${x:-a # b}",
         "echo ${x} # a comment after a variable",
         "for f in ${files}; do echo $f; done # note",
-        'echo "`date`" # a comment after quoted backticks',  # inside double quotes: T27
+        'echo "`date`" # a comment after quoted backticks',  # what they run is judged on its own: T27
         "echo ${#files} ${x:-a b} ${y%.txt}",
         "echo git\\ reset\\ --hard",
         "echo hi # git reset --hard",
@@ -374,6 +374,20 @@ NESTED_FORBIDDEN = [
     "cat <<EOF # note\nhi\nEOF\ngit reset --hard",
     "cat <<EOF; git reset --hard\nhi\nEOF",
     "cat <<A <<B\nhi\nA\nthere\nB\ngit reset --hard",
+    "bash -c 'cat <<EOF\nhi\nEOF\ngit reset --hard'",  # main blocked this only because it broke the quote apart
+    # a branch switched to in a substitution is the branch the commit lands on
+    'x="$(git checkout main)"; git commit -m hi',
+    'git commit -m "$(git checkout main)"',
+    # a shell runs $(...) and backticks in a heredoc's body, unless its delimiter is quoted
+    "cat <<EOF\n$(git reset --hard)\nEOF",
+    "cat <<EOF\n`git reset --hard`\nEOF",
+    "cat <<-EOF\n\t$(git reset --hard)\n\tEOF",
+    "cat <<A <<'B'\n$(git reset --hard)\nA\nhi\nB",
+    "cat <<'A' <<B\nhi\nA\n$(git reset --hard)\nB",
+    "cat <<EOF\n'$(git reset --hard)'\nEOF",  # single quotes are only text in a body
+    'git commit -m "$(cat <<EOF\n$(git reset --hard)\nEOF\n)"',
+    # bash also closes a heredoc at `EOF)` inside $(...), so it's refused, not read as a body
+    'echo "$(cat <<EOF\nhi\nEOF)"; git reset --hard',
     # shell keywords aren't the program's name
     "if true; then git reset --hard; fi",
     "if git reset --hard; then echo hi; fi",
@@ -495,6 +509,17 @@ def test_nesting_too_deep_to_read_blocks(repo: Path, wrap: Callable[[str], str])
         "cat <<EOF\n  EOF\ngit reset --hard\nEOF",  # an indented delimiter closes only <<-
         "python3 - <<'PY'\nprint(\"it's rm -rf build\")\nPY",
         "cat > notes.md <<'EOF'\nif true; then git reset --hard; fi\neval 'git reset --hard'\nEOF",
+        "bash -c 'cat <<EOF\nrm -rf build\nEOF'",  # main blocked this: its heredoc pass broke the quote apart
+        # a quoted delimiter keeps $(...) and backticks in the body as text, however it's quoted
+        "cat <<'EOF'\n$(git reset --hard)\nEOF",
+        'cat <<"EOF"\n`git reset --hard`\nEOF',
+        "cat <<\\EOF\n$(git reset --hard)\nEOF",
+        "cat <<E'O'F\n$(git reset --hard)\nEOF",
+        # an unquoted one runs them, so what they run is judged, and an escaped one is text
+        "cat <<EOF\nDate: $(date) on `hostname`\nEOF",
+        "cat <<EOF\n\\$(git reset --hard)\nEOF",
+        "cat <<EOF\n\\`git reset --hard\\`\nEOF",
+        'cat <<EOF\nit\'s "quoted" (text) $x ${y}\nEOF',
         # quoted text and plain arguments aren't commands
         "echo '$(git reset --hard)'",
         'echo "\\$(git reset --hard)"',

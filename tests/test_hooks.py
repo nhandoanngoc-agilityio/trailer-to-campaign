@@ -286,6 +286,16 @@ def test_a_payload_with_no_command_blocks(payload: str) -> None:
         "echo hi >! evals/expected/x.toml",  # zsh's clobbering redirects, and zsh is the Mac's shell (security review)
         "echo hi >>! evals/expected/x.toml",
         "echo hi &>! evals/expected/x.toml",
+        ">! git reset --hard",  # bash reads ! as the file and runs the rest; zsh doesn't, so >! can't be judged
+        "bash -c '>! git reset --hard'",
+        "echo } ${x:-a # b}; git reset --hard",  # a stray } mustn't hide an open ${
+        "echo `echo a # b`; git reset --hard",  # no comment starts inside backticks
+        "echo `git reset --hard`",  # and what's inside them runs
+        "echo `true; git reset --hard`",
+        "bash -c $'echo\\ngit reset --hard'",  # $'...' escapes aren't decoded, so they can't be judged
+        "bash -c $'\\x67it reset --hard'",
+        "echo hi &! git reset --hard",  # zsh's &! and &| end a command as & does
+        "echo hi &| git reset --hard",
         "echo a\r# ; git reset --hard",  # a shell reads \r as part of a word, so # starts no comment
         "echo ${x:-a # b}; git reset --hard",  # nor does # inside ${...}
     ],
@@ -302,8 +312,12 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
         'echo "a | git reset --hard" "\\""',  # operators inside quotes are text
         "echo 'a; git reset --hard'",
         'grep "\\"" notes.md',
-        "echo $'a; git reset --hard\\n'",
+        "echo $'a; git reset --hard'",
         "echo $'it\\'s'",
+        "echo ${x:-a # b}",
+        "echo ${x} # a comment after a variable",
+        "for f in ${files}; do echo $f; done # note",
+        "echo `date` # a comment after backticks",
         "echo git\\ reset\\ --hard",
         "echo hi # git reset --hard",
     ],

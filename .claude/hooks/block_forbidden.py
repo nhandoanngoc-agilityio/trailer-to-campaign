@@ -60,10 +60,11 @@ ANSWER_KEY_REASON = (
 )
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
 # Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
-# The ! forms are zsh's, the Mac's shell: >! overwrites as >| does.
-OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
+# The ! forms and &| are zsh's, the Mac's shell. >! overwrites a file there, but in bash ! is the file and
+# the next word a command, so tokenize() refuses them. &! and &| end a command, as & does.
+OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|&[!|]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
-REDIRECT_CHARS = set("<>&|!")
+REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
 UV_VALUE_OPTIONS = {
     "--directory",
@@ -102,7 +103,7 @@ def tokenize(command: str) -> list[str]:
 
     shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
     operator (T24). What it can't follow, such as a quote left open, raises, and main() blocks.
-    It's a tripwire, not a shell: it doesn't look inside $(...) in double quotes or backticks.
+    It's a tripwire, not a shell: it doesn't look inside $(...) in double quotes (T27).
     """
     tokens: list[str] = []
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
@@ -121,17 +122,37 @@ def tokenize(command: str) -> list[str]:
             finish_word()
             i += 1
         elif char == "#" and word is None:  # a comment runs to the end of the line
-            if command.count("${", 0, i) > command.count("}", 0, i):  # no comment starts inside ${...}
-                raise ValueError("a # inside ${...}")
             newline = command.find("\n", i)
             i = end if newline == -1 else newline
+        elif char == "$" and command[i + 1 : i + 2] == "{":  # ${...} is one word: nothing inside starts a comment
+            closing, depth = i + 2, 1
+            while closing < end and depth:
+                if command.startswith("${", closing):
+                    depth, closing = depth + 1, closing + 2
+                else:
+                    depth, closing = depth - (command[closing] == "}"), closing + 1
+            if depth:
+                raise ValueError("a ${ left open")
+            word = (word or "") + command[i:closing]
+            i = closing
+        elif char == "`":  # what's inside backticks runs, as a command of its own
+            closing = i + 1
+            while closing < end and command[closing] != "`":
+                closing += 2 if command[closing] == "\\" else 1
+            if closing >= end:
+                raise ValueError("a ` left open")
+            finish_word()
+            tokens.extend([Op(";"), *tokenize(command[i + 1 : closing]), Op(";")])
+            i = closing + 1
         elif char == "$" and command[i + 1 : i + 2] == "'":  # $'...': a backslash escapes anything, even a quote
             closing = i + 2
             while closing < end and command[closing] != "'":
                 closing += 2 if command[closing] == "\\" else 1
             if closing >= end:
                 raise ValueError("a $' quote left open")
-            word = (word or "") + command[i + 2 : closing]
+            if re.search(r"\\[^']", command[i + 2 : closing]):  # \n, \x67: what it decodes to can't be judged here
+                raise ValueError("an escape in a $' quote")
+            word = (word or "") + command[i + 2 : closing].replace("\\'", "'")
             i = closing + 1
         elif char == "'":  # nothing is special inside single quotes
             closing = command.find("'", i + 1)
@@ -158,7 +179,9 @@ def tokenize(command: str) -> list[str]:
             i += 2
         elif operator:
             finish_word()
-            tokens.append(Op(operator.group()))
+            if "!" in operator.group() and operator.group() != "&!":
+                raise ValueError(f"{operator.group()} means different things in zsh and bash")
+            tokens.append(Op("&" if operator.group() in ("&!", "&|") else operator.group()))
             i = operator.end()
         else:
             word = (word or "") + char

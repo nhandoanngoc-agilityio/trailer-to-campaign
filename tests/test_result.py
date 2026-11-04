@@ -377,6 +377,11 @@ def test_a_film_result_with_a_known_old_way_source_can_be_built(source: str, est
     assert result.old_way_source == source and result.time_saved_is_estimate is estimate
 
 
+def test_a_film_result_has_no_default_old_way_source() -> None:
+    with pytest.raises(TypeError, match="old_way_source"):
+        FilmResult("f", "T", Decimal(240), Decimal(60))  # type: ignore[call-arg]
+
+
 def test_the_old_way_source_has_no_default(tmp_path: Path, films: Path) -> None:
     trial(tmp_path / "runs")
     with pytest.raises(TypeError, match="old_way_source"):

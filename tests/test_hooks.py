@@ -374,7 +374,7 @@ NESTED_FORBIDDEN = [
     "cat <<EOF # note\nhi\nEOF\ngit reset --hard",
     "cat <<EOF; git reset --hard\nhi\nEOF",
     "cat <<A <<B\nhi\nA\nthere\nB\ngit reset --hard",
-    "bash -c 'cat <<EOF\nhi\nEOF\ngit reset --hard'",  # main blocked this only because it broke the quote apart
+    "bash -c 'cat <<EOF\nhi\nEOF\ngit reset --hard'",  # the -c command is read on its own, past its heredoc
     # a branch switched to in a substitution is the branch the commit lands on
     'x="$(git checkout main)"; git commit -m hi',
     'git commit -m "$(git checkout main)"',

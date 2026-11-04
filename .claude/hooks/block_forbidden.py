@@ -60,9 +60,10 @@ ANSWER_KEY_REASON = (
 )
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
 # Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
-OPERATOR = re.compile(r"&>>|<<<|>>|>\||>&|&>|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
+# The ! forms are zsh's, the Mac's shell: >! overwrites as >| does.
+OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
-REDIRECT_CHARS = set("<>&|")
+REDIRECT_CHARS = set("<>&|!")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
 UV_VALUE_OPTIONS = {
     "--directory",
@@ -100,8 +101,8 @@ def tokenize(command: str) -> list[str]:
     """The command's words, with its unquoted operators as Op tokens, read by a shell's quoting rules.
 
     shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
-    operator (T24). Quotes left open run to the end of the command, which only hides text the
-    shell wouldn't run either.
+    operator (T24). What it can't follow, such as a quote left open, raises, and main() blocks.
+    It's a tripwire, not a shell: it doesn't look inside $(...) in double quotes or backticks.
     """
     tokens: list[str] = []
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
@@ -116,15 +117,26 @@ def tokenize(command: str) -> list[str]:
     while i < end:
         char = command[i]
         operator = OPERATOR.match(command, i)
-        if char in " \t\r":
+        if char in " \t":  # not \r: a shell reads it as part of a word
             finish_word()
             i += 1
         elif char == "#" and word is None:  # a comment runs to the end of the line
+            if command.count("${", 0, i) > command.count("}", 0, i):  # no comment starts inside ${...}
+                raise ValueError("a # inside ${...}")
             newline = command.find("\n", i)
             i = end if newline == -1 else newline
+        elif char == "$" and command[i + 1 : i + 2] == "'":  # $'...': a backslash escapes anything, even a quote
+            closing = i + 2
+            while closing < end and command[closing] != "'":
+                closing += 2 if command[closing] == "\\" else 1
+            if closing >= end:
+                raise ValueError("a $' quote left open")
+            word = (word or "") + command[i + 2 : closing]
+            i = closing + 1
         elif char == "'":  # nothing is special inside single quotes
             closing = command.find("'", i + 1)
-            closing = end if closing == -1 else closing
+            if closing == -1:
+                raise ValueError("a ' quote left open")
             word = (word or "") + command[i + 1 : closing]
             i = closing + 1
         elif char == '"':  # a backslash only escapes these inside double quotes
@@ -137,6 +149,8 @@ def tokenize(command: str) -> list[str]:
                 else:
                     word += command[i]
                     i += 1
+            if i >= end:
+                raise ValueError('a " quote left open')
             i += 1
         elif char == "\\":
             if i + 1 < end and command[i + 1] != "\n":  # backslash-newline joins two lines

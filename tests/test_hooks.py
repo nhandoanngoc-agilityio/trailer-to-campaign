@@ -278,6 +278,16 @@ def test_a_payload_with_no_command_blocks(payload: str) -> None:
         "echo hi;>evals/expected/x.toml",
         "echo hi|>evals/expected/x.toml",
         "git reset --hard # a comment with a stray ' quote",
+        "echo $'\\'' ; git reset --hard",  # \' doesn't end a $'...' string (T24 @claude)
+        "echo $'\\'' > evals/expected/x.toml",
+        "echo 'never closed ; git reset --hard",  # a quote left open: the command can't be read, so it isn't checked
+        'echo "never closed ; git reset --hard',
+        "echo $'never closed ; git reset --hard",
+        "echo hi >! evals/expected/x.toml",  # zsh's clobbering redirects, and zsh is the Mac's shell (security review)
+        "echo hi >>! evals/expected/x.toml",
+        "echo hi &>! evals/expected/x.toml",
+        "echo a\r# ; git reset --hard",  # a shell reads \r as part of a word, so # starts no comment
+        "echo ${x:-a # b}; git reset --hard",  # nor does # inside ${...}
     ],
 )
 def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: str) -> None:
@@ -292,6 +302,8 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
         'echo "a | git reset --hard" "\\""',  # operators inside quotes are text
         "echo 'a; git reset --hard'",
         'grep "\\"" notes.md',
+        "echo $'a; git reset --hard\\n'",
+        "echo $'it\\'s'",
         "echo git\\ reset\\ --hard",
         "echo hi # git reset --hard",
     ],

@@ -33,6 +33,10 @@ apart from the words, all as a shell does unless quoted. Wrappers like `sudo`,
 `env X=1`, `bash -c "..."` are unwrapped, so `cd x && rm -rf y` is still caught.
 Paths are read from the shell's directory (the payload's cwd, then any cd).
 Uses only the standard library, so no jq or extra dependency is needed.
+
+Runs on the machine's python3, not the project's, and macOS ships 3.9, so the hooks must
+stay 3.9-compatible. Only exit 2 blocks: a crash (exit 1) would let the command run, so
+a crash while judging a command blocks it too (T24).
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ def tokenize(command: str) -> list[str]:
         raw = words
     if len(raw) != len(words):  # the two lexings don't line up (escapes): judge by text
         raw = words
-    return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw, strict=True)]
+    return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw)]
 
 
 def split_segments(command: str) -> list[list[str]]:
@@ -452,9 +456,18 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return 0  # never break Claude on malformed input
-    command = (payload.get("tool_input") or {}).get("command") or ""
+    command = ""
     state: dict = {}
-    reason = find_violation(command, payload.get("cwd"), state=state)
+    try:
+        command = (payload.get("tool_input") or {}).get("command") or ""
+        reason = find_violation(command, payload.get("cwd"), state=state)
+    except Exception as error:  # a guard that crashes must not wave the command through
+        print(
+            f"Blocked: the guardrail hook crashed ({error!r}), so this command wasn't checked. "
+            f"Fix .claude/hooks/block_forbidden.py.\nCommand: {command}",
+            file=sys.stderr,
+        )
+        return 2
     if reason:
         print(
             f"Blocked by team policy (CLAUDE.md 'Never do'): {reason}.\nCommand: {command}",

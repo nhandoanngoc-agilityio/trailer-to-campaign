@@ -5,7 +5,11 @@ Each hook reads a tool call as JSON on stdin, the way Claude Code sends it.
 
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,10 +19,22 @@ import pytest
 HOOKS = Path(__file__).resolve().parent.parent / ".claude" / "hooks"
 
 
+def hook_python() -> str:
+    """The `python3` .claude/settings.json would find: not this project's virtualenv, which `uv run` puts first (T24).
+
+    T2C_HOOK_PYTHON names another one, so CI can test the oldest we expect.
+    """
+    if override := os.environ.get("T2C_HOOK_PYTHON"):
+        return override
+    venv_bin = str(Path(sys.prefix) / "bin")
+    path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p != venv_bin)
+    return shutil.which("python3", path=path) or sys.executable
+
+
 def run_hook(name: str, tool_input: dict, cwd: Path | None = None) -> subprocess.CompletedProcess:
     payload = {"tool_input": tool_input, "cwd": str(cwd) if cwd else None}
     return subprocess.run(
-        [sys.executable, str(HOOKS / name)],
+        [hook_python(), str(HOOKS / name)],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -197,9 +213,49 @@ def test_asks_before_adding_a_dependency(repo: Path) -> None:
 
 def test_ignores_malformed_input() -> None:
     result = subprocess.run(
-        [sys.executable, str(HOOKS / "block_forbidden.py")], input="not json", capture_output=True, text=True
+        [hook_python(), str(HOOKS / "block_forbidden.py")], input="not json", capture_output=True, text=True
     )
     assert result.returncode == 0
+
+
+def load_block_forbidden():
+    spec = importlib.util.spec_from_file_location("block_forbidden", HOOKS / "block_forbidden.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_crash_while_judging_blocks_the_command(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """Exit 1 lets a command run, so a guard that crashes would wave everything through (T24)."""
+    hook = load_block_forbidden()
+
+    def crash(*args, **kwargs):
+        raise TypeError("zip() takes no keyword arguments")
+
+    monkeypatch.setattr(hook, "find_violation", crash)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": "git status"}})))
+    assert hook.main() == 2
+    assert "wasn't checked" in capsys.readouterr().err
+
+
+def test_json_of_the_wrong_shape_blocks_rather_than_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    hook = load_block_forbidden()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("[]"))
+    assert hook.main() == 2
+
+
+def test_ruff_judges_the_hooks_as_python_39() -> None:
+    """Ruff's B905 asks for zip(strict=True), which is how 3.10-only code got into a hook (T24)."""
+    source = "words = [1]\nraw = [2]\npairs = list(zip(words, raw))\n"
+    project = HOOKS.parent.parent
+    result = subprocess.run(
+        ["ruff", "check", "--select", "B905", "--stdin-filename", str(HOOKS / "any_hook.py"), "-"],
+        input=source,
+        capture_output=True,
+        text=True,
+        cwd=project,
+    )
+    assert result.returncode == 0, result.stdout
 
 
 # --- prompt_changed.py --------------------------------------------------------

@@ -42,11 +42,11 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
 **Every artifact of work (spec, tests, PRs, notes, the ticket record) is Claude-assisted and human-reviewed, edited where needed.** Claude drafts; the human reviews and edits. Claude never fills in a provenance block or a PR's Human review section on the human's behalf.
 
 1. **Analyze.** Read the issue (`gh issue view <n>`), its blockers, the code it touches and any ADR it bears on. Restate each **Done when** line as a concrete check you can run, and list open questions.
-   Start `docs/tickets/T<n>.md` from the template with the Spec section.
+   If its blockers are closed, branch `t<n>-<slug>` from fresh `main` and start `docs/tickets/T<n>.md` there, from the template with the Spec section.
    _Done when:_ every Done-when line has a runnable check, and every open question is either answered from the repo or put to the human.
 2. **Plan** 🧑. In plan mode, write: the failing tests you will add first, the files you will change, which check each step proves, and any effect on cost or prompts. Wait for approval.
    _Done when:_ the human approves the plan.
-3. **Build.** Branch `t<n>-<slug>` from fresh `main`. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
+3. **Build.** Integrate `main` if it has moved. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
    _Done when:_ every planned test is green.
 4. **Verify.** Run the full test suite and lint. Then, by what changed:
    - **An agent's prompt, tool or model:** run the smallest Eval Set run that covers the change, and compare it with the Baseline from `t2c eval --baseline`. Run `main` again only when it says a new run is needed. A drop in Traps caught blocks the PR.

@@ -969,7 +969,7 @@ def test_an_unknown_watcher_flag_is_refused(capsys: pytest.CaptureFixture[str]) 
     assert "invalid choice" in capsys.readouterr().err
 
 
-# T12: the side-by-side result, from the Film's Run Logs and the two stopwatch times.
+# T12: the side-by-side result, from the Film's Run Logs and the two times.
 
 
 def test_result_writes_the_page_without_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

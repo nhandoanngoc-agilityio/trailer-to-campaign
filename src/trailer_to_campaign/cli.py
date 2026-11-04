@@ -21,7 +21,8 @@ Answer Key, with no Approval, so it needs no person and runs unattended.
 run, watch, eval and slack take --watcher v0|sdk: the Watcher on its own loop (the
 default) or on the Claude Agent SDK (T11).
 result writes a real Film's side-by-side page (T12): Time Saved from the two
-marketers' stopwatch times, and the Approval Rate and cost per Film from its Run Logs.
+marketers' times, and the Approval Rate and cost per Film from its Run Logs.
+--old-way-source says whether the old way's time came from a stopwatch or from memory (T28).
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from trailer_to_campaign.config import (
 from trailer_to_campaign.pricing import Usage
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
+OLD_WAY_SOURCES = ("stopwatch", "memory")  # result.py's: importing it here would load the pipeline for every command
 DUMMY_MODEL = "claude-opus-5-5"
 DUMMY_INPUT_TOKENS = 2_000
 DUMMY_MAX_TOKENS = 1_000
@@ -151,8 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     result = commands.add_parser("result", help="the side-by-side result for a real Film: Time Saved, Approval, cost")
     result.add_argument("--film", type=_film_arg, required=True)
-    result.add_argument("--old-way", required=True, help="minutes the old way took, from that marketer's stopwatch")
-    result.add_argument("--new-way", required=True, help="minutes Trailer-to-Campaign took, timed the same way")
+    result.add_argument(
+        "--old-way", required=True, help="minutes the old way took; --old-way-source says where they came from"
+    )
+    result.add_argument("--new-way", required=True, help="minutes of active work Trailer-to-Campaign took")
+    result.add_argument(
+        "--old-way-source",
+        choices=OLD_WAY_SOURCES,
+        required=True,
+        help="stopwatch: timed and written down on stopping; memory: remembered, so Time Saved is labelled an estimate",
+    )
     result.add_argument("--runs-dir", type=Path, help="where the Film's Run Logs are (default: runs/)")
     result.add_argument(
         "--run", help="the Run whose Campaign was used, by its folder (default: the last to finish that gave one)"
@@ -435,14 +445,26 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
 
 
 def side_by_side(
-    film: str, old_way: str, new_way: str, runs_dir: Path, settings: Settings, used_run: str | None = None
+    film: str,
+    old_way: str,
+    new_way: str,
+    old_way_source: str,
+    runs_dir: Path,
+    settings: Settings,
+    used_run: str | None = None,
 ) -> int:
-    """T12's one-page result from the Film's Run Logs and the two stopwatch times. Reads files only."""
+    """T12's one-page result from the Film's Run Logs and the two times. Reads files only."""
     from trailer_to_campaign.result import film_result, write_result
 
     try:
         result = film_result(
-            film, runs_dir, settings.films_dir, old_minutes=old_way, new_minutes=new_way, used_run=used_run
+            film,
+            runs_dir,
+            settings.films_dir,
+            old_minutes=old_way,
+            new_minutes=new_way,
+            old_way_source=old_way_source,
+            used_run=used_run,
         )
     except ValueError as err:
         print(err, file=sys.stderr)
@@ -535,6 +557,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
             film=args.film,
             old_way=args.old_way,
             new_way=args.new_way,
+            old_way_source=args.old_way_source,
             runs_dir=args.runs_dir or settings.runs_dir,
             settings=settings,
             used_run=args.run,

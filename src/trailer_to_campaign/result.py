@@ -1,17 +1,19 @@
 """The side-by-side result (T12): Time Saved, Approval Rate and cost per Film for one real launch.
 
-    result = film_result(film, runs_dir, films_dir, old_minutes=240, new_minutes=60)
+    result = film_result(film, runs_dir, films_dir, old_minutes=240, new_minutes=60, old_way_source="stopwatch")
     page = write_result(result, runs_dir)          # runs/<film>/result.md and result.json
 
 One marketer prepares the Film's posts the old way and another uses Trailer-to-Campaign,
 each timing their own active work with a stopwatch (docs/side-by-side.md). Those two
-times give Time Saved. Everything else comes from the Film's own Run Logs:
+times give Time Saved. The old way's source is always given, never assumed (T28): a time
+from memory makes Time Saved an estimate, and the page says so. Everything else comes from
+the Film's own Run Logs:
 - cost per Film is the sum of every launch Run, re-runs and failures included, since the Film
   Budget caps each Run, not the Film; a Run killed mid-way counts what its model calls spent.
   Eval Set and dummy Runs of the Film are left out: they are not launch work;
 - the Approval Rate is the Run whose Campaign was used: by default the last Run to finish that
   gave a Campaign (completed, at least one Social Post approved), or the one named with --run;
-- each Run's Run Log time (start to finish) is shown beside the stopwatch, as a check only:
+- each Run's Run Log time (start to finish) is shown beside the two times, as a check only:
   it includes any wait for the Marketer at Approval.
 
 The page holds the Film's title and numbers only, never a post, a Key Moment or the
@@ -33,6 +35,7 @@ from trailer_to_campaign.pipeline import LIGHT_EDIT_FLAG
 from trailer_to_campaign.run_log import check_film_slug, read_events
 
 UNFINISHED = "did not finish"
+OLD_WAY_SOURCES = ("stopwatch", "memory")  # cli.py offers these
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class FilmResult:
     title: str
     old_minutes: Decimal
     new_minutes: Decimal
+    old_way_source: str  # one of OLD_WAY_SOURCES
     runs: list[RunSummary] = field(default_factory=list)  # launch Runs, in the order they started
     used: RunSummary | None = None  # the Run whose Campaign was used
     left_out: int = 0  # Eval Set and dummy Runs of the Film, not counted
@@ -86,6 +90,10 @@ class FilmResult:
         return self.time_saved / self.old_minutes
 
     @property
+    def time_saved_is_estimate(self) -> bool:
+        return self.old_way_source == "memory"
+
+    @property
     def run_log_minutes(self) -> Decimal:
         return sum((r.minutes for r in self.runs if r.minutes is not None), Decimal(0))
 
@@ -100,6 +108,7 @@ def film_result(
     *,
     old_minutes: Minutes,
     new_minutes: Minutes,
+    old_way_source: str,
     used_run: str | None = None,
 ) -> FilmResult:
     """Read every Run Log of the Film. Refuses bad input before anything is written.
@@ -108,12 +117,14 @@ def film_result(
     that gave a Campaign (completed, with at least one Social Post approved)."""
     check_film_slug(film)
     old, new = _minutes(old_minutes, "old-way"), _minutes(new_minutes, "new-way")
+    if old_way_source not in OLD_WAY_SOURCES:
+        raise ValueError(f"--old-way-source must be stopwatch or memory, got {old_way_source!r}")
     title = load_film(films_dir, film).catalog.title
     every = [_summary(log) for log in (runs_dir / film).glob("*/run.jsonl")]
     runs = sorted((r for r in every if r.launch), key=_started_order)
     if not runs:
         raise ValueError(f"no Run Logs for {film} under {runs_dir.name}/{film}/: run the Film first")
-    return FilmResult(film, title, old, new, runs, _used(runs, used_run), len(every) - len(runs))
+    return FilmResult(film, title, old, new, old_way_source, runs, _used(runs, used_run), len(every) - len(runs))
 
 
 def _used(runs: list[RunSummary], named: str | None) -> RunSummary | None:
@@ -207,10 +218,11 @@ def _plural(n: int, word: str) -> str:
 
 def _page(r: FilmResult) -> str:
     a = r.approval
+    label = "Time Saved (estimate)" if r.time_saved_is_estimate else "Time Saved"
     if r.time_saved >= 0:
-        saved = f"- Time Saved: {r.time_saved:g} min ({r.time_saved_share:.0%})"
+        saved = f"- {label}: {r.time_saved:g} min ({r.time_saved_share:.0%})"
     else:
-        saved = f"- Time Saved: none: Trailer-to-Campaign took {-r.time_saved:g} min longer ({-r.time_saved_share:.0%})"
+        saved = f"- {label}: none: Trailer-to-Campaign took {-r.time_saved:g} min longer ({-r.time_saved_share:.0%})"
     lines = [
         f"# {r.title}: side by side",
         "",
@@ -220,14 +232,7 @@ def _page(r: FilmResult) -> str:
         else "- Approval Rate: not finished (no completed Run that gave a Campaign)",
         f"- Cost per Film: ${r.cost:.4f} over {_plural(len(r.runs), 'Run')}",
         "",
-        "## How it was measured",
-        "",
-        f"- The old way: {r.old_minutes:g} min of active work, timed by that marketer's stopwatch.",
-        f"- Trailer-to-Campaign: {r.new_minutes:g} min of active work, timed the same way.",
-        "- Both started with the trailer link and the catalog facts, and stopped with the six Social Posts ready "
-        "to publish (docs/side-by-side.md).",
-        f"- The Run Logs add up to {r.run_log_minutes:g} min from start to finish. That includes any wait for the "
-        "Marketer at Approval, so it is a check on the stopwatch, not the measure.",
+        *_how_the_times_were_got(r),
         "- Cost per Film is every Run's cost: the Film Budget caps each Run, not the Film, so re-runs and failed "
         "Runs count."
         + (
@@ -261,6 +266,34 @@ def _page(r: FilmResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _how_the_times_were_got(r: FilmResult) -> list[str]:
+    """Only what --old-way-source says happened. It says nothing of how the new way was timed."""
+    run_logs = (
+        f"- The Run Logs add up to {r.run_log_minutes:g} min from start to finish. That includes any wait for the "
+        "Marketer at Approval, so it is a check on "
+    )
+    if r.old_way_source == "memory":
+        return [
+            "## Where the numbers came from",
+            "",
+            f"- The old way: {r.old_minutes:g} min, from memory, so Time Saved is an estimate, not a measurement.",
+            f"- Trailer-to-Campaign: {r.new_minutes:g} min of active work, as that marketer gave it.",
+            "- The protocol has both start with the trailer link and the catalog facts, and stop with the six "
+            "Social Posts ready to publish (docs/side-by-side.md). A time from memory can't show the old way "
+            "kept to it.",
+            run_logs + "Trailer-to-Campaign's time only. Nothing here checks the old way's.",
+        ]
+    return [
+        "## How it was measured",
+        "",
+        f"- The old way: {r.old_minutes:g} min of active work, timed by that marketer's stopwatch.",
+        f"- Trailer-to-Campaign: {r.new_minutes:g} min of active work, timed the same way.",
+        "- Both started with the trailer link and the catalog facts, and stopped with the six Social Posts ready "
+        "to publish (docs/side-by-side.md).",
+        run_logs + "the stopwatch, not the measure.",
+    ]
+
+
 def _flag_count(approval: dict[str, Any], key: str) -> int | None:
     """How many posts, or None for a Run from before T22 (or none used): unknown is not zero."""
     names = approval.get(key)
@@ -282,6 +315,8 @@ def _numbers(r: FilmResult) -> dict[str, Any]:
         "title": r.title,
         "old_way_minutes": str(r.old_minutes),
         "new_way_minutes": str(r.new_minutes),
+        "old_way_source": r.old_way_source,
+        "time_saved_is_estimate": r.time_saved_is_estimate,
         "time_saved_minutes": str(r.time_saved),
         "approval_rate": r.approval.get("overall"),
         "approved_over_a_flag": _flag_count(r.approval, "approved_over_a_flag"),

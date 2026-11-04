@@ -46,7 +46,7 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
    _Done when:_ every Done-when line has a runnable check, and every open question is either answered from the repo or put to the human.
 2. **Plan** 🧑. In plan mode, write: the failing tests you will add first, the files you will change, which check each step proves, and any effect on cost or prompts. Wait for approval.
    _Done when:_ the human approves the plan.
-3. **Build.** Integrate `main` if it has moved. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
+3. **Build.** If `main` has moved, merge it in. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
    _Done when:_ every planned test is green.
 4. **Verify.** Run the full test suite and lint. Then, by what changed:
    - **An agent's prompt, tool or model:** run the smallest Eval Set run that covers the change, and compare it with the Baseline from `t2c eval --baseline`. Run `main` again only when it says a new run is needed. A drop in Traps caught blocks the PR.
@@ -59,7 +59,7 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
    _Done when:_ every Done-when check has passed, with its evidence (output, numbers, screenshot) ready for the PR.
 5. **Ship.** Open a PR with `.github/pull_request_template.md`, `Closes #<n>`, and the evidence from Verify. Watch CI to green.
    _Done when:_ the PR is open, CI is green, and every template section is filled.
-6. **Review** 🧑. Run the `review-checklist` skill and `/code-review` against `main`, and fix what they find; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
+6. **Review** 🧑. Run the `review-checklist` skill and `/code-review` against `main`, and fix what they find; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges; under the `ship-ticket` skill, that review happens once, after Close the loop, so the record is in the PR. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
    _Done when:_ the human merges.
 7. **Close the loop.** Finish `docs/tickets/T<n>.md` (plan, tests, review outcomes, evidence, close) in the ticket's PR, leaving its provenance block for the human. Update `CONTEXT.md` for any term the ticket settled. Offer an ADR only for a decision that is hard to reverse, surprising, and a real trade-off. Add one **lesson** to `docs/lessons.md`: what the ticket taught about building agents, in a line or two.
    _Done when:_ the ticket record, glossary, ADRs and lessons reflect the ticket, the human has reviewed the record, and the issue is closed.

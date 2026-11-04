@@ -15,7 +15,7 @@ Analyze → Plan 🧑 → Build → Verify → Ship → Review 🧑 → Close th
 | Build | Works test-first on branch `t<n>-<slug>` | Watch the diff pane; comment to steer |
 | Verify | Runs tests, lint, and (when an agent changed) the Eval Set and a real trailer | Look at the evidence |
 | Ship | Opens the PR with evidence; watches CI | Nothing, unless CI fails |
-| Review 🧑 | Runs `/code-review` first and fixes findings; Claude's CI review then comments on the PR | Review last and merge; ask for an ultrareview on risky PRs |
+| Review 🧑 | Runs the `review-checklist` skill and `/code-review` first and fixes findings; Claude's CI review then comments on the PR | Review last and merge; ask for an ultrareview on risky PRs |
 | Close the loop | Finishes the ticket record, updates the glossary, offers ADRs, writes one lesson | Review the record and edit where needed; fill in its provenance and the PR's Human review; accept or reject the ADR |
 
 ## Claude drafts, people review

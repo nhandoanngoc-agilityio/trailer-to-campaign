@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from trailer_to_campaign.result import film_result, write_result
+from trailer_to_campaign.result import FilmResult, film_result, write_result
 
 FILM = "quiet-river"
 FILM_TOML = """
@@ -363,6 +363,18 @@ def test_an_unknown_old_way_source_is_refused_before_anything_is_written(
     with pytest.raises(ValueError, match="--old-way-source must be stopwatch or memory"):
         film_result(FILM, tmp_path / "runs", films, old_minutes=240, new_minutes=60, old_way_source=source)
     assert not (tmp_path / "runs" / FILM / "result.md").exists()
+
+
+@pytest.mark.parametrize("source", ["", "guess", "Memory", "memory ", "stopwatch ", None])
+def test_a_film_result_with_an_unknown_old_way_source_cannot_be_built(source: Any) -> None:
+    with pytest.raises(ValueError, match="--old-way-source must be stopwatch or memory"):
+        FilmResult("f", "T", Decimal(240), Decimal(60), source)
+
+
+@pytest.mark.parametrize(("source", "estimate"), [("stopwatch", False), ("memory", True)])
+def test_a_film_result_with_a_known_old_way_source_can_be_built(source: str, estimate: bool) -> None:
+    result = FilmResult("f", "T", Decimal(240), Decimal(60), source)
+    assert result.old_way_source == source and result.time_saved_is_estimate is estimate
 
 
 def test_the_old_way_source_has_no_default(tmp_path: Path, films: Path) -> None:

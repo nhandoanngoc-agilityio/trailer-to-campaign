@@ -73,6 +73,11 @@ class FilmResult:
     used: RunSummary | None = None  # the Run whose Campaign was used
     left_out: int = 0  # Eval Set and dummy Runs of the Film, not counted
 
+    def __post_init__(self) -> None:
+        """Refused here, so nothing can reach the page with a source it would read as a stopwatch."""
+        if self.old_way_source not in OLD_WAY_SOURCES:
+            raise ValueError(f"--old-way-source must be stopwatch or memory, got {self.old_way_source!r}")
+
     @property
     def cost(self) -> Decimal:
         return sum((r.cost for r in self.runs), Decimal(0))
@@ -117,8 +122,6 @@ def film_result(
     that gave a Campaign (completed, with at least one Social Post approved)."""
     check_film_slug(film)
     old, new = _minutes(old_minutes, "old-way"), _minutes(new_minutes, "new-way")
-    if old_way_source not in OLD_WAY_SOURCES:
-        raise ValueError(f"--old-way-source must be stopwatch or memory, got {old_way_source!r}")
     title = load_film(films_dir, film).catalog.title
     every = [_summary(log) for log in (runs_dir / film).glob("*/run.jsonl")]
     runs = sorted((r for r in every if r.launch), key=_started_order)

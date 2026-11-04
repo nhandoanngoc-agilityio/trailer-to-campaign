@@ -71,7 +71,7 @@ If a post's header says "after 1 retries", the Checker already sent that post ba
 | The app stops responding | Restart it once with the command above and mention the bot again. If it's still stuck, play the recording |
 | Slack or the API is down | Play the recording |
 
-The planted sentence was caught 5 out of 5 times when measured for T13. That's a small sample, and the Checker can vary between runs (#38), so keep the recording ready.
+The planted sentence was caught 5 out of 5 times when measured for T13, outside Slack. That's a small sample, the Checker can vary between runs (#38), and the sentence hasn't yet been tried in a full live Run, so rehearse it on Wed 11 Nov.
 
 ## After a Run
 
@@ -88,3 +88,5 @@ A Run costs about $0.45, inside the $2.00 Film Budget. Demo Runs stay under `run
 ## The backup recording
 
 Record the whole script with QuickTime (File > New Screen Recording), signed in as the presenter so the private reason shows. Keep the video outside git, because the repo doesn't hold footage. Note the time at which the flag appears, so you can jump to it on stage.
+
+**What the current recording shows:** Run `20261104T035322Z`, with the flag at 5:30. That edit held a stray note, not the planted sentence, so its reason is `brand other`, not `spoiler ending-capture`. If you play it, say what it shows: the Checker flagging an edit that isn't marketing copy. Don't present it as the planted spoiler being caught. A new recording that follows the script would replace it.

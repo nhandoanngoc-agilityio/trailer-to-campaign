@@ -270,7 +270,12 @@ def _page(r: FilmResult) -> str:
 
 
 def _how_the_times_were_got(r: FilmResult) -> list[str]:
-    """Only what --old-way-source says happened. It says nothing of how the new way was timed."""
+    """The page's lines on how the two times were got.
+
+    memory: the old way is from memory, and the new way's minutes are as given, with no claim of how
+    they were timed, since the flag is only about the old way. stopwatch: the page as it was before
+    T28, including "timed the same way" for the new way, which nothing records. T28's Done-when 3
+    requires that line to stay."""
     run_logs = (
         f"- The Run Logs add up to {r.run_log_minutes:g} min from start to finish. That includes any wait for the "
         "Marketer at Approval, so it is a check on "

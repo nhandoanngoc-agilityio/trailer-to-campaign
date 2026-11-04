@@ -47,7 +47,7 @@ The Side-by-Side Trial: one upcoming Film is prepared twice, so Time Saved, Appr
 - **Stop** it when your six posts are done (point 8).
 - **Time active work only.**
   - Pause for breaks, meetings and lunch.
-  - B also pauses while the agents run. Waiting for them isn't B's work; it shows in the Run Log, which the result puts beside the stopwatch.
+  - B also pauses while the agents run. Waiting for them isn't B's work; it shows in the Run Log, which the result puts beside the two times.
 - **Write your minutes down the moment you stop,** with one line on anything unusual: an interruption, and for A, what they used.
 
 ## Then
@@ -62,7 +62,7 @@ The Side-by-Side Trial: one upcoming Film is prepared twice, so Time Saved, Appr
     uv run t2c result --film <film> --old-way <A's minutes> --new-way <B's minutes> --old-way-source stopwatch|memory [--run <folder>]
     ```
 
-    `--old-way-source` is required, and the command refuses anything else, so the page never guesses. Use `stopwatch` only if A timed the work as above. Otherwise use `memory`: the page then says A's time is from memory, makes no stopwatch claim, and labels Time Saved as an estimate. It takes B's minutes as given, because the flag is only about A.
+    `--old-way-source` is required, and the command refuses anything else, so the page never guesses. Use `stopwatch` only if A timed the work as above. Otherwise use `memory`: the page then says A's time is from memory, makes no stopwatch claim, and labels Time Saved as an estimate. That page takes B's minutes as given, because the flag is only about A. A `stopwatch` page says B was timed the same way as A, and nothing records that.
 
     This writes `runs/<film>/result.md`, plus `result.json` with the same numbers and the source:
     - **Time Saved:** A's minutes minus B's. If B took longer, the page says so. A time from memory makes it an estimate.

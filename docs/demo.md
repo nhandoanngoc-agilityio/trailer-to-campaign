@@ -32,10 +32,12 @@ Run the script once before the talk. The first Run prepares the frames and trans
 - [ ] `T2C_MARKETERS` in `~/.zshrc` holds the presenter's Slack member id. Open a new terminal after changing it.
 - [ ] The Mac is on mains power with the lid open, on a steady network, with updates put off.
 - [ ] Start the app and leave it running: `caffeinate -i uv run t2c slack`
-- [ ] Free check: mention the bot in the test channel with no Film named. The presenter should get "I couldn't tell which Film you mean".
+- [ ] The demo Film is ready. This costs nothing, and should print the trailer's file name:
+  `uv run python -c "from pathlib import Path as P; from trailer_to_campaign.catalog import load_film as l, default_source as d; print(d(l(P('films'),'demo-agent-327'),P('films')))"`
+- [ ] Free check, **before your screen is shared**: mention the bot in the test channel with no Film named. The presenter should get "I couldn't tell which Film you mean". That reply lists every local Film, including unreleased ones, and so does a mistyped slug, so type `demo-agent-327` carefully on stage.
 - [ ] Slack is open in the test channel, signed in as the presenter, with the text large enough to read from the back.
-- [ ] The planted sentence below is ready to paste.
-- [ ] The backup recording is open at its first frame.
+- [ ] The planted sentence below is on the clipboard.
+- [ ] The backup recording is open, and you know what it shows (see "The backup recording").
 
 ## On stage
 
@@ -47,18 +49,22 @@ In the end, Agent 327 is captured and the villains plan to make him their next r
 
 | Step | Do | Say out loud (never paste this) |
 |---|---|---|
-| 1 | Mention the bot with `demo-agent-327` | "A Marketer starts a Run from Slack with a Film's name." |
+| 1 | Mention the bot with `demo-agent-327` | "A Marketer starts a Run from Slack with a Film's name. This is *Agent 327*, an open movie by Blender Studio." |
 | 2 | Wait for the Key Moments, about a minute | "The Watcher studies the trailer's frames and speech. Every Key Moment is checked against what it actually saw." |
 | 3 | Approve each Key Moment | "Nothing moves on without a person's Approval." |
 | 4 | Wait for the Social Posts, about a minute | "The Copywriter writes six posts in English and Vietnamese, and the Checker reviews each one. The Copywriter never sees the Spoiler List." |
 | 5 | On Facebook English, click **Edit**, paste the planted sentence at the end of the post, and save | "Now I'll give away the Film's ending in this post, on purpose." |
-| 6 | Wait about 10 seconds. The thread shows **"⚠️ The Checker flagged the edit"**. The private reason must start **"⚠️ spoiler ending-capture"** | "That's the catch. The channel only sees that it was flagged. The reason can describe the spoiler, so only Marketers get it." |
+| 6 | Wait about 10 seconds. The thread shows **"⚠️ The Checker flagged the edit"**. The private message must have a line starting **"⚠️ spoiler ending-capture"** | "That's the catch. Only Marketers see the Checker's reason, because it can describe the spoiler." |
 | 7 | Click **Reject** | "Even a person's own edit gets checked. A Marketer can still overrule the Checker, but the record will say so." |
 | 8 | Decide the other five posts | "Approve, edit or reject each one, and every decision is recorded." |
 
 **Never approve the flagged edit.** The Run has no cancel (#38), so it has to reach the end.
 
 **A flag alone isn't the catch.** The Checker also flags edits for other reasons. Only a private reason that names `ending-capture` is the catch.
+
+**The edited post stays in the thread,** spoiler included, even after Reject. Only the Checker's reason is private. That's fine for this released Film, but don't try this on a Film whose Spoiler List is real.
+
+**A note about length isn't the Checker.** If the post is long, the thread may also say "facebook posts are at most 500 characters". That comes from code, so keep to the Checker's reason. To avoid it, delete a sentence from the post as you paste.
 
 If a post's header says "after 1 retries", the Checker already sent that post back once. It's worth a sentence, but it doesn't show the reason, so it isn't the catch this script relies on.
 
@@ -71,6 +77,8 @@ If a post's header says "after 1 retries", the Checker already sent that post ba
 | The app stops responding | Restart it once with the command above and mention the bot again. If it's still stuck, play the recording |
 | Slack or the API is down | Play the recording |
 
+**Whenever you play the current recording, say what it shows:** the Checker flagging an edit that isn't marketing copy, not the planted spoiler being caught.
+
 The planted sentence was caught 5 out of 5 times when measured for T13, outside Slack. That's a small sample, the Checker can vary between runs (#38), and the sentence hasn't yet been tried in a full live Run, so rehearse it on Wed 11 Nov.
 
 ## After a Run
@@ -78,10 +86,10 @@ The planted sentence was caught 5 out of 5 times when measured for T13, outside 
 The Run Log can hold spoilers, so don't show it on stage. To confirm the catch afterwards:
 
 ```
-jq -c 'select(.event=="post_checked" and .verdict=="reject") | {platform,language,spoiler_ids,rules}' runs/demo-agent-327/<time>/run.jsonl
+jq -c 'select(.event=="post_checked" and .platform=="facebook" and .language=="en") | {verdict,spoiler_ids,rules}' runs/demo-agent-327/<time>/run.jsonl
 ```
 
-The catch is the last Facebook English line, with `spoiler_ids` of `["ending-capture"]`. A line with only `rules` is a brand objection, not the catch. An earlier line may be a catch the Copywriter's retry then fixed.
+The catch is the **last** line, with `"verdict":"reject"` and `spoiler_ids` of `["ending-capture"]`, because the edit is checked last. A last line with only `rules` is a brand objection, not the catch. An earlier line may be a catch the Copywriter's retry then fixed.
 
 A Run costs about $0.45, inside the $2.00 Film Budget. Demo Runs stay under `runs/demo-agent-327/`, apart from the T12 result and the sample Film's Runs.
 

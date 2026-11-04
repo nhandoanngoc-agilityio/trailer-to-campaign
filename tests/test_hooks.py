@@ -243,7 +243,15 @@ def test_a_crash_while_judging_blocks_the_command() -> None:
 
 @pytest.mark.parametrize(
     "payload",
-    ["[]", "{}", '{"tool_input": {}}', '{"tool_input": {"cmd": "git push -f"}}', '{"tool_input": {"command": 1}}'],
+    [
+        "[]",
+        "{}",
+        "null",
+        '{"tool_input": null}',
+        '{"tool_input": {}}',
+        '{"tool_input": {"cmd": "git push -f"}}',
+        '{"tool_input": {"command": 1}}',
+    ],
 )
 def test_a_payload_with_no_command_blocks(payload: str) -> None:
     """This hook only sees Bash calls, so no command means Claude Code's payload changed (T24)."""
@@ -261,6 +269,9 @@ def test_a_payload_with_no_command_blocks(payload: str) -> None:
         'echo "\\""&git reset --hard',
         '(git reset --hard;echo "\\"")',
         'echo "\\"">evals/expected/x.toml',
+        '(echo "\\"")>evals/expected/x.toml',  # ")>" is a separator and a redirect, not one operator
+        "(echo hi)>evals/expected/x.toml",  # the same, where shlex can read it
+        "(echo hi)>>evals/expected/x.toml",
     ],
 )
 def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: str) -> None:
@@ -271,7 +282,16 @@ def test_operators_still_split_a_command_shlex_cannot_read(repo: Path, command: 
 
 def wired_hook_command() -> str:
     settings = json.loads((HOOKS.parent / "settings.json").read_text())
-    return settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    bash = next(entry for entry in settings["hooks"]["PreToolUse"] if entry["matcher"] == "Bash")
+    return next(hook["command"] for hook in bash["hooks"] if "block_forbidden.py" in hook["command"])
+
+
+def test_the_wiring_tests_run_on_the_python_under_test() -> None:
+    """They find `python3` beside hook_python(), which uv names python3.9: if that were another version, they'd lie."""
+    env = {"PATH": f"{Path(hook_python()).parent}:/usr/bin:/bin"}
+    found = subprocess.run(["/bin/sh", "-c", "python3 --version"], capture_output=True, text=True, env=env)
+    expected = subprocess.run([hook_python(), "--version"], capture_output=True, text=True)
+    assert found.stdout == expected.stdout
 
 
 def test_the_wiring_blocks_when_the_hook_exits_with_anything_else(tmp_path: Path) -> None:

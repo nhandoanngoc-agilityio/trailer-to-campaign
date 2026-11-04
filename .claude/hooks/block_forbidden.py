@@ -118,6 +118,17 @@ def tokenize(command: str) -> list[str]:
     return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw)]
 
 
+def split_parens(tokens: list[str]) -> list[str]:
+    """Parentheses apart from the operators they touch: `)>` is a group's end and a redirect, not one operator."""
+    split: list[str] = []
+    for tok in tokens:
+        if isinstance(tok, Op):
+            split.extend(Op(part) for part in re.findall(r"[()]|[^()]+", tok))
+        else:
+            split.append(tok)
+    return split
+
+
 def split_segments(command: str) -> list[list[str]]:
     """Split a shell command line into simple commands (lists of tokens).
 
@@ -125,7 +136,7 @@ def split_segments(command: str) -> list[list[str]]:
     `grep ">" f` is not, a newline separates commands, and `( )` group without hiding them.
     """
     segments, current = [], []
-    for tok in tokenize(drop_heredoc_bodies(command)):
+    for tok in split_parens(tokenize(drop_heredoc_bodies(command))):
         # '' is an empty argument, not a separator; > >> &> >| are redirects, kept with their command
         if isinstance(tok, Op) and set(tok) <= SEPARATOR_CHARS:
             if current:
@@ -175,7 +186,7 @@ def strip_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
 
 def run_git(args: list[str], cwd: str | None) -> str | None:
     try:
-        out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() if out.returncode == 0 else None

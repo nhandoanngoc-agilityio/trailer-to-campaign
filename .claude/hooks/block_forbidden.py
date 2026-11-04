@@ -33,6 +33,11 @@ apart from the words, all as a shell does unless quoted. Wrappers like `sudo`,
 `env X=1`, `bash -c "..."` are unwrapped, so `cd x && rm -rf y` is still caught.
 Paths are read from the shell's directory (the payload's cwd, then any cd).
 Uses only the standard library, so no jq or extra dependency is needed.
+
+Runs on the machine's python3, not the project's, and macOS ships 3.9, so the hooks must
+stay 3.9-compatible. Only exit 2 blocks, and a crash exits 1, which would let the command
+run. So a failure while judging a command blocks it here, and `|| exit 2` in
+.claude/settings.json blocks whatever never reaches that code, such as no python3 (T24).
 """
 
 from __future__ import annotations
@@ -41,7 +46,6 @@ import json
 import os
 import posixpath
 import re
-import shlex
 import subprocess
 import sys
 
@@ -55,7 +59,10 @@ ANSWER_KEY_REASON = (
     "the Answer Key (evals/expected/) is human-owned: change the code or the prompt, never the expected answers"
 )
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
-OPERATOR_CHARS = ";&|<>()\n"  # split off as their own tokens, as a shell does, unless quoted
+# Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
+# The ! forms and &| are zsh's, the Mac's shell. >! overwrites a file there, but in bash ! is the file and
+# the next word a command, so tokenize() refuses them. &! and &| end a command, as & does.
+OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|&[!|]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
 REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
@@ -92,25 +99,85 @@ class Op(str):
 
 
 def tokenize(command: str) -> list[str]:
-    """The command's words, with its unquoted operators as Op tokens.
+    """The command's words, with its unquoted operators as Op tokens, read by a shell's quoting rules.
 
-    Lexed twice, with and without quote removal: only the second shows which `>` was quoted.
+    shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
+    operator (T24). What it can't follow raises, and main() blocks: a quote left open, unquoted
+    backticks, a ${...} holding more than plain text. Refusing these is deliberate: each attempt
+    to parse them opened new gaps. It's a tripwire, not a shell: it doesn't look inside $(...)
+    or backticks in double quotes (T27).
     """
+    tokens: list[str] = []
+    word: str | None = None  # None between words: '' is an empty argument, and a word of its own
+    i, end = 0, len(command)
 
-    def lex(posix: bool) -> list[str]:
-        lexer = shlex.shlex(command, posix=posix, punctuation_chars=OPERATOR_CHARS)
-        lexer.whitespace = " \t\r"  # a newline separates commands; it is not a space
-        lexer.whitespace_split = True
-        return list(lexer)
+    def finish_word() -> None:
+        nonlocal word
+        if word is not None:
+            tokens.append(word)
+        word = None
 
-    try:
-        words, raw = lex(True), lex(False)
-    except ValueError:  # unbalanced quotes: fall back to a rough split, judged by text
-        words = command.replace(";", " ; ").replace("&&", " && ").replace("\n", " ; ").split()
-        raw = words
-    if len(raw) != len(words):  # the two lexings don't line up (escapes): judge by text
-        raw = words
-    return [Op(w) if r and set(r) <= set(OPERATOR_CHARS) else w for w, r in zip(words, raw, strict=True)]
+    while i < end:
+        char = command[i]
+        operator = OPERATOR.match(command, i)
+        if char in " \t":  # not \r: a shell reads it as part of a word
+            finish_word()
+            i += 1
+        elif char == "#" and word is None:  # a comment runs to the end of the line
+            newline = command.find("\n", i)
+            i = end if newline == -1 else newline
+        elif char == "$" and command[i + 1 : i + 2] == "{":  # plain ${...} is one word: no comment starts inside it
+            closing = command.find("}", i)
+            if closing == -1 or re.search(r"[\"'\\`$;&|<>(){\n]", command[i + 2 : closing]):
+                raise ValueError("a ${...} holding more than plain text")
+            word = (word or "") + command[i : closing + 1]
+            i = closing + 1
+        elif char == "`":  # what runs inside them, and how they join the words around them, can't be judged here
+            raise ValueError("unquoted backticks")
+        elif char == "$" and command[i + 1 : i + 2] == "'":  # $'...': a backslash escapes anything, even a quote
+            closing = i + 2
+            while closing < end and command[closing] != "'":
+                closing += 2 if command[closing] == "\\" else 1
+            if closing >= end:
+                raise ValueError("a $' quote left open")
+            if re.search(r"\\[^']", command[i + 2 : closing]):  # \n, \x67: what it decodes to can't be judged here
+                raise ValueError("an escape in a $' quote")
+            word = (word or "") + command[i + 2 : closing].replace("\\'", "'")
+            i = closing + 1
+        elif char == "'":  # nothing is special inside single quotes
+            closing = command.find("'", i + 1)
+            if closing == -1:
+                raise ValueError("a ' quote left open")
+            word = (word or "") + command[i + 1 : closing]
+            i = closing + 1
+        elif char == '"':  # a backslash only escapes these inside double quotes
+            word = word or ""
+            i += 1
+            while i < end and command[i] != '"':
+                if command[i] == "\\" and i + 1 < end and command[i + 1] in '$`"\\\n':
+                    word += "" if command[i + 1] == "\n" else command[i + 1]
+                    i += 2
+                else:
+                    word += command[i]
+                    i += 1
+            if i >= end:
+                raise ValueError('a " quote left open')
+            i += 1
+        elif char == "\\":
+            if i + 1 < end and command[i + 1] != "\n":  # backslash-newline joins two lines
+                word = (word or "") + command[i + 1]
+            i += 2
+        elif operator:
+            finish_word()
+            if "!" in operator.group() and operator.group() != "&!":
+                raise ValueError(f"{operator.group()} means different things in zsh and bash")
+            tokens.append(Op("&" if operator.group() in ("&!", "&|") else operator.group()))
+            i = operator.end()
+        else:
+            word = (word or "") + char
+            i += 1
+    finish_word()
+    return tokens
 
 
 def split_segments(command: str) -> list[list[str]]:
@@ -170,9 +237,10 @@ def strip_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
 
 def run_git(args: list[str], cwd: str | None) -> str | None:
     try:
-        out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
+        out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=3)
+    except OSError:  # no git, or a folder the command has yet to make: git has nothing to say here
         return None
+    # A timeout is left to raise: a hung git isn't "not on main", and main() blocks on it
     return out.stdout.strip() if out.returncode == 0 else None
 
 
@@ -452,9 +520,20 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return 0  # never break Claude on malformed input
-    command = (payload.get("tool_input") or {}).get("command") or ""
+    command = ""
     state: dict = {}
-    reason = find_violation(command, payload.get("cwd"), state=state)
+    try:
+        command = payload["tool_input"]["command"]  # this hook only sees Bash: no command means the payload changed
+        if not isinstance(command, str) or not command:
+            raise ValueError("the payload has no command")
+        reason = find_violation(command, payload.get("cwd"), state=state)
+    except Exception as error:  # a guard that crashes must not wave the command through
+        print(
+            f"Blocked: the guardrail hook failed ({error!r}), so this command wasn't checked. "
+            f"Stop and ask a person; don't edit the hook to get past it.\nCommand: {command}",
+            file=sys.stderr,
+        )
+        return 2
     if reason:
         print(
             f"Blocked by team policy (CLAUDE.md 'Never do'): {reason}.\nCommand: {command}",

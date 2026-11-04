@@ -38,7 +38,7 @@ Instructions in `CLAUDE.md` guide Claude; these make the important ones determin
 | Every PR is tested, and reviewed once when it opens unless it only changes `docs/` (`@claude` re-reviews) | `ci.yml` (lint, tests, hook tests), `claude-code-review.yml` |
 | You know when Claude is waiting | `notify_on_finish.py` desktop notification |
 
-The hooks have their own tests (`tests/test_hooks.py`), so a guardrail can't silently stop working.
+The hooks have their own tests (`tests/test_hooks.py`), so a guardrail can't silently stop working. They run on the machine's `python3`, not the project's. The tests use that `python3` too, or the one `T2C_HOOK_PYTHON` names, and CI also runs them on 3.9, the version macOS ships (T24). If the Bash hook fails, it blocks the command: stop and ask a person.
 
 **One-time setup:** run `git config core.hooksPath .githooks` in each clone, and add the `CLAUDE_CODE_OAUTH_TOKEN` secret to the repo so the Claude review and `@claude` workflows can run.
 

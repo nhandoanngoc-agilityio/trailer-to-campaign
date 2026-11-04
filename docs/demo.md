@@ -1,6 +1,6 @@
 # The demo: the Checker catches a planted spoiler (T13)
 
-A scripted live Slack Run for the company talk, about 4 minutes on stage. The presenter is the Marketer. On one Social Post they add the Film's ending, and the Checker's re-check flags it in the thread.
+A scripted live Slack Run for the company talk, about 6 minutes on stage. The presenter is the Marketer. On one Social Post they add the Film's ending, and the Checker's re-check flags it in the thread.
 
 The spoiler is planted on purpose, and the talk says so. The Film is Agent 327, the sample the prompts were built against (ADR 0008), so the demo shows how the tool works, not how good it is. The evidence for that is the T12 result (`docs/results/t12-side-by-side.md`).
 
@@ -39,24 +39,26 @@ Run the script once before the talk. The first Run prepares the frames and trans
 
 ## On stage
 
-**The planted sentence:**
+**The planted sentence.** This is the only text to paste into the post. Copy it to the clipboard before you start:
 
 ```
 In the end, Agent 327 is captured and the villains plan to make him their next recruit.
 ```
 
-| Step | Do | Say |
+| Step | Do | Say out loud (never paste this) |
 |---|---|---|
 | 1 | Mention the bot with `demo-agent-327` | "A Marketer starts a Run from Slack with a Film's name." |
-| 2 | Wait for the Key Moments, about 30 seconds | "The Watcher studies the trailer's frames and speech. Every Key Moment is checked against what it actually saw." |
+| 2 | Wait for the Key Moments, about a minute | "The Watcher studies the trailer's frames and speech. Every Key Moment is checked against what it actually saw." |
 | 3 | Approve each Key Moment | "Nothing moves on without a person's Approval." |
-| 4 | Wait for the Social Posts, about 40 seconds | "The Copywriter writes six posts in English and Vietnamese, and the Checker reviews each one. The Copywriter never sees the Spoiler List." |
-| 5 | On Facebook English, click **Edit**, add the planted sentence to the end, and save | "Say I add a line that gives away the ending. I'm doing this on purpose." |
-| 6 | Wait about 10 seconds. The thread shows **"⚠️ The Checker flagged the edit"**, and the reason arrives privately on the presenter's screen | "That's the catch. The channel only sees that it was flagged. The reason can describe the spoiler, so only Marketers get it." |
+| 4 | Wait for the Social Posts, about a minute | "The Copywriter writes six posts in English and Vietnamese, and the Checker reviews each one. The Copywriter never sees the Spoiler List." |
+| 5 | On Facebook English, click **Edit**, paste the planted sentence at the end of the post, and save | "Now I'll give away the Film's ending in this post, on purpose." |
+| 6 | Wait about 10 seconds. The thread shows **"⚠️ The Checker flagged the edit"**. The private reason must start **"⚠️ spoiler ending-capture"** | "That's the catch. The channel only sees that it was flagged. The reason can describe the spoiler, so only Marketers get it." |
 | 7 | Click **Reject** | "Even a person's own edit gets checked. A Marketer can still overrule the Checker, but the record will say so." |
 | 8 | Decide the other five posts | "Approve, edit or reject each one, and every decision is recorded." |
 
 **Never approve the flagged edit.** The Run has no cancel (#38), so it has to reach the end.
+
+**A flag alone isn't the catch.** The Checker also flags edits for other reasons. Only a private reason that names `ending-capture` is the catch.
 
 If a post's header says "after 1 retries", the Checker already sent that post back once. It's worth a sentence, but it doesn't show the reason, so it isn't the catch this script relies on.
 
@@ -64,7 +66,7 @@ If a post's header says "after 1 retries", the Checker already sent that post ba
 
 | What happens | What to do |
 |---|---|
-| The edit isn't flagged | Say so plainly, then play the recording. Never claim a catch that didn't happen |
+| The edit isn't flagged, or its reason doesn't name `ending-capture` | Say so plainly, then play the recording. Never claim a catch that didn't happen |
 | "Not re-checked" appears | Same: the Checker didn't run, so this isn't a catch |
 | The app stops responding | Restart it once with the command above and mention the bot again. If it's still stuck, play the recording |
 | Slack or the API is down | Play the recording |
@@ -76,10 +78,12 @@ The planted sentence was caught 5 out of 5 times when measured for T13. That's a
 The Run Log can hold spoilers, so don't show it on stage. To confirm the catch afterwards:
 
 ```
-jq -c 'select(.event=="post_checked" and .verdict=="reject") | {platform,language,spoiler_ids}' runs/demo-agent-327/<time>/run.jsonl
+jq -c 'select(.event=="post_checked" and .verdict=="reject") | {platform,language,spoiler_ids,rules}' runs/demo-agent-327/<time>/run.jsonl
 ```
 
-A Run costs about $0.40, inside the $2.00 Film Budget. Demo Runs stay under `runs/demo-agent-327/`, apart from the T12 result and the sample Film's Runs.
+The catch is the last Facebook English line, with `spoiler_ids` of `["ending-capture"]`. A line with only `rules` is a brand objection, not the catch. An earlier line may be a catch the Copywriter's retry then fixed.
+
+A Run costs about $0.45, inside the $2.00 Film Budget. Demo Runs stay under `runs/demo-agent-327/`, apart from the T12 result and the sample Film's Runs.
 
 ## The backup recording
 

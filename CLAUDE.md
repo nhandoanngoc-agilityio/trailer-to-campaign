@@ -12,6 +12,10 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - Test: `uv run pytest`. Lint: `uv run ruff check . && uv run ruff format --check .`
 - Open a PR: `git push -u origin <branch>`, then `gh pr create --base main`.
 
+## Environment and worktrees
+
+This is a macOS and zsh environment. Use `python3` if `python` is not on PATH, do not assume GNU `timeout` exists, and avoid unquoted word splitting. Prefer absolute paths over relying on an earlier `cd`, except for git in a worktree: `block_forbidden.py` judges the branch from the session's directory, so enter the worktree with `EnterWorktree(path=...)` and run git from there. In a worktree, fetch and integrate the latest main before starting and again before opening a PR, especially when parallel tickets are merging. If Claude Code's worktree guard refuses a heredoc, use Edit, or Write for a new file.
+
 ## Layout
 
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
@@ -22,6 +26,14 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.
 - `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
 - `.github/workflows/`: `ci.yml` (lint and tests), `claude-code-review.yml` (Claude reviews each PR once when it opens, unless it only changes `docs/`), `claude.yml` (`@claude` in issues and PRs).
+
+## Pre-PR checks
+
+Before opening a PR, review your own diff for wrong-number errors, budget or limit bugs, unhandled edge cases, and tests that can hang. Run the full test suite and lint, and report any issues you could not fix.
+
+## Validation and eval changes
+
+When changing a gate, checker, or validation rule, add tests for both sides: invalid input must be rejected and valid input must still pass. Do not loosen a rule to fix a false positive without a test showing that the original bad case still fails. Before a paid Eval Set re-run, state why it is needed and its expected cost, and confirm that known review findings are fixed or answered.
 
 ## The ticket loop
 

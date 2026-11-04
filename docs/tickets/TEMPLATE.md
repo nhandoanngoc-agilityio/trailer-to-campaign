@@ -23,7 +23,7 @@ What the tests prove, and how many there were at merge.
 
 | Finding | From | Outcome |
 |---|---|---|
-| | `/code-review` / ultrareview / CI review | fixed (commit) / answered (why) |
+| | `review-checklist` / `/code-review` / ultrareview / CI review | fixed (commit) / answered (why) |
 
 ## Evidence
 

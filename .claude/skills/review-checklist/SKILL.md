@@ -5,13 +5,15 @@ description: Review a branch, PR or diff against this project's own rules and sh
 
 # Review checklist
 
-The checks `/code-review` and `/security-review` can't know: this project's rules, and the bugs it has already shipped. Each check names where it came from, so read that lesson or ADR when a check seems not to apply.
+The checks `/code-review` and `/security-review` can't know: this project's rules, and the bugs it has already shipped. Most checks name their source, so read it when a check seems not to apply. The rest restate `CLAUDE.md`, `CONTEXT.md` or `README.md`.
 
 ## 1. Find the diff
 
-For a branch: `git diff origin/main...HEAD` and `git log origin/main..HEAD --oneline`. For a PR: `gh pr diff <n>`, `gh pr view <n>` and its commits.
+First run `git fetch origin main`, so the diff holds only this work.
 
-Read every changed file in full. Many checks depend on the code around the change.
+For a branch: `git diff origin/main...HEAD` and `git log origin/main..HEAD --oneline`. For a PR: `gh pr checkout <n>` (for a merged one, `git checkout <its head>`), then `gh pr diff <n>`, `gh pr view <n>` and its commits.
+
+Read every changed file in full at that commit. Many checks depend on the code around the change.
 
 ## 2. Apply every check
 
@@ -20,18 +22,18 @@ Mark each check **pass**, **fail** (file:line and one sentence why) or **n/a** (
 ### The Checker and the retry loop
 - [ ] Every Social Post reaches the Checker before Approval, including a Marketer's edit (T6, T10). See `src/trailer_to_campaign/agents/review.py`.
 - [ ] The retry cap, `MAX_RETRIES`, is unchanged. A post still rejected after it stays **Flagged** and never reads as passed (T22).
-- [ ] A guard that can't finish its job flags the post, and a failed review never counts as a pass.
+- [ ] A guard that can't finish its job flags the post, and a failed review never counts as a pass (**Flagged** in `CONTEXT.md`).
 - [ ] When the Checker lacks the data it needs, the fix gives it the data rather than a looser rule (T15).
 
 ### The Spoiler List
 - [ ] Only the Checker can read the Spoiler List (ADR 0007). The Copywriter's servers stay catalog-only.
 - [ ] What goes back to the Copywriter holds only its own words, in a fixed sentence (T6).
-- [ ] Checker reasons go privately to Marketers, and stay out of the channel, because they can describe the spoiler (T22).
+- [ ] Checker reasons go privately to Marketers, and stay out of the channel, because they can describe the spoiler. See the comment in `src/trailer_to_campaign/slack_approval.py`.
 - [ ] A Film with no Spoiler List is refused. Only an explicit `spoilers = []` means none (T3).
 
 ### Approval
-- [ ] Only a Marketer's action in Slack, or the person's keystrokes in `t2c run`, records an Approval. See `src/trailer_to_campaign/slack_approval.py`.
-- [ ] Stopping or crashing ends the Run in an error, never in an Approval.
+- [ ] Only a Marketer's action in Slack, or the person's keystrokes in `t2c run`, records an Approval. See `src/trailer_to_campaign/slack_approval.py` and `src/trailer_to_campaign/approval.py`.
+- [ ] Stopping or crashing ends the Run in an error, never in an Approval (`README.md`).
 - [ ] The record says what happened: an approval over a flag, an edit's mark beside its Measured Change (T10, T22).
 
 ### Grounding and tracing
@@ -64,7 +66,7 @@ Mark each check **pass**, **fail** (file:line and one sentence why) or **n/a** (
 - [ ] Real-footage or live-Slack evidence is there when the pipeline or Slack changed.
 
 ### The ticket loop
-- [ ] The branch is `t<n>-<slug>`, and the PR uses `.github/pull_request_template.md` with `Closes #<n>`.
+- [ ] The branch is `t<n>-<slug>`, and the PR uses `.github/pull_request_template.md` with `Closes #<n>`. Before a PR is open, mark the PR's part n/a.
 - [ ] **Risky** is ticked if the diff touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or a prompt that enforces a guardrail.
 - [ ] The PR's Human review section and the record's provenance block are left for the human.
 - [ ] Code, tickets and PRs use the words in `CONTEXT.md`, and a new term was proposed rather than invented silently.
@@ -81,6 +83,7 @@ Report these only if the diff changes why they're fine:
 - The "Not findings here" list in `.claude/claude-security-guidance.md`.
 - The hook in `.claude/hooks/block_forbidden.py` is a tripwire for accidents, not a sandbox, and its known gaps are tracked in #70.
 - Local models (faster-whisper) skip the meter.
+- `t2c run` takes Approval from the person's keystrokes: it's the single-user terminal path, and the guidance's "Slack action" means the Slack path.
 
 ## 3. Report
 
@@ -89,4 +92,4 @@ One table with a row per check, failures first:
 | Check | Result | Where | Why |
 |---|---|---|---|
 
-Then a one-line verdict: **ready**, **ready after fixes** (list them), or **needs rework**. A review reports: fix only when asked.
+Then a one-line verdict: **ready**, **ready after fixes** (list them), or **needs rework**. Inside the ticket loop's Review step, fix what's real and say so. Otherwise report, and fix only when asked.

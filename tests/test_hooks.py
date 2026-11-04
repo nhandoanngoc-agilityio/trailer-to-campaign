@@ -301,6 +301,27 @@ def test_quoted_text_is_not_a_command(repo: Path, command: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_a_hung_git_blocks_the_command(tmp_path: Path) -> None:
+    """A hung git isn't "not on main": it means the branch is unknown, so the command wasn't checked (T24)."""
+    fake_git = tmp_path / "git"
+    fake_git.write_text("#!/bin/sh\nexec sleep 8\n")
+    fake_git.chmod(0o755)
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "block_forbidden.py")],
+        input=json.dumps({"tool_input": {"command": "git commit -m x"}, "cwd": str(tmp_path)}),
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 2
+    assert "wasn't checked" in result.stderr
+
+
+def test_a_folder_the_command_has_yet_to_make_is_not_a_failure(tmp_path: Path) -> None:
+    result = run_hook("block_forbidden.py", {"command": "mkdir new && cd new && git status"}, tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
 def wired_hook_command() -> str:
     settings = json.loads((HOOKS.parent / "settings.json").read_text())
     bash = next(entry for entry in settings["hooks"]["PreToolUse"] if entry["matcher"] == "Bash")

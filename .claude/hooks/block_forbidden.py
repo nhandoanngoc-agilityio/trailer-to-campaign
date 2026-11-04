@@ -211,8 +211,9 @@ def strip_redirects(tokens: list[str]) -> tuple[list[str], list[str]]:
 def run_git(args: list[str], cwd: str | None) -> str | None:
     try:
         out = subprocess.run(["git", *args], cwd=cwd or None, capture_output=True, text=True, timeout=3)
-    except (OSError, subprocess.SubprocessError):
+    except OSError:  # no git, or a folder the command has yet to make: git has nothing to say here
         return None
+    # A timeout is left to raise: a hung git isn't "not on main", and main() blocks on it
     return out.stdout.strip() if out.returncode == 0 else None
 
 

@@ -16,6 +16,7 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
 - `docs/tickets/T<n>.md`: one record per ticket (spec, plan, tests, review, evidence, close), from `docs/tickets/TEMPLATE.md`.
+- `deploy/`: runs the Slack app from a tagged release under `launchd`. `docs/deploy.md`: how.
 - `.claude/hooks/`: guardrails wired in `.claude/settings.json`, tested in `tests/test_hooks.py`. A hook block or approval prompt is team policy: change the approach (branch, PR, specific files) rather than reaching the same result another way.
 - `.claude/skills/review-checklist/`: this project's own review checks, from its rules and shipped bugs.
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.

@@ -667,6 +667,34 @@ def test_slack_runs_the_front_door_until_ctrl_c_and_closes_waiting_runs(
     assert door.marketers == frozenset({"U07MARKET"})
 
 
+def test_stopping_the_service_ends_slack_as_ctrl_c_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """launchd stops a service with SIGTERM, which would otherwise kill it with no chance to end a waiting Run (T26)."""
+    import signal
+    import time
+
+    import slack_bolt.adapter.socket_mode as socket_mode
+
+    socket = FakeSocketMode(monkeypatch)
+    closed: list[bool] = []
+
+    class Handler:
+        def __init__(self, app: Any, app_token: str) -> None:
+            door = socket.doors[0]
+            real_close = door.close
+            monkeypatch.setattr(door, "close", lambda: (closed.append(True), real_close()))
+
+        def start(self) -> None:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+            pytest.fail("SIGTERM didn't stop the front door")
+
+    monkeypatch.setattr(socket_mode, "SocketModeHandler", Handler)
+    before = signal.getsignal(signal.SIGTERM)
+    assert main(["slack", "--runs-dir", str(tmp_path / "runs")], env=SLACK_ENV) == 0
+    assert closed == [True]  # door.close() is what ends a waiting Run in an error
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
 def test_each_slack_run_is_a_full_run_for_the_requested_film(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from decimal import Decimal
 

@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, replace
@@ -410,6 +411,11 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
     log.info(
         "Slack front door is up for %d Marketer(s); runs go to %s. Ctrl-C to stop.", len(settings.marketers), runs_dir
     )
+
+    def stop(signum: int, frame: Any) -> None:  # launchd stops a service with SIGTERM: treat it as Ctrl-C (T26)
+        raise KeyboardInterrupt
+
+    before = signal.signal(signal.SIGTERM, stop)
     try:
         SocketModeHandler(app, app_token).start()
     except KeyboardInterrupt:
@@ -418,6 +424,7 @@ def slack(budget: Decimal, runs_dir: Path, settings: Settings) -> int:
         log.info("stopping: a Run waiting on Approval ends now, in an error; one mid-stage ends at its next Approval")
     finally:
         door.close()
+        signal.signal(signal.SIGTERM, before)
     return 0
 
 

@@ -1,0 +1,150 @@
+#!/bin/bash
+# Run the Slack front door from a tagged release under launchd (T26). See docs/deploy.md.
+# Lives in ~/.t2c because macOS refuses a launchd job access to ~/Documents.
+set -euo pipefail
+
+LABEL="io.t2c.slack"
+SERVICE_HOME="$HOME/.t2c"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+DOMAIN="gui/$(id -u)"
+SETTINGS="ANTHROPIC_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN T2C_MARKETERS"
+
+die() {
+    echo "t2c-service: $*" >&2
+    exit 1
+}
+
+make_home() {
+    mkdir -p "$SERVICE_HOME"
+    chmod 700 "$SERVICE_HOME"
+}
+
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+write_plist() {
+    local home script logs
+    home=$(xml_escape "$SERVICE_HOME")
+    script="$home/current/deploy/run-slack.sh"
+    logs="$home/logs/slack.log"
+    cat >"$1" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array><string>/bin/sh</string><string>$script</string></array>
+    <key>WorkingDirectory</key><string>$home</string>
+    <key>EnvironmentVariables</key>
+    <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key>
+    <dict><key>SuccessfulExit</key><false/></dict>
+    <key>ThrottleInterval</key><integer>30</integer>
+    <key>ExitTimeOut</key><integer>900</integer>
+    <key>StandardOutPath</key><string>$logs</string>
+    <key>StandardErrorPath</key><string>$logs</string>
+</dict>
+</plist>
+EOF
+}
+
+cmd_secrets() {
+    local name value missing="" new="$SERVICE_HOME/env.new"
+    for name in $SETTINGS; do
+        [ -n "${!name:-}" ] || missing="$missing $name"
+    done
+    [ -z "$missing" ] || die "not set in this shell:$missing"
+    make_home
+    (
+        umask 077
+        for name in $SETTINGS; do
+            value=$(printf '%s' "${!name}" | sed "s/'/'\\\\''/g")
+            printf "export %s='%s'\n" "$name" "$value"
+        done >"$new"
+    )
+    mv "$new" "$SERVICE_HOME/env"
+    echo "wrote $SERVICE_HOME/env, readable only by you"
+}
+
+cmd_install() {
+    local tag="${1:-}" repo release plist_new created=""
+    [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "install needs a tag name, like v0.1.0"
+    repo=$(git rev-parse --show-toplevel) || die "run this from the repo"
+    git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null || die "no tag named $tag"
+    [ -f "$SERVICE_HOME/env" ] || die "no $SERVICE_HOME/env yet; run: deploy/t2c-service secrets"
+
+    make_home
+    mkdir -p "$SERVICE_HOME/releases" "$SERVICE_HOME/logs" "$SERVICE_HOME/films" "$(dirname "$PLIST")"
+    release="$SERVICE_HOME/releases/$tag"
+    if [ ! -d "$release" ]; then
+        mkdir "$release.new"
+        git -C "$repo" archive "refs/tags/$tag" | tar -x -C "$release.new"
+        mv "$release.new" "$release"
+        created=yes
+    fi
+    if ! uv sync --locked --no-dev --project "$release"; then
+        [ -z "$created" ] || rm -rf "$release"
+        die "couldn't install $tag's dependencies; the running release is unchanged"
+    fi
+
+    plist_new="$PLIST.new"
+    write_plist "$plist_new"
+    if ! plutil -lint "$plist_new" >/dev/null; then
+        rm -f "$plist_new"
+        die "the generated plist isn't valid; the running release is unchanged"
+    fi
+
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true # ends a waiting Run in an error, never an Approval
+    ln -sfn "$release" "$SERVICE_HOME/current"
+    mv "$plist_new" "$PLIST"
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    echo "$tag is running. Check it with: deploy/t2c-service status"
+}
+
+cmd_add_film() {
+    local slug="${1:-}" repo source target
+    [[ "$slug" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "add-film needs a Film's slug, not a path"
+    repo=$(git rev-parse --show-toplevel) || die "run this from the repo"
+    source="$repo/films/$slug"
+    [ ! -L "$source" ] && [ -f "$source/film.toml" ] || die "no Film at films/$slug (it needs a film.toml)"
+    make_home
+    mkdir -p "$SERVICE_HOME/films"
+    target="$SERVICE_HOME/films/$slug"
+    rm -rf "$target.new"
+    cp -RP "$source" "$target.new"
+    rm -rf "$target"
+    mv "$target.new" "$target"
+    echo "copied $slug to the service's Films. Copy it again after changing its Spoiler List."
+}
+
+cmd_status() {
+    if [ -L "$SERVICE_HOME/current" ]; then
+        echo "release: $(basename "$(readlink "$SERVICE_HOME/current")")"
+    fi
+    launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid|last exit code) =' || echo "launchd has no state for $LABEL"
+}
+
+cmd_logs() {
+    tail -n "${1:-50}" "$SERVICE_HOME/logs/slack.log"
+}
+
+cmd_uninstall() {
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "stopped. $SERVICE_HOME stays: its Run Logs and Films may be the only copy."
+}
+
+command="${1:-}"
+[ "$#" -eq 0 ] || shift
+case "$command" in
+secrets) cmd_secrets ;;
+install) cmd_install "$@" ;;
+add-film) cmd_add_film "$@" ;;
+status) cmd_status ;;
+logs) cmd_logs "$@" ;;
+uninstall) cmd_uninstall ;;
+*) die "usage: t2c-service secrets | install <tag> | add-film <slug> | status | logs [lines] | uninstall" ;;
+esac

@@ -81,7 +81,7 @@ Mark each check **pass**, **fail** (file:line and one sentence why) or **n/a** (
 Report these only if the diff changes why they're fine:
 
 - The "Not findings here" list in `.claude/claude-security-guidance.md`.
-- The hook in `.claude/hooks/block_forbidden.py` is a tripwire for accidents, not a sandbox, and its known gaps are tracked in #70.
+- The hook in `.claude/hooks/block_forbidden.py` is a tripwire for accidents, not a sandbox, and its known gaps are listed in `docs/tickets/T27.md`.
 - Local models (faster-whisper) skip the meter.
 - `t2c run` takes Approval from the person's keystrokes: it's the single-user terminal path, and the guidance's "Slack action" means the Slack path.
 

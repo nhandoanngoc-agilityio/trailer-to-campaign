@@ -631,6 +631,213 @@ def test_an_expansion_doesnt_carry_a_branch_switch(repo: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+# T27, review round 1. Each pair: what must still block, and what must stay allowed.
+
+ROUND_1_FORBIDDEN = [
+    # 1. macOS bash and sh close a $(...) at a ) in a comment, so what follows runs
+    'echo "$(# )"; git reset --hard; echo "\n)"',
+    'echo "$(# )"; rm -rf build; echo "\n)"',
+    'echo "$(# )" && git push -f; echo "\n)"',
+    'x="$(ls # list )"; git reset --hard; echo "\n)"',
+    'bash -c \'echo "$(# )"; git reset --hard; echo "\n)"\'',
+    "echo $(# )\ngit reset --hard\n)",
+    # a quote in such a comment would open a quote for a shell that doesn't see the comment
+    "echo \"$(# '\n')\"; git reset --hard; echo '\n)\"",
+    # 2. what is still rm -rf through an expansion
+    "$x -r -f build",
+    "$x -fr build",
+    "$x -rfv build",
+    "$x --recursive --force build",
+    "$x -rf -- build",
+    # 3. value-taking git options, which used to hide the subcommand
+    "git --git-dir .git reset --hard",
+    "git --work-tree . reset --hard",
+    "git --git-dir .git --work-tree . reset --hard",
+    "git --namespace x push --force origin t1-skeleton",
+    "$x --git-dir .git reset --hard",
+    # main read these as the subcommand. git itself rejects them, but this PR keeps those blocks
+    "git --git-dir reset --hard",
+    "git --work-tree push origin main",
+    "git --git-dir push -f",
+    # a $(...) stays one word, and what follows it is still read
+    "echo $(date); git reset --hard",
+    "echo $(date) && rm -rf build",
+    # 4. a path whose last part is literal is that program
+    "\"$root/bin/bash\" -lc 'git reset --hard'",
+    '"$HOME/bin/rm" build -rf',
+    '"$dir/git" reset --hard',
+    # and a path inside an expansion isn't: the program is still unknown
+    "$(echo /usr/bin/git) reset --hard",
+    '"$(echo /usr/bin/git)" reset --hard',
+    "${x:-/usr/bin/git} reset --hard",
+    '"`echo /usr/bin/git`" reset --hard',
+    # 5. a heredoc after (( )) is a heredoc, so what follows it is commands
+    "((x)); cat <<'EOF'\nit's text\nEOF\ngit reset --hard\n# it's done",
+    "for ((i=0;i<3;i++)); do cat <<'EOF'\nit's text\nEOF\ndone\ngit reset --hard\n# it's done",
+    "((a); cat <<'EOF'\nit's\nEOF\ngit reset --hard\n# it's\n)",  # (( as two subshells: can't be read as either
+    # 6. a wrapper by its full path
+    "/usr/bin/env bash -lc 'git reset --hard'",
+    "/usr/bin/env git reset --hard",
+    "/usr/bin/sudo git reset --hard",
+    "/usr/bin/time git reset --hard",
+    # the wrappers this project really uses, some with a number first
+    "caffeinate -i git reset --hard",
+    "caffeinate -t 3600 git reset --hard",
+    "timeout 5 git reset --hard",
+    "timeout -k 5 10s git reset --hard",
+    "gtimeout 5 git reset --hard",
+    "nice -n 5 git reset --hard",
+    "xargs -n 1 git reset --hard",
+    "uv run git reset --hard",
+    "uv run rm -rf build",
+    "uv run --no-sync git reset --hard",
+    "caffeinate -i uv run git reset --hard",
+    # 7. time goes before a case, and a heredoc body's substitution mustn't hide one
+    'echo "$(time case x in a) git reset --hard;; esac)"',
+    "echo $(time case x in a) git reset --hard;; esac)",
+    'echo "$(time -p case x in a) git reset --hard;; esac)"',
+    'echo "$(cat <<EOF\n$(date)\nEOF\ncase x in a) git reset --hard;; esac)"',
+    # 8. eval by that exact word still runs
+    "command eval 'git reset --hard'",
+    # 10. pinned: each survived a mutation of the code
+    'echo "\\\\$(git reset --hard)"',  # an escaped backslash doesn't escape the $
+    "$x sudo git reset --hard",
+    "cat <<'A'\nhi\nA\ngit reset --hard\necho more",
+    "bash -cO extglob 'git reset --hard'",
+    "bash -c +x 'git reset --hard'",
+]
+
+
+@pytest.mark.parametrize("command", ROUND_1_FORBIDDEN)
+def test_round_1_blocks(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+ROUND_1_ALLOWED = [
+    # 1. a comment with nothing to misread, and a ) in a comment outside a $(...)
+    'echo "$(echo a # plain note\n)"',
+    "echo $(echo a # plain note\n)",
+    "echo hi # (note) it's fine",
+    "(echo a # a ) here\n)",
+    # 2. normal commands that happen to hold -r and -f
+    '"$py" -m pytest -rf',
+    '"$py" -m pytest -q -rfE tests/',
+    '"$py" -m pip install -r reqs.txt -f links',
+    '"$py" -u run.py -r 5 -f out.json',
+    '"$root/.venv/bin/python" -m pytest -rf',
+    '"$FFPROBE" -v error -show_format -of json a.mp4',
+    '"$ffprobe" -show_format a.mp4',
+    '"$FFMPEG" -hide_banner -i a.mp4 -frames:v 1 o.jpg',
+    '"$FFMPEG" -y -i a.mp4 -r 30 -f mp4 b.mp4',
+    '"$CC" -O2 -fPIC -rdynamic a.c',
+    "$x -r build",
+    "$x -f build",
+    # 3. a value-taking git option's value isn't the subcommand
+    'git --git-dir "$dir" log --all --oneline',
+    'git --git-dir "$dir" fetch origin main',
+    'git --git-dir "$dir" log -f',
+    'git --work-tree "$w" diff origin main',
+    "git --git-dir .git status",
+    "git --git-dir=.git status",
+    # arguments after a $(...) are arguments. main split the command there and read them as a command
+    "echo $(date) rm -rf build",
+    # 4. a path whose last part is literal is that program, not an unknown one
+    '"$root/scripts/sync.sh" push origin main',
+    "$HOME/bin/deploy push origin main",
+    '"$root/deploy/x.sh" -r -f',
+    "$(git rev-parse --show-toplevel)/scripts/sync.sh push origin main",
+    "${HOME}/bin/deploy push origin main",
+    # 5. << after a closed (( )) opens a heredoc, and inside one it's a shift
+    "(( x > 1 )) && cat <<'EOF'\ngit reset --hard\nEOF",
+    "((i++)); cat <<'EOF'\nit's text\nEOF",
+    "for ((i=0;i<3;i++)); do cat <<'EOF'\nrm -rf x\nEOF\ndone",
+    "((x))\ncat <<'EOF'\nrm -rf x\nEOF",
+    "((x<<2)); cat <<'EOF'\nit's text\nEOF",
+    "((a)+(b<<2))\necho next",
+    # 6. wrappers around allowed commands
+    "/usr/bin/env python3 --version",
+    "/usr/bin/time ls",
+    "caffeinate -i uv run pytest -q",
+    "timeout 5 git status",
+    "nice -n 5 ls",
+    "uv run pytest -q",
+    "uv run t2c eval --only drafts",
+    "uv run --no-sync ruff check .",
+    # 7. the word case that doesn't start a command
+    'echo "$(echo case)"',
+    'echo "$(time echo case)"',
+    # 8. eval is that exact word, not a program or a subcommand called eval
+    './eval --note "don\'t"',
+    'bin/eval --note "don\'t"',
+    '"$t2c" eval --note "don\'t"',
+    "\"$t2c\" eval --note 'git reset --hard'",
+    'uv run t2c eval --note "don\'t"',
+    # 10. pinned
+    "cat <<'A'\nhi\nA\necho next\necho more",
+    "bash -cO extglob 'echo hi'",
+    "bash -c +x 'echo hi'",
+]
+
+
+@pytest.mark.parametrize("command", ROUND_1_ALLOWED)
+def test_round_1_allows(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+    assert "permissionDecision" not in result.stdout
+
+
+@pytest.mark.parametrize("command", ["git --git-dir .git commit -m hi", "git --work-tree . commit -m hi"])
+def test_a_value_taking_git_option_doesnt_hide_a_commit_on_main(repo: Path, command: str) -> None:
+    git_switch_main(repo)
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+@pytest.mark.parametrize("command", ["git --git-dir .git commit -m hi", "git --work-tree . commit -m hi"])
+def test_a_value_taking_git_option_allows_a_commit_off_main(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['"$root/.venv/bin/pip" install foo', "uv run pip install foo", "timeout 5 pip install foo"],
+)
+def test_asks_before_a_dependency_added_behind_a_path_or_wrapper(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda c: f"bash -c {shlex.quote(c)}", lambda c: f"eval {shlex.quote(c)}", lambda c: f'echo "$({c})"'],
+    ids=["bash -c", "eval", "substitution"],
+)
+@pytest.mark.parametrize(("wraps", "code"), [(5, 0), (6, 2)])
+def test_the_nesting_limit_is_exact(repo: Path, wrap: Callable[[str], str], wraps: int, code: int) -> None:
+    command = "echo hi"
+    for _ in range(wraps):
+        command = wrap(command)
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == code, result.stderr
+
+
+def test_an_expansion_then_another_still_guards_the_answer_key(repo: Path) -> None:
+    result = run_hook("block_forbidden.py", {"command": "$x $y touch evals/expected/a"}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
+@pytest.mark.parametrize("inner", ["git reset --hard", "date"])
+def test_backticks_nested_in_quoted_backticks_are_refused(repo: Path, inner: str) -> None:
+    """Unescaped once, they're unquoted backticks, which the scanner refuses wherever they sit."""
+    result = run_hook("block_forbidden.py", {"command": f'echo "`echo \\`{inner}\\``"'}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "wasn't checked" in result.stderr
+
+
 def test_a_hung_git_blocks_the_command(tmp_path: Path) -> None:
     """A hung git isn't "not on main": it means the branch is unknown, so the command wasn't checked (T24)."""
     fake_git = tmp_path / "git"

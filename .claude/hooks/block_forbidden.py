@@ -52,7 +52,8 @@ import re
 import subprocess
 import sys
 
-WRAPPERS = {"sudo", "command", "exec", "nohup", "time", "env", "xargs"}
+WRAPPERS = {"sudo", "command", "exec", "nohup", "time", "env", "xargs", "caffeinate", "timeout", "gtimeout", "nice"}
+WRAPPER_NUMBER = re.compile(r"[\d.]+[smhd]?")  # `timeout 5 x`, `nice -n 5 x`: the number isn't the program
 KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "{", "!"}  # a command follows each of these
 SHELLS = {"bash", "sh", "zsh"}
 MAX_NESTING = 5  # commands inside commands: bash -c, eval, $(...). Past this the command can't be judged, and blocks
@@ -66,11 +67,13 @@ ANSWER_KEY_REASON = (
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
 # Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
 # The ! forms and &| are zsh's, the Mac's shell. >! overwrites a file there, but in bash ! is the file and
-# the next word a command, so tokenize() refuses them. &! and &| end a command, as & does.
+# the next word a command, so scan() refuses them. &! and &| end a command, as & does.
 OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|&[!|]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
 REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
+GIT_LONG_VALUE_OPTIONS = {"--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+GIT_JUDGED = HISTORY_COMMANDS | GIT_PATH_WRITERS | {"push", "reset", "add", "commit", "switch"}
 UV_VALUE_OPTIONS = {
     "--directory",
     "--project",
@@ -160,15 +163,16 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
     With substitution=True, start is the ( of a $(...) and it stops past the matching ).
 
     What it can't follow raises, and main() blocks: a quote or a $(...) left open, unquoted backticks,
-    a ${...} holding more than plain text, a case inside $(...), whose ) would look like the end of it.
-    Refusing these is deliberate: each attempt to parse them opened new gaps (T24). It's a tripwire,
-    not a shell.
+    a ${...} holding more than plain text, and inside $(...) a case, whose ) would look like the end of it,
+    or a comment holding a ) or a quote, which macOS's bash and sh don't read as a comment. Refusing these
+    is deliberate: each attempt to parse them opened new gaps (T24). It's a tripwire, not a shell.
     """
     tokens: list[str] = []
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
     heredocs: list[tuple[str, bool, bool]] = []  # delimiter, whether <<- lets it be indented, whether its body expands
     delimiter_at: tuple[int, bool] | None = None  # after << or <<-: where the delimiter word starts, and True for <<-
-    arithmetic = False  # after (( on this line, << is a shift. Wrong, it reads a body as commands: never hides one
+    arithmetic_at: int | None = None  # the depth a (( opened at: until its )), << is a shift, not a heredoc
+    shifted = False  # a << was read as a shift inside it: if it spans lines, that can't be trusted, so it raises
     depth = 0
     i, end = start, len(command)
 
@@ -184,8 +188,10 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
         word = None
 
     def starts_command() -> bool:
-        last = tokens[-1]  # a substitution's first token is its (
-        return (isinstance(last, Op) and set(last) <= SEPARATOR_CHARS) or last in KEYWORDS
+        before = [t for t in tokens if not isinstance(t, Nested)]  # a substitution's first token is its (
+        last = before[-1]
+        timed = last == "time" or before[-2:] == ["time", "-p"]  # time is a keyword too, and takes a case
+        return timed or (isinstance(last, Op) and set(last) <= SEPARATOR_CHARS) or last in KEYWORDS
 
     while i < end:
         char = command[i]
@@ -195,7 +201,10 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
             i += 1
         elif char == "#" and word is None:  # a comment runs to the end of the line
             newline = command.find("\n", i)
-            i = end if newline == -1 else newline
+            stop = end if newline == -1 else newline
+            if substitution and re.search(r"[)'\"`]", command[i:stop]):
+                raise ValueError("a comment inside $(...) holding a ) or a quote")
+            i = stop
         elif char == "$" and command[i + 1 : i + 2] == "{":  # plain ${...} is one word: no comment starts inside it
             closing = command.find("}", i)
             if closing == -1 or re.search(r"[\"'\\`$;&|<>(){\n]", command[i + 2 : closing]):
@@ -242,18 +251,26 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
             i = operator.end()
             delimiter_at = None
             if operator.group() == "\n":
-                arithmetic = False
+                if shifted:
+                    raise ValueError("a << inside a (( that doesn't close on its line")
+                arithmetic_at = None
                 i = read_heredoc_bodies(command, i, heredocs, tokens)
                 heredocs = []
-            elif operator.group() == "<<" and not arithmetic:
-                strip_tabs = command[i : i + 1] == "-"
-                i += 1 if strip_tabs else 0
-                delimiter_at = (i, strip_tabs)
+            elif operator.group() == "<<":
+                if arithmetic_at is not None:
+                    shifted = True
+                else:
+                    strip_tabs = command[i : i + 1] == "-"
+                    i += 1 if strip_tabs else 0
+                    delimiter_at = (i, strip_tabs)
             elif operator.group() == "(":
-                arithmetic = arithmetic or command[i : i + 1] == "("
+                if arithmetic_at is None and command[i : i + 1] == "(":
+                    arithmetic_at = depth
                 depth += 1
             elif operator.group() == ")":
                 depth -= 1
+                if depth == arithmetic_at:
+                    arithmetic_at, shifted = None, False
                 if substitution and depth == 0:
                     return tokens, i
         else:
@@ -296,9 +313,9 @@ def unwrap(tokens: list[str]) -> list[str]:
             tokens = tokens[1:]
         elif head in KEYWORDS:
             tokens = tokens[1:]
-        elif head in WRAPPERS:
-            tokens = tokens[1:]
-            while tokens and tokens[0].startswith("-"):
+        elif head.rsplit("/", 1)[-1] in WRAPPERS or tokens[:2] == ["uv", "run"]:
+            tokens = tokens[2:] if head == "uv" else tokens[1:]
+            while tokens and (tokens[0].startswith("-") or WRAPPER_NUMBER.fullmatch(tokens[0])):
                 tokens = tokens[1:]
         else:
             break
@@ -346,6 +363,8 @@ def git_subcommand(args: list[str]) -> tuple[str | None, list[str], list[str]]:
             if args[i] == "-C" and i + 1 < len(args):
                 dirs.append(args[i + 1])
             i += 2
+        elif args[i] in GIT_LONG_VALUE_OPTIONS and GIT_JUDGED.isdisjoint(args[i + 1 : i + 2]):
+            i += 2  # `--git-dir reset --hard` stays read as reset: git rejects it, but no block is lost for it
         else:
             i += 1
     if i >= len(args):
@@ -525,16 +544,33 @@ def is_expansion(word: str) -> bool:
     return "$" in word or "`" in word
 
 
+def is_expanded_program(word: str) -> bool:
+    """True if the program's name is unknown. `"$root/bin/tool"` is a program called tool; `$(echo /bin/git)` isn't."""
+    name = word.rsplit("/", 1)[-1]
+    return is_expansion(name) or ("$" in word and bool(set(name) & set(")}")))
+
+
+def check_rm_options(args: list[str]) -> str | None:
+    """check_rm() on the options args start with, if they're all rm's own: `"$CC" -O2 -fPIC` and `-m x -rf` aren't."""
+    options = []
+    for arg in args:
+        if arg in ("--recursive", "--force") or re.fullmatch(r"-[dfiIPRrvWx]+", arg):
+            options.append(arg)
+        elif arg.startswith("-") and arg not in ("-", "--"):
+            return None
+        else:
+            break
+    return check_rm(options)
+
+
 def check_expanded_program(args: list[str], cwd: str | None, state: dict) -> str | None:
     """`$x reset --hard`: what $x holds can't be known, so refuse only what its visible arguments would be as git or rm.
 
-    A copy of the state, because `$x checkout main` says nothing about the branch if $x isn't git. rm only with
-    an option first, so `"$pip" install -r a -f b` isn't read as rm -rf. Normal commands such as `"$py" --version`
-    pass. And `$x -c '...'` isn't read as a shell: `"$py" -c` is far more likely, and its code isn't shell.
+    A copy of the state, because `$x checkout main` says nothing about the branch if $x isn't git. And `$x -c '...'`
+    isn't read as a shell: `"$py" -c` is far more likely, and its code isn't shell.
     """
     probe = dict(state)
-    reason = check_git(args, cwd, probe) or check_answer_key("git", args, probe)
-    return reason or (check_rm(args) if args[:1] and args[0].startswith("-") else None)
+    return check_git(args, cwd, probe) or check_answer_key("git", args, probe) or check_rm_options(args)
 
 
 def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
@@ -629,11 +665,13 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
         if any(in_answer_key(target, state) for target in targets):
             return ANSWER_KEY_REASON
         tokens = unwrap(words)
-        while tokens and is_expansion(tokens[0]):  # it may be a wrapper too, as in `$SUDO git reset --hard`
+        after_expansion = False
+        while tokens and is_expanded_program(tokens[0]):  # it may be a wrapper too, as in `$SUDO git reset --hard`
             reason = check_expanded_program(tokens[1:], cwd, state)
             if reason:
                 return reason
             tokens = unwrap(tokens[1:])
+            after_expansion = True
         if not tokens:
             continue
         prog = tokens[0].rsplit("/", 1)[-1]
@@ -645,7 +683,9 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
             reason = find_in_subshell(string, cwd, depth, state) if string is not None else None
             if reason:
                 return reason
-        elif prog == "eval":  # it runs its arguments, joined, in this shell: a cd inside it carries on
+        # the shell's own eval: it runs its arguments, joined, in this shell, so a cd inside it carries on.
+        # Not ./eval, and not `"$t2c" eval`, a subcommand of something unknown.
+        elif tokens[0] == "eval" and not after_expansion:
             reason = find_violation(
                 " ".join(tokens[2:] if tokens[1:2] == ["--"] else tokens[1:]), cwd, depth + 1, state
             )

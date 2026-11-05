@@ -171,8 +171,10 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
     heredocs: list[tuple[str, bool, bool]] = []  # delimiter, whether <<- lets it be indented, whether its body expands
     delimiter_at: tuple[int, bool] | None = None  # after << or <<-: where the delimiter word starts, and True for <<-
-    arithmetic_at: int | None = None  # the depth a (( opened at: until its )), << is a shift, not a heredoc
-    shifted = False  # a << was read as a shift inside it: if it spans lines, that can't be trusted, so it raises
+    arithmetic_at: int | None = None  # the depth a (( or x=( opened at: until its ), << is a shift, not a heredoc
+    shifted = False  # a << read as a shift there. If its line ends before the ), it may be a heredoc, so it raises
+    brackets = 0  # unquoted [ still open: `$[1<<3]`, `a[1<<3]=2`. A << there can't be told from `cat a[1<<EOF`...
+    shifted_in_bracket = False  # ...so it's read as a shift, and the command is refused if another line follows
     depth = 0
     i, end = start, len(command)
 
@@ -244,6 +246,7 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
                 word = (word or "") + command[i + 1]
             i += 2
         elif operator:
+            opens_array = operator.group() == "(" and word is not None and word.endswith("=")
             finish_word()
             if "!" in operator.group() and operator.group() != "&!":
                 raise ValueError(f"{operator.group()} means different things in zsh and bash")
@@ -251,20 +254,21 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
             i = operator.end()
             delimiter_at = None
             if operator.group() == "\n":
-                if shifted:
-                    raise ValueError("a << inside a (( that doesn't close on its line")
-                arithmetic_at = None
+                if shifted or shifted_in_bracket:
+                    raise ValueError("a << that may be a shift, with its line ending before what closes it")
                 i = read_heredoc_bodies(command, i, heredocs, tokens)
                 heredocs = []
             elif operator.group() == "<<":
                 if arithmetic_at is not None:
                     shifted = True
+                elif brackets:
+                    shifted_in_bracket = True
                 else:
                     strip_tabs = command[i : i + 1] == "-"
                     i += 1 if strip_tabs else 0
                     delimiter_at = (i, strip_tabs)
             elif operator.group() == "(":
-                if arithmetic_at is None and command[i : i + 1] == "(":
+                if arithmetic_at is None and (opens_array or command[i : i + 1] == "("):
                     arithmetic_at = depth
                 depth += 1
             elif operator.group() == ")":
@@ -274,6 +278,7 @@ def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list
                 if substitution and depth == 0:
                     return tokens, i
         else:
+            brackets = brackets + 1 if char == "[" else max(0, brackets - 1) if char == "]" else brackets
             word = (word or "") + char
             i += 1
     if substitution:
@@ -313,7 +318,9 @@ def unwrap(tokens: list[str]) -> list[str]:
             tokens = tokens[1:]
         elif head in KEYWORDS:
             tokens = tokens[1:]
-        elif head.rsplit("/", 1)[-1] in WRAPPERS or tokens[:2] == ["uv", "run"]:
+        elif (
+            head in WRAPPERS or (head[:1] == "/" and head.rsplit("/", 1)[-1] in WRAPPERS) or tokens[:2] == ["uv", "run"]
+        ):
             tokens = tokens[2:] if head == "uv" else tokens[1:]
             while tokens and (tokens[0].startswith("-") or WRAPPER_NUMBER.fullmatch(tokens[0])):
                 tokens = tokens[1:]
@@ -616,8 +623,24 @@ def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
 
 
 def shell_command_string(args: list[str]) -> str | None:
-    """What a shell's -c runs: the first word that isn't an option, past a -c that may be clustered (-lc, -ec)."""
-    start = next((i for i, a in enumerate(args) if is_short_cluster(a) and "c" in a[1:]), None)
+    """What a shell's -c runs: the first word that isn't an option, past a -c that may be clustered (-lc, -ec).
+
+    A cluster counts only before the first positional. Past it, in `bash run.sh -vc x`, the script's own options
+    are read only for an exact -c, as they always were.
+    """
+    start, takes_value = None, False
+    for i, arg in enumerate(args):
+        if takes_value:
+            takes_value = False
+        elif is_short_cluster(arg) and "c" in arg[1:]:
+            start = i
+            break
+        elif arg[:1] in ("-", "+") and len(arg) > 1:
+            takes_value = arg in ("--rcfile", "--init-file") or (arg.endswith(("o", "O")) and not arg.startswith("--"))
+        else:
+            break
+    if start is None:
+        start = args.index("-c") if "-c" in args else None
     if start is None:
         return None
     takes_value = args[start].endswith(("o", "O"))  # -o pipefail, or -eo pipefail

@@ -838,6 +838,98 @@ def test_backticks_nested_in_quoted_backticks_are_refused(repo: Path, inner: str
     assert "wasn't checked" in result.stderr
 
 
+# T27, review round 2: a << a shell reads as a shift or part of a word mustn't turn the next command into a body.
+
+ROUND_2_FORBIDDEN = [
+    # (( )) can span lines
+    "((1 +\n2<<3))\ngit reset --hard\n3\n",
+    "if ((1 +\n2<<3)); then :; fi\ngit reset --hard\n3\n",
+    "for ((i=0;\ni<<3;i++)); do :; break; done\ngit reset --hard\n3\n",
+    # and a << before its line ends can't be told from a heredoc, if it may be two subshells
+    "((1<<2 +\n3))\necho next",
+    "((a); echo b\ncat <<'EOF'\nit's\nEOF\ngit reset --hard\n# it's\n)",
+    # $[...], a[...] and x=(...) shift too
+    "echo $[1<<3]\ngit reset --hard\n3]\n",
+    "echo $[ 1 << 3 ]\ngit reset --hard\n3\n",
+    "echo $[1 +\n2<<3]\ngit reset --hard\n3]\n",
+    "a[1<<3]=2\ngit reset --hard\n3]=2\n",
+    "a[ 1 << 3 ]=2\ngit reset --hard\n3\n",
+    "x=(1<<3)\ngit reset --hard\n3\n",
+    "x+=(1<<3)\ngit reset --hard\n3\n",
+    "x=(1<<3\n)\necho next",
+    # a real heredoc after an open [ reads the same, so it's refused, however the [ seems to close
+    "cat a[1<<'EOF']\nit's\nEOF]\ngit reset --hard\n# it's",
+    "cat a[1<<'EOF'; ((x))\nit's\nEOF\ngit reset --hard\n# it's",
+    # pinned: each guard line survived a mutation
+    'echo "$(# )\n"; git reset --hard; echo "\n)"',
+    'echo "$( (echo a); git reset --hard)"',
+    "(( ((1)) + 2<<y ))\ngit reset --hard\ny\n",
+    "bash -c -O extglob 'git reset --hard'",
+    "echo $(date",
+    'echo "`date`',
+    # -c: clustered before the first positional, exact after it
+    "bash -c 'git reset --hard'",
+    "bash -lc 'git reset --hard'",
+    "bash --rcfile f -lc 'git reset --hard'",
+    "bash --norc -lc 'git reset --hard'",
+    "bash script.sh -c 'git reset --hard'",
+    "bash -x script.sh -c 'rm -rf build'",
+    "bash -o -c 'git reset --hard'",
+    # a wrapper by its absolute path
+    "/usr/bin/time git reset --hard",
+    "/usr/bin/time rm -rf build",
+]
+
+
+@pytest.mark.parametrize("command", ROUND_2_FORBIDDEN)
+def test_round_2_blocks(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "(( 1 +\n 2<<3 ))\necho next",
+        "((x\n))\ncat <<'EOF'\nrm -rf x\nEOF",
+        "((x\n)); cat <<'EOF'\nit's text\nEOF",
+        # an array or a [ ] that closes before the heredoc
+        "x=(a); cat <<'EOF'\nrm -rf x\nEOF",
+        "x=(a) cat <<'EOF'\nrm -rf x\nEOF",
+        "x=(a b\nc); cat <<'EOF'\nit's text\nEOF",
+        "[ -n a ] && cat <<'EOF'\nit's text\nEOF",
+        "[[ a == b ]] || cat <<'EOF'\nit's text\nEOF",
+        "arr[0]=1; cat <<'EOF'\nit's text\nEOF",
+        "echo ${a[0]}; cat <<'EOF'\nit's text\nEOF",
+        "cat a[1]<<'EOF'\nit's text\nEOF",
+        # a [ or ] in quotes, or a stray ], opens nothing
+        "grep '[a' notes.md; cat <<'EOF'\nit's text\nEOF",
+        "grep \\[a notes.md; cat <<'EOF'\nit's text\nEOF",
+        "echo ]; echo [a]; cat <<'EOF'\nit's text\nEOF",
+        # a shift with nothing after it
+        "echo $[1<<2]",
+        "a[1<<2]=3",
+        "echo $((a[1]<<2))\necho next",
+        # past a positional, only an exact -c counts
+        "bash run.sh -vc 'it'\\''s'",
+        "bash ./scripts/run -ci 'rm -rf x'",
+        "bash -x run.sh -lc 'rm -rf x'",
+        # a program called time, in a folder of its own
+        "scripts/time rm -rf build",
+        "./time git reset --hard",
+    ],
+)
+def test_round_2_allows(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_judged_subcommand_after_a_git_value_option_still_guards_the_answer_key(repo: Path) -> None:
+    result = run_hook("block_forbidden.py", {"command": "git --git-dir rm evals/expected/a"}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
 def test_a_hung_git_blocks_the_command(tmp_path: Path) -> None:
     """A hung git isn't "not on main": it means the branch is unknown, so the command wasn't checked (T24)."""
     fake_git = tmp_path / "git"

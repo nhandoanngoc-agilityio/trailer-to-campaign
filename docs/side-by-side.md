@@ -47,25 +47,28 @@ The Side-by-Side Trial: one upcoming Film is prepared twice, so Time Saved, Appr
 - **Stop** it when your six posts are done (point 8).
 - **Time active work only.**
   - Pause for breaks, meetings and lunch.
-  - B also pauses while the agents run. Waiting for them isn't B's work; it shows in the Run Log, which the result puts beside the stopwatch.
+  - B also pauses while the agents run. Waiting for them isn't B's work; it shows in the Run Log, which the result puts beside the two times.
 - **Write your minutes down the moment you stop,** with one line on anything unusual: an interruption, and for A, what they used.
 
 ## Then
 
 9. **Send the two times in one message**, e.g. `A = 240, B = 55; A used ChatGPT for the Vietnamese`.
+   - Say how A's time was got: by stopwatch, written down on stopping, or from memory if it wasn't.
    - Add which Run B used only if it wasn't the last one to finish.
    - No names are needed.
 10. **The result:**
 
     ```
-    uv run t2c result --film <film> --old-way <A's minutes> --new-way <B's minutes> [--run <folder>]
+    uv run t2c result --film <film> --old-way <A's minutes> --new-way <B's minutes> --old-way-source stopwatch|memory [--run <folder>]
     ```
 
-    This writes `runs/<film>/result.md`, plus `result.json` with the same numbers:
-    - **Time Saved:** A's minutes minus B's. If B took longer, the page says so.
+    `--old-way-source` is required, and the command refuses anything else, so the page never guesses. Use `stopwatch` only if A timed the work as above. Otherwise use `memory`: the page then says A's time is from memory, makes no stopwatch claim, and labels Time Saved as an estimate. That page takes B's minutes as given, because the flag is only about A. A `stopwatch` page says B was timed the same way as A, and nothing records that.
+
+    This writes `runs/<film>/result.md`, plus `result.json` with the same numbers and the source:
+    - **Time Saved:** A's minutes minus B's. If B took longer, the page says so. A time from memory makes it an estimate.
     - **Approval Rate:** from the Run whose Campaign was used. By default that's the last Run to finish that gave a Campaign (completed, with at least one Social Post approved). Otherwise `--run` names it.
     - **Approved over a flag:** how many Social Posts were approved though they were Flagged: the Checker or tracing objected, or the post couldn't be reviewed. Beside it, how many edits were approved with no re-check. Counts only. Read them with the Approval Rate: a post approved unedited or with a Light Edit over a flag still counts in it, because the Marketer decided. A heavy edit doesn't count in the rate, but does count here. A re-check that passed doesn't cover a fact the Marketer added: no code can trace that, and they're told so.
     - **Cost per Film:** every Run of the Film added up, re-runs and failed Runs included, since the Film Budget caps each Run, not the Film. Eval Set and `dummy-run` Runs are left out, because they aren't launch work.
-    - Each Run's Run Log time, beside the stopwatch, as a check.
+    - Each Run's Run Log time, beside the two times, as a check on B's. Nothing checks A's.
 
 The pages hold the Film's title and numbers only, never a post or a plot point. They stay gitignored next to the Run Logs. Once the team agrees, a copy goes to `docs/results/` for the talk, with the line on what A used. Until the Film has launched, the copy names it only by genre and language (e.g. "an upcoming Vietnamese drama"), never by title.

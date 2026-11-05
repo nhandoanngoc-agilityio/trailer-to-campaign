@@ -12,6 +12,10 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - Test: `uv run pytest`. Lint: `uv run ruff check . && uv run ruff format --check .`
 - Open a PR: `git push -u origin <branch>`, then `gh pr create --base main`.
 
+## Environment and worktrees
+
+This is a macOS and zsh environment. Use `python3` if `python` is not on PATH, do not assume GNU `timeout` exists, and avoid unquoted word splitting. Prefer absolute paths over relying on an earlier `cd`, except for git in a worktree: `block_forbidden.py` judges the branch from the session's directory, so enter the worktree with `EnterWorktree(path=...)` and run git from there. In a worktree, fetch and integrate the latest main before starting and again before opening a PR, especially when parallel tickets are merging. If Claude Code's worktree guard refuses a heredoc, use Edit, or Write for a new file.
+
 ## Layout
 
 - `CONTEXT.md`: the glossary. `docs/adr/`: decisions. `docs/workflow.md`: the ticket loop for people. `docs/lessons.md`: one lesson per ticket.
@@ -23,6 +27,14 @@ A multimodal agent team (Watcher → Copywriter → Checker) that turns an indie
 - `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
 - `.github/workflows/`: `ci.yml` (lint and tests), `claude-code-review.yml` (Claude reviews each PR once when it opens, unless it only changes `docs/`), `claude.yml` (`@claude` in issues and PRs).
 
+## Pre-PR checks
+
+Before opening a PR, review your own diff for wrong-number errors, budget or limit bugs, unhandled edge cases, and tests that can hang. Run the full test suite and lint, and report any issues you could not fix.
+
+## Validation and eval changes
+
+When changing a gate, checker, or validation rule, add tests for both sides: invalid input must be rejected and valid input must still pass. Do not loosen a rule to fix a false positive without a test showing that the original bad case still fails. Before a paid Eval Set re-run, state why it is needed and its expected cost, and confirm that known review findings are fixed or answered.
+
 ## The ticket loop
 
 Every ticket runs this loop. The human gates are marked 🧑; stop at each one and wait.
@@ -30,11 +42,11 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
 **Every artifact of work (spec, tests, PRs, notes, the ticket record) is Claude-assisted and human-reviewed, edited where needed.** Claude drafts; the human reviews and edits. Claude never fills in a provenance block or a PR's Human review section on the human's behalf.
 
 1. **Analyze.** Read the issue (`gh issue view <n>`), its blockers, the code it touches and any ADR it bears on. Restate each **Done when** line as a concrete check you can run, and list open questions.
-   Start `docs/tickets/T<n>.md` from the template with the Spec section.
+   If its blockers are closed, branch `t<n>-<slug>` from fresh `main` and start `docs/tickets/T<n>.md` there, from the template with the Spec section.
    _Done when:_ every Done-when line has a runnable check, and every open question is either answered from the repo or put to the human.
 2. **Plan** 🧑. In plan mode, write: the failing tests you will add first, the files you will change, which check each step proves, and any effect on cost or prompts. Wait for approval.
    _Done when:_ the human approves the plan.
-3. **Build.** Branch `t<n>-<slug>` from fresh `main`. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
+3. **Build.** If `main` has moved, merge it in. Work test-first: a test goes _red_, the code turns it green, then tidy. Small commits that each pass the tests.
    _Done when:_ every planned test is green.
 4. **Verify.** Run the full test suite and lint. Then, by what changed:
    - **An agent's prompt, tool or model:** run the smallest Eval Set run that covers the change, and compare it with the Baseline from `t2c eval --baseline`. Run `main` again only when it says a new run is needed. A drop in Traps caught blocks the PR.
@@ -47,7 +59,7 @@ Every ticket runs this loop. The human gates are marked 🧑; stop at each one a
    _Done when:_ every Done-when check has passed, with its evidence (output, numbers, screenshot) ready for the PR.
 5. **Ship.** Open a PR with `.github/pull_request_template.md`, `Closes #<n>`, and the evidence from Verify. Watch CI to green.
    _Done when:_ the PR is open, CI is green, and every template section is filled.
-6. **Review** 🧑. Run the `review-checklist` skill and `/code-review` against `main`, and fix what they find; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
+6. **Review** 🧑. Run the `review-checklist` skill and `/code-review` against `main`, and fix what they find; the Claude review in CI comments on the PR when it opens, and its findings get fixed or answered. It doesn't run again on later pushes: comment `@claude` on the PR to review them. The human reviews last and merges; under the `ship-ticket` skill, that review happens once, after Close the loop, so the record is in the PR. Ask for an ultrareview when the PR is **risky**: it touches the Checker, Approval, the Film Budget, the Spoiler List, footage handling, or any prompt that enforces a guardrail.
    _Done when:_ the human merges.
 7. **Close the loop.** Finish `docs/tickets/T<n>.md` (plan, tests, review outcomes, evidence, close) in the ticket's PR, leaving its provenance block for the human. Update `CONTEXT.md` for any term the ticket settled. Offer an ADR only for a decision that is hard to reverse, surprising, and a real trade-off. Add one **lesson** to `docs/lessons.md`: what the ticket taught about building agents, in a line or two.
    _Done when:_ the ticket record, glossary, ADRs and lessons reflect the ticket, the human has reviewed the record, and the issue is closed.

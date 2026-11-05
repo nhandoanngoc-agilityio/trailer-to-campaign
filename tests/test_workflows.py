@@ -228,6 +228,10 @@ def test_a_job_with_no_limit_of_its_own_is_rejected(tmp_path: Path, properties: 
         pytest.param("jobs:\n  first:\n    timeout-minutes: 5\n  only:\n    runs-on: x\n", id="on the job before it"),
         pytest.param("jobs:\n  only:\n", id="an empty job"),
         pytest.param("jobs:\n  only: |\n    timeout-minutes: 5\n", id="the job is block text"),
+        pytest.param(
+            "jobs:\n  only: {\n    env: {\n    timeout-minutes: 5\n    }, runs-on: x\n    }\n",
+            id="inside nested braces",
+        ),
         pytest.param("jobs:\n  only: 5\n", id="the job is a number"),
     ],
 )

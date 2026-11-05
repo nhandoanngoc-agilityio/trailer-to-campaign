@@ -992,6 +992,7 @@ ROUND_3_FORBIDDEN = [
     "git --super-prefix x reset --hard",
     "timeout 1.5 git reset --hard",
     # refused here though they passed on main: left for the human, in the record
+    "x=$(cat <<EOF\nhi\nEOF)",
     'x="$(IFS=$\'\\n\'; echo "$y")"',
     "echo \"$(printf $'a\\nb')\"",
     'echo "$(echo do case)"',

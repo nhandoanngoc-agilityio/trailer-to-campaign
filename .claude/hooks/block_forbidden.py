@@ -30,8 +30,11 @@ Asked (Claude Code prompts the user before running):
 
 Commands are split on ; && || | & ( ) and newlines, and redirects are read
 apart from the words, all as a shell does unless quoted. Wrappers like `sudo`,
-`env X=1`, `bash -c "..."` are unwrapped, so `cd x && rm -rf y` is still caught.
+`env X=1`, `bash -c "..."`, `eval`, shell keywords like `then`, and $(...) and
+backticks are unwrapped, so `cd x && rm -rf y` is still caught.
 Paths are read from the shell's directory (the payload's cwd, then any cd).
+An expansion as the program or git's subcommand (`$x reset --hard`) can't be read,
+so it's refused only when the words you can see already look forbidden.
 Uses only the standard library, so no jq or extra dependency is needed.
 
 Runs on the machine's python3, not the project's, and macOS ships 3.9, so the hooks must
@@ -49,8 +52,11 @@ import re
 import subprocess
 import sys
 
-WRAPPERS = {"sudo", "command", "exec", "nohup", "time", "env", "xargs"}
+WRAPPERS = {"sudo", "command", "exec", "nohup", "time", "env", "xargs", "caffeinate", "timeout", "gtimeout", "nice"}
+WRAPPER_NUMBER = re.compile(r"[\d.]+[smhd]?")  # `timeout 5 x`, `nice -n 5 x`: the number isn't the program
+KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "{", "!"}  # a command follows each of these
 SHELLS = {"bash", "sh", "zsh"}
+MAX_NESTING = 5  # commands inside commands: bash -c, eval, $(...). Past this the command can't be judged, and blocks
 PROTECTED_BRANCH = "main"
 HISTORY_COMMANDS = {"merge", "cherry-pick", "revert", "rebase"}
 FINISH_FLAGS = {"--abort", "--continue", "--quit", "--skip"}
@@ -61,11 +67,13 @@ ANSWER_KEY_REASON = (
 ANSWER_KEY_OVERRIDE = "T2C_ANSWER_KEY_EDIT"  # lets .githooks/pre-commit take an Answer Key change from a person
 # Split off as their own tokens, as a shell does, unless quoted. Longest first; ( and ) never join another.
 # The ! forms and &| are zsh's, the Mac's shell. >! overwrites a file there, but in bash ! is the file and
-# the next word a command, so tokenize() refuses them. &! and &| end a command, as & does.
+# the next word a command, so scan() refuses them. &! and &| end a command, as & does.
 OPERATOR = re.compile(r"&>>[|!]?|&>[|!]?|>>&[|!]?|>&[|!]?|>>[|!]?|>[|!]|&[!|]|<<<|<<|<>|<&|\|&|\|\||&&|;;|[;&|<>()\n]")
 SEPARATOR_CHARS = set(";&|()\n")
 REDIRECT_CHARS = set("<>&|")
 GIT_PATH_WRITERS = {"checkout", "restore", "rm", "mv"}
+GIT_LONG_VALUE_OPTIONS = {"--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+GIT_JUDGED = HISTORY_COMMANDS | GIT_PATH_WRITERS | {"push", "reset", "add", "commit", "switch"}
 UV_VALUE_OPTIONS = {
     "--directory",
     "--project",
@@ -78,44 +86,114 @@ UV_VALUE_OPTIONS = {
 }
 
 
-HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")  # <<EOF, <<'EOF', <<-EOF; not <<<
-
-
-def drop_heredoc_bodies(command: str) -> str:
-    """The command without its heredoc bodies: they are text fed to a command, not commands."""
-    kept, closing = [], []
-    for line in command.split("\n"):
-        if closing:  # inside a body: skip to its delimiter line
-            if line.strip() == closing[0]:
-                closing.pop(0)
-            continue
-        kept.append(line)
-        closing = [m.group(2) for m in HEREDOC.finditer(line)]
-    return "\n".join(kept)
-
-
 class Op(str):
     """An unquoted shell operator (; && | > ( and so on), as opposed to the same text in quotes."""
 
 
-def tokenize(command: str) -> list[str]:
-    """The command's words, with its unquoted operators as Op tokens, read by a shell's quoting rules.
+class Nested(str):
+    """A command that $(...) or backticks run, in parentheses or not: find_violation() judges it on its own."""
 
-    shlex can't do this: it raises on `"\\""`, which a shell reads fine, and joins `)>` into one
-    operator (T24). What it can't follow raises, and main() blocks: a quote left open, unquoted
-    backticks, a ${...} holding more than plain text. Refusing these is deliberate: each attempt
-    to parse them opened new gaps. It's a tripwire, not a shell: it doesn't look inside $(...)
-    or backticks in double quotes (T27).
+
+def read_substitution(command: str, opening: int, found: list[str]) -> int:
+    """Add what the $(...) at opening runs to found, and return where it ends."""
+    closing = scan(command, opening + 1, substitution=True)[1]
+    found.append(Nested(command[opening + 1 : closing]))  # with its parentheses: a (( still reads as arithmetic
+    return closing
+
+
+def read_expanding_text(command: str, start: int, closing: str | None, found: list[str]) -> tuple[str, int]:
+    """Text where only $(...) and backticks run, up to closing or the end: its text and where it stopped.
+
+    That's a double-quoted string, or the body of a heredoc whose delimiter isn't quoted. What runs goes on found.
+    """
+    text = ""
+    i, end = start, len(command)
+    while i < end and command[i] != closing:
+        if command[i] == "\\" and i + 1 < end and command[i + 1] in '$`"\\\n':  # a backslash only escapes these
+            text += "" if command[i + 1] == "\n" else command[i + 1]
+            i += 2
+        elif command[i : i + 2] == "$(":
+            stop = read_substitution(command, i, found)
+            text += command[i:stop]
+            i = stop
+        elif command[i] == "`":  # runs to the next one not escaped, whatever quotes are inside
+            stop = i + 1
+            while stop < end and command[stop] != "`":
+                stop += 2 if command[stop] == "\\" else 1
+            if stop >= end:
+                raise ValueError("a backtick left open")
+            found.append(Nested(re.sub(r'\\([$`"\\])', r"\1", command[i + 1 : stop])))
+            text += command[i : stop + 1]
+            i = stop + 1
+        else:
+            text += command[i]
+            i += 1
+    return text, i
+
+
+def read_heredoc_bodies(command: str, start: int, heredocs: list[tuple[str, bool, bool]], found: list[str]) -> int:
+    """Where the command picks up after the heredoc bodies at start: they are text fed to a command, not commands.
+
+    Unless the delimiter is unquoted: then a shell runs a body's $(...) and backticks, as in double quotes.
+    One that never closes raises: a shell would read on to the end, but it's more likely a shift such as
+    $[1<<2] or `let x=1<<2`, with commands after it.
+    """
+    i = start
+    for delimiter, strip_tabs, expands in heredocs:
+        body = i
+        while True:
+            if i >= len(command):
+                raise ValueError(f"a heredoc that {delimiter} never closes")
+            line_start = i
+            newline = command.find("\n", i)
+            stop = len(command) if newline == -1 else newline
+            line = command[i:stop]
+            i = stop + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+        if expands:
+            read_expanding_text(command[body:line_start], 0, None, found)
+    return i
+
+
+def scan(command: str, start: int = 0, substitution: bool = False) -> tuple[list[str], int]:
+    """Read the command from start, by a shell's quoting rules: its tokens and where it stopped.
+
+    Nested tokens hold what its $(...) and quoted backticks run, and the word around one keeps the text.
+    With substitution=True, start is the ( of a $(...) and it stops past the matching ).
+
+    What it can't follow raises, and main() blocks: a quote or a $(...) left open, unquoted backticks,
+    a ${...} holding more than plain text, and inside $(...) a case, whose ) would look like the end of it,
+    or a comment holding a ) or a quote, which macOS's bash and sh don't read as a comment. Refusing these
+    is deliberate: each attempt to parse them opened new gaps (T24). It's a tripwire, not a shell.
     """
     tokens: list[str] = []
     word: str | None = None  # None between words: '' is an empty argument, and a word of its own
-    i, end = 0, len(command)
+    heredocs: list[tuple[str, bool, bool]] = []  # delimiter, whether <<- lets it be indented, whether its body expands
+    delimiter_at: tuple[int, bool] | None = None  # after << or <<-: where the delimiter word starts, and True for <<-
+    arithmetic_at: int | None = None  # the depth a (( or x=( opened at: until its ), << is a shift, not a heredoc
+    shifted = False  # a << read as a shift there. If its line ends before the ), it may be a heredoc, so it raises
+    brackets = 0  # unquoted [ still open: `$[1<<3]`, `a[1<<3]=2`. A << there can't be told from `cat a[1<<EOF`...
+    shifted_in_bracket = False  # ...so it's read as a shift, and the command is refused if another line follows
+    depth = 0
+    i, end = start, len(command)
 
     def finish_word() -> None:
-        nonlocal word
+        nonlocal word, delimiter_at
         if word is not None:
+            if delimiter_at is not None:
+                heredocs.append((word, delimiter_at[1], not re.search(r"['\"\\]", command[delimiter_at[0] : i])))
+                delimiter_at = None
+            elif substitution and word == "case" and starts_command():
+                raise ValueError("a case inside $(...)")
             tokens.append(word)
         word = None
+
+    def starts_command() -> bool:
+        before = [t for t in tokens if not isinstance(t, Nested)]  # a substitution's first token is its (
+        last = before[-1]
+        timed = last == "time" or before[-2:] == ["time", "-p"]  # time is a keyword too, and takes a case
+        return timed or (isinstance(last, Op) and set(last) <= SEPARATOR_CHARS) or last in KEYWORDS
 
     while i < end:
         char = command[i]
@@ -125,13 +203,20 @@ def tokenize(command: str) -> list[str]:
             i += 1
         elif char == "#" and word is None:  # a comment runs to the end of the line
             newline = command.find("\n", i)
-            i = end if newline == -1 else newline
+            stop = end if newline == -1 else newline
+            if substitution and re.search(r"[)'\"`]", command[i:stop]):
+                raise ValueError("a comment inside $(...) holding a ) or a quote")
+            i = stop
         elif char == "$" and command[i + 1 : i + 2] == "{":  # plain ${...} is one word: no comment starts inside it
             closing = command.find("}", i)
             if closing == -1 or re.search(r"[\"'\\`$;&|<>(){\n]", command[i + 2 : closing]):
                 raise ValueError("a ${...} holding more than plain text")
             word = (word or "") + command[i : closing + 1]
             i = closing + 1
+        elif char == "$" and command[i + 1 : i + 2] == "(":  # it stays in the word: `$(echo git) reset` is one program
+            closing = read_substitution(command, i, tokens)
+            word = (word or "") + command[i:closing]
+            i = closing
         elif char == "`":  # what runs inside them, and how they join the words around them, can't be judged here
             raise ValueError("unquoted backticks")
         elif char == "$" and command[i + 1 : i + 2] == "'":  # $'...': a backslash escapes anything, even a quote
@@ -150,16 +235,9 @@ def tokenize(command: str) -> list[str]:
                 raise ValueError("a ' quote left open")
             word = (word or "") + command[i + 1 : closing]
             i = closing + 1
-        elif char == '"':  # a backslash only escapes these inside double quotes
-            word = word or ""
-            i += 1
-            while i < end and command[i] != '"':
-                if command[i] == "\\" and i + 1 < end and command[i + 1] in '$`"\\\n':
-                    word += "" if command[i + 1] == "\n" else command[i + 1]
-                    i += 2
-                else:
-                    word += command[i]
-                    i += 1
+        elif char == '"':
+            text, i = read_expanding_text(command, i + 1, '"', tokens)
+            word = (word or "") + text
             if i >= end:
                 raise ValueError('a " quote left open')
             i += 1
@@ -168,16 +246,45 @@ def tokenize(command: str) -> list[str]:
                 word = (word or "") + command[i + 1]
             i += 2
         elif operator:
+            opens_array = operator.group() == "(" and word is not None and word.endswith("=")
             finish_word()
             if "!" in operator.group() and operator.group() != "&!":
                 raise ValueError(f"{operator.group()} means different things in zsh and bash")
             tokens.append(Op("&" if operator.group() in ("&!", "&|") else operator.group()))
             i = operator.end()
+            delimiter_at = None
+            if operator.group() == "\n":
+                if shifted or shifted_in_bracket:
+                    raise ValueError("a << that may be a shift, with its line ending before what closes it")
+                i = read_heredoc_bodies(command, i, heredocs, tokens)
+                heredocs = []
+            elif operator.group() == "<<":
+                if arithmetic_at is not None:
+                    shifted = True
+                elif brackets:
+                    shifted_in_bracket = True
+                else:
+                    strip_tabs = command[i : i + 1] == "-"
+                    i += 1 if strip_tabs else 0
+                    delimiter_at = (i, strip_tabs)
+            elif operator.group() == "(":
+                if arithmetic_at is None and (opens_array or command[i : i + 1] == "("):
+                    arithmetic_at = depth
+                depth += 1
+            elif operator.group() == ")":
+                depth -= 1
+                if depth == arithmetic_at:
+                    arithmetic_at, shifted = None, False
+                if substitution and depth == 0:
+                    return tokens, i
         else:
+            brackets = brackets + 1 if char == "[" else max(0, brackets - 1) if char == "]" else brackets
             word = (word or "") + char
             i += 1
+    if substitution:
+        raise ValueError("a $(...) left open")
     finish_word()
-    return tokens
+    return tokens, end
 
 
 def split_segments(command: str) -> list[list[str]]:
@@ -185,11 +292,14 @@ def split_segments(command: str) -> list[list[str]]:
 
     Operators are split off as a shell does, unless quoted: so `a>b` is a redirect but
     `grep ">" f` is not, a newline separates commands, and `( )` group without hiding them.
+    A Nested token is a segment of its own, ahead of its command: a shell runs it first.
     """
     segments, current = [], []
-    for tok in tokenize(drop_heredoc_bodies(command)):
+    for tok in scan(command)[0]:
+        if isinstance(tok, Nested):
+            segments.append([tok])
         # '' is an empty argument, not a separator; > >> &> >| are redirects, kept with their command
-        if isinstance(tok, Op) and set(tok) <= SEPARATOR_CHARS:
+        elif isinstance(tok, Op) and set(tok) <= SEPARATOR_CHARS:
             if current:
                 segments.append(current)
             current = []
@@ -201,14 +311,18 @@ def split_segments(command: str) -> list[list[str]]:
 
 
 def unwrap(tokens: list[str]) -> list[str]:
-    """Drop leading env assignments and wrappers like sudo/env."""
+    """Drop leading env assignments, shell keywords and wrappers like sudo/env."""
     while tokens:
         head = tokens[0]
         if "=" in head and not head.startswith("-") and head.split("=", 1)[0].isidentifier():
             tokens = tokens[1:]
-        elif head in WRAPPERS:
+        elif head in KEYWORDS:
             tokens = tokens[1:]
-            while tokens and tokens[0].startswith("-"):
+        elif (
+            head in WRAPPERS or (head[:1] == "/" and head.rsplit("/", 1)[-1] in WRAPPERS) or tokens[:2] == ["uv", "run"]
+        ):
+            tokens = tokens[2:] if head == "uv" else tokens[1:]
+            while tokens and (tokens[0].startswith("-") or WRAPPER_NUMBER.fullmatch(tokens[0])):
                 tokens = tokens[1:]
         else:
             break
@@ -256,6 +370,8 @@ def git_subcommand(args: list[str]) -> tuple[str | None, list[str], list[str]]:
             if args[i] == "-C" and i + 1 < len(args):
                 dirs.append(args[i + 1])
             i += 2
+        elif args[i] in GIT_LONG_VALUE_OPTIONS and GIT_JUDGED.isdisjoint(args[i + 1 : i + 2]):
+            i += 2  # `--git-dir reset --hard` stays read as reset: git rejects it, but no block is lost for it
         else:
             i += 1
     if i >= len(args):
@@ -430,12 +546,58 @@ def is_secret_file(arg: str) -> bool:
     return (name == ".env" or name.startswith(".env.")) and not name.endswith(".example")
 
 
+def is_expansion(word: str) -> bool:
+    """True if the word may come, in part, from $x, ${x}, $(...) or backticks. Quotes are gone, so '$x' counts too."""
+    return "$" in word or "`" in word
+
+
+def is_expanded_program(word: str) -> bool:
+    """True if the program's name is unknown. `"$root/bin/tool"` is a program called tool; `$(echo /bin/git)` isn't."""
+    name = word.rsplit("/", 1)[-1]
+    return is_expansion(name) or ("$" in word and bool(set(name) & set(")}")))
+
+
+def check_rm_options(args: list[str]) -> str | None:
+    """check_rm() on the options args start with, if they're all rm's own: `"$CC" -O2 -fPIC` and `-m x -rf` aren't."""
+    options = []
+    for arg in args:
+        if arg in ("--recursive", "--force") or re.fullmatch(r"-[dfiIPRrvWx]+", arg):
+            options.append(arg)
+        elif arg.startswith("-") and arg not in ("-", "--"):
+            return None
+        else:
+            break
+    return check_rm(options)
+
+
+def check_expanded_program(args: list[str], cwd: str | None, state: dict) -> str | None:
+    """`$x reset --hard`: what $x holds can't be known, so refuse only what its visible arguments would be as git or rm.
+
+    A copy of the state, because `$x checkout main` says nothing about the branch if $x isn't git. And `$x -c '...'`
+    isn't read as a shell: `"$py" -c` is far more likely, and its code isn't shell.
+    """
+    probe = dict(state)
+    sub, rest, _ = git_subcommand(args)
+    # Two words unknown, as in `"$py" "$script" --all`: the second is likely a file, so only --hard looks forbidden.
+    git_args = ["reset", *rest] if sub is not None and is_expansion(sub) else args
+    return check_git(git_args, cwd, probe) or check_answer_key("git", args, probe) or check_rm_options(args)
+
+
 def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
     sub, rest, _ = git_subcommand(args)  # past global options such as `git -C dir` or `git -c key=val`
     if sub is None:
         return None
 
-    if sub == "push":
+    if is_expansion(sub):  # `git ${x:-reset} --hard`: would the visible words be refused under what it might hold?
+        # --all, --branches and clusters like -Sfoo are ordinary under other subcommands: they aren't read as a push's
+        words = [a for a in rest if a not in ("--all", "--branches") and (a == "-f" or not is_short_cluster(a))]
+        for probe in ("reset", "push", "add"):
+            reason = check_git(
+                [probe, *words], cwd, {"branch": None}
+            )  # no branch: a bare `git $x` isn't a push to main
+            if reason:
+                return reason
+    elif sub == "push":
         if any(a in ("--force", "-f") or (a.startswith("-") and not a.startswith("--") and "f" in a) for a in rest):
             return "git push --force is not allowed; use --force-with-lease right after git pull --rebase"
         if any(a.startswith("+") for a in rest):
@@ -467,6 +629,48 @@ def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
     return None
 
 
+def shell_command_string(args: list[str]) -> str | None:
+    """What a shell's -c runs: the first word that isn't an option, past a -c that may be clustered (-lc, -ec).
+
+    A cluster counts only before the first positional. Past it, in `bash run.sh -vc x`, the script's own options
+    are read only for an exact -c, as they always were.
+    """
+    start, takes_value = None, False
+    for i, arg in enumerate(args):
+        if takes_value:
+            takes_value = False
+        elif is_short_cluster(arg) and "c" in arg[1:]:
+            start = i
+            break
+        elif arg[:1] in ("-", "+") and len(arg) > 1:
+            takes_value = arg in ("--rcfile", "--init-file") or (arg.endswith(("o", "O")) and not arg.startswith("--"))
+        else:
+            break
+    if start is None:
+        start = args.index("-c") if "-c" in args else None
+    if start is None:
+        return None
+    takes_value = args[start].endswith(("o", "O"))  # -o pipefail, or -eo pipefail
+    for i, arg in enumerate(args[start + 1 :], start + 1):
+        if takes_value:
+            takes_value = False
+        elif arg == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        elif arg[:1] in ("-", "+") and len(arg) > 1:
+            takes_value = arg.endswith(("o", "O")) and not arg.startswith("--")
+        else:
+            return arg
+    return None
+
+
+def find_in_subshell(command: str, cwd: str | None, depth: int, state: dict) -> str | None:
+    """Judge a command another shell runs: a cd inside it ends with that shell."""
+    here = state["cwd"]
+    reason = find_violation(command, cwd, depth + 1, state)
+    state["cwd"] = here
+    return reason
+
+
 def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: dict | None = None) -> str | None:
     """Return the reason a command breaks a rule, or None.
 
@@ -477,29 +681,46 @@ def find_violation(command: str, cwd: str | None = None, depth: int = 0, state: 
     # Paths are read from the shell's own directory, which carries over between Claude's Bash calls.
     state.setdefault("start", cwd or "")
     state.setdefault("cwd", cwd or "")
-    if depth > 3:
-        return None
+    if depth > MAX_NESTING:
+        raise ValueError("commands nested too deeply to read")
     for segment in split_segments(command):
+        if isinstance(segment[0], Nested):
+            reason = find_in_subshell(segment[0], cwd, depth, state)
+            if reason:
+                return reason
+            continue
         if any(tok.split("=", 1)[0] == ANSWER_KEY_OVERRIDE for tok in segment):
             return f"{ANSWER_KEY_OVERRIDE} is for a person changing the Answer Key on purpose, never an agent"
         words, targets = strip_redirects(segment)
         if any(in_answer_key(target, state) for target in targets):
             return ANSWER_KEY_REASON
         tokens = unwrap(words)
+        after_expansion = False
+        while tokens and is_expanded_program(tokens[0]):  # it may be a wrapper too, as in `$SUDO git reset --hard`
+            reason = check_expanded_program(tokens[1:], cwd, state)
+            if reason:
+                return reason
+            tokens = unwrap(tokens[1:])
+            after_expansion = True
         if not tokens:
             continue
         prog = tokens[0].rsplit("/", 1)[-1]
         reason = check_answer_key(prog, tokens[1:], state)
         if reason:
             return reason
-        if prog in SHELLS and "-c" in tokens:
-            idx = tokens.index("-c")
-            if idx + 1 < len(tokens):
-                here = state["cwd"]
-                reason = find_violation(tokens[idx + 1], cwd, depth + 1, state)
-                state["cwd"] = here  # a cd inside bash -c ends with that shell
-                if reason:
-                    return reason
+        if prog in SHELLS:
+            string = shell_command_string(tokens[1:])
+            reason = find_in_subshell(string, cwd, depth, state) if string is not None else None
+            if reason:
+                return reason
+        # the shell's own eval: it runs its arguments, joined, in this shell, so a cd inside it carries on.
+        # Not ./eval, and not `"$t2c" eval`, a subcommand of something unknown.
+        elif tokens[0] == "eval" and not after_expansion:
+            reason = find_violation(
+                " ".join(tokens[2:] if tokens[1:2] == ["--"] else tokens[1:]), cwd, depth + 1, state
+            )
+            if reason:
+                return reason
         elif prog == "rm":
             reason = check_rm(tokens[1:])
             if reason:

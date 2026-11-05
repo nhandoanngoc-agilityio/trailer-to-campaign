@@ -969,7 +969,7 @@ def test_an_unknown_watcher_flag_is_refused(capsys: pytest.CaptureFixture[str]) 
     assert "invalid choice" in capsys.readouterr().err
 
 
-# T12: the side-by-side result, from the Film's Run Logs and the two stopwatch times.
+# T12: the side-by-side result, from the Film's Run Logs and the two times.
 
 
 def test_result_writes_the_page_without_an_api_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -979,7 +979,19 @@ def test_result_writes_the_page_without_an_api_key(tmp_path: Path, capsys: pytes
     (films / FILM).mkdir(parents=True)
     (films / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
     trial(tmp_path / "runs")
-    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", str(tmp_path / "runs")]
+    argv = [
+        "result",
+        "--film",
+        FILM,
+        "--old-way",
+        "240",
+        "--new-way",
+        "60",
+        "--old-way-source",
+        "stopwatch",
+        "--runs-dir",
+        str(tmp_path / "runs"),
+    ]
     assert main(argv, env={"T2C_FILMS_DIR": str(films)}) == 0
     out = capsys.readouterr().out
     assert "Time Saved: 180 min (75%)" in out and f"{FILM}/result.md and result.json under the --runs-dir" in out
@@ -996,7 +1008,19 @@ def test_result_names_a_relative_runs_folder_as_given(
     (tmp_path / "films" / FILM).mkdir(parents=True)
     (tmp_path / "films" / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
     trial(tmp_path / "runs")
-    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", "runs"]
+    argv = [
+        "result",
+        "--film",
+        FILM,
+        "--old-way",
+        "240",
+        "--new-way",
+        "60",
+        "--old-way-source",
+        "stopwatch",
+        "--runs-dir",
+        "runs",
+    ]
     assert main(argv, env={"T2C_FILMS_DIR": "films"}) == 0
     assert f"runs/{FILM}/result.md and result.json" in capsys.readouterr().out
 
@@ -1015,7 +1039,19 @@ def test_result_that_cannot_be_written_says_so_without_a_path(
     (tmp_path / "films" / FILM).mkdir(parents=True)
     (tmp_path / "films" / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
     trial(tmp_path / "runs")
-    argv = ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", str(tmp_path / "runs")]
+    argv = [
+        "result",
+        "--film",
+        FILM,
+        "--old-way",
+        "240",
+        "--new-way",
+        "60",
+        "--old-way-source",
+        "stopwatch",
+        "--runs-dir",
+        str(tmp_path / "runs"),
+    ]
     assert main(argv, env={"T2C_FILMS_DIR": str(tmp_path / "films")}) == 2
     err = capsys.readouterr().err
     assert "PermissionError" in err and str(tmp_path) not in err
@@ -1023,6 +1059,102 @@ def test_result_that_cannot_be_written_says_so_without_a_path(
 
 @pytest.mark.parametrize("old", ["0", "soon"])
 def test_result_refuses_bad_minutes(tmp_path: Path, old: str, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["result", "--film", "agent-327", "--old-way", old, "--new-way", "60", "--runs-dir", str(tmp_path)]
+    argv = [
+        "result",
+        "--film",
+        "agent-327",
+        "--old-way",
+        old,
+        "--new-way",
+        "60",
+        "--old-way-source",
+        "stopwatch",
+        "--runs-dir",
+        str(tmp_path),
+    ]
     assert main(argv, env={"T2C_FILMS_DIR": str(FILMS)}) == 2
     assert "old-way" in capsys.readouterr().err
+
+
+# T28: t2c result says how the old way was timed.
+
+
+def _a_trial_on_disk(tmp_path: Path) -> list[str]:
+    """A Film with Run Logs, and the result command for it with no --old-way-source."""
+    from test_result import FILM, FILM_TOML, trial
+
+    (tmp_path / "films" / FILM).mkdir(parents=True)
+    (tmp_path / "films" / FILM / "film.toml").write_text(FILM_TOML, encoding="utf-8")
+    trial(tmp_path / "runs")
+    return ["result", "--film", FILM, "--old-way", "240", "--new-way", "60", "--runs-dir", str(tmp_path / "runs")]
+
+
+def test_result_with_memory_prints_an_estimate(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [*_a_trial_on_disk(tmp_path), "--old-way-source", "memory"]
+    assert main(argv, env={"T2C_FILMS_DIR": str(tmp_path / "films")}) == 0
+    out = capsys.readouterr().out
+    assert "Time Saved (estimate): 180 min (75%)" in out and "from memory" in out
+    assert "stopwatch" not in out.lower()
+
+
+def test_result_with_stopwatch_says_stopwatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [*_a_trial_on_disk(tmp_path), "--old-way-source", "stopwatch"]
+    assert main(argv, env={"T2C_FILMS_DIR": str(tmp_path / "films")}) == 0
+    out = capsys.readouterr().out
+    assert "Time Saved: 180 min (75%)" in out and "timed by that marketer's stopwatch" in out
+
+
+@pytest.mark.parametrize(
+    ("given", "refusal"),
+    [
+        ([], "the following arguments are required: --old-way-source"),
+        (["--old-way-source", "guess"], "invalid choice: 'guess'"),
+        (["--old-way-source", "Memory"], "invalid choice: 'Memory'"),
+        (["--old-way-source", ""], "invalid choice: ''"),
+    ],
+)
+def test_result_refuses_a_missing_or_unknown_old_way_source(
+    tmp_path: Path, given: list[str], refusal: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_result import FILM
+
+    argv = [*_a_trial_on_disk(tmp_path), *given]
+    with pytest.raises(SystemExit) as refused:
+        main(argv, env={"T2C_FILMS_DIR": str(tmp_path / "films")})
+    assert refused.value.code == 2
+    assert refusal in capsys.readouterr().err
+    assert not (tmp_path / "runs" / FILM / "result.md").exists()
+
+
+def test_the_result_help_names_the_flag_and_claims_no_stopwatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as shown:
+        main(["result", "--help"])
+    assert shown.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--old-way-source {stopwatch,memory}" in out
+    assert "stopwatch: timed" in out and "memory: remembered, so Time Saved is labelled an estimate" in out
+    assert "from that marketer's stopwatch" not in out and "timed the same way" not in out
+
+
+def test_the_cli_offers_the_sources_the_page_knows() -> None:
+    from trailer_to_campaign.cli import OLD_WAY_SOURCES as OFFERED
+    from trailer_to_campaign.result import OLD_WAY_SOURCES
+
+    assert OFFERED == OLD_WAY_SOURCES == ("stopwatch", "memory")
+
+
+@pytest.mark.parametrize("doc", ["docs/side-by-side.md", "README.md"])
+def test_the_docs_give_the_result_command_with_the_flag(doc: str) -> None:
+    text = (FILMS.parent / doc).read_text(encoding="utf-8")
+    commands = [line for line in text.splitlines() if "t2c result --" in line]
+    assert commands and all("--old-way-source stopwatch|memory" in line for line in commands)
+
+
+def test_the_protocol_says_memory_makes_time_saved_an_estimate() -> None:
+    text = (FILMS.parent / "docs/side-by-side.md").read_text(encoding="utf-8")
+    sentences = " ".join(text.split()).split(". ")
+    # One sentence has to pair them: "from memory" and "estimate" also appear apart elsewhere on the page.
+    assert any("use `memory`" in s and "from memory" in s and "Time Saved as an estimate" in s for s in sentences)

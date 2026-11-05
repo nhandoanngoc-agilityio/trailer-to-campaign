@@ -296,6 +296,7 @@ def test_one_bad_file_fails_even_after_a_good_one(tmp_path: Path):
     [
         pytest.param('jobs: {\n  name: "open\n', id="not valid YAML"),
         pytest.param("jobs:\n  a:\n    timeout-minutes: 5\n---\njobs:\n  b:\n    runs-on: x\n", id="two documents"),
+        pytest.param("jobs: !!python/name:builtins.int\n", id="a Python tag, which only an unsafe loader reads"),
     ],
 )
 def test_a_file_that_is_not_one_yaml_document_fails_and_names_the_file(tmp_path: Path, text: str):

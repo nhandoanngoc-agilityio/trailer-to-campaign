@@ -577,7 +577,10 @@ def check_expanded_program(args: list[str], cwd: str | None, state: dict) -> str
     isn't read as a shell: `"$py" -c` is far more likely, and its code isn't shell.
     """
     probe = dict(state)
-    return check_git(args, cwd, probe) or check_answer_key("git", args, probe) or check_rm_options(args)
+    sub, rest, _ = git_subcommand(args)
+    # Two words unknown, as in `"$py" "$script" --all`: the second is likely a file, so only --hard looks forbidden.
+    git_args = ["reset", *rest] if sub is not None and is_expansion(sub) else args
+    return check_git(git_args, cwd, probe) or check_answer_key("git", args, probe) or check_rm_options(args)
 
 
 def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
@@ -586,8 +589,12 @@ def check_git(args: list[str], cwd: str | None, state: dict) -> str | None:
         return None
 
     if is_expansion(sub):  # `git ${x:-reset} --hard`: would the visible words be refused under what it might hold?
+        # --all, --branches and clusters like -Sfoo are ordinary under other subcommands: they aren't read as a push's
+        words = [a for a in rest if a not in ("--all", "--branches") and (a == "-f" or not is_short_cluster(a))]
         for probe in ("reset", "push", "add"):
-            reason = check_git([probe, *rest], cwd, {"branch": None})  # no branch: a bare `git $x` isn't a push to main
+            reason = check_git(
+                [probe, *words], cwd, {"branch": None}
+            )  # no branch: a bare `git $x` isn't a push to main
             if reason:
                 return reason
     elif sub == "push":

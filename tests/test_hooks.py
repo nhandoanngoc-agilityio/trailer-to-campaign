@@ -930,6 +930,103 @@ def test_a_judged_subcommand_after_a_git_value_option_still_guards_the_answer_ke
     assert "Answer Key" in result.stderr
 
 
+# T27, review round 3: an unknown program or subcommand is refused only when the visible words already look forbidden.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # two words unknown: the second may be a file, so only --hard still looks forbidden
+        '"$FFMPEG" -y -i "$in" -f mp4 out.mp4',
+        '"$FFPROBE" "$f" -of json',
+        '"$py" -u "$S/run.py" -r 5 -f out.json',
+        '"$py" "$S/check.py" --all',
+        '"$py" "$S/load.py" .env',
+        '"$py" "$S/x.py" origin main',
+        '"$CC" -O2 "$src" -fPIC -o out',
+        'timeout "$t" "$py" --all',
+        "$x $y origin main",
+        "$x $y --force",
+        "$x $y -f",
+        "$x $y .env",
+        # an unknown git subcommand: ordinary flags that many subcommands take
+        'git "$sub" --all',
+        'for c in fetch log; do git "$c" --all; done',
+        'git "$sub" -Sfoo',
+        'git "$sub" --branches',
+        'git "$sub" -uf origin',
+        # pinned: each guard survived a mutation
+        "cat <<EOF\n\tEOF\ngit reset --hard\nEOF",  # a tab-indented delimiter closes only <<-
+        '"$tool" -q -rf build',  # -q isn't one of rm's options, so this isn't rm's command line
+        "echo \"`printf '\\`'`\"",
+    ],
+)
+def test_round_3_allows(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
+ROUND_3_FORBIDDEN = [
+    # what still looks forbidden through an unknown program or subcommand
+    "$x reset --hard",
+    "$x $y --hard",
+    '"$x" "$y" reset --hard',
+    "${x:-git} reset --hard",
+    "$x push -f",
+    '$SUDO "$git" push -f',
+    'git "$sub" --force',
+    'git "$sub" -f',
+    'git "$sub" --hard',
+    'git "$sub" --mirror',
+    "git $x +main",
+    "git $x .env",
+    "git $x origin main",  # an accepted false block for `git "$c" origin main` with c=fetch: see the record
+    'for c in fetch pull; do git "$c" origin main; done',
+    # pinned: each guard survived a mutation
+    'echo "$(echo a # \\"\n)"',
+    'echo "$(echo a # `\n)"',
+    "bash --init-file f -lc 'git reset --hard'",
+    "bash -o pipefail -lc 'git reset --hard'",
+    "cat <<EOF\n`git reset --hard\nEOF",
+    "git --config-env x=Y reset --hard",
+    "git --super-prefix x reset --hard",
+    "timeout 1.5 git reset --hard",
+    # refused here though they passed on main: left for the human, in the record
+    'x="$(IFS=$\'\\n\'; echo "$y")"',
+    "echo \"$(printf $'a\\nb')\"",
+    'echo "$(echo do case)"',
+]
+
+
+@pytest.mark.parametrize("command", ROUND_3_FORBIDDEN)
+def test_round_3_blocks(repo: Path, command: str) -> None:
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 2, result.stderr
+
+
+def test_an_answer_key_write_through_an_unknown_program_still_blocks(repo: Path) -> None:
+    result = run_hook("block_forbidden.py", {"command": "$x rm evals/expected/a"}, repo)
+    assert result.returncode == 2, result.stderr
+    assert "Answer Key" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "arch $(echo -arm64) git reset --hard",
+        "lockf $(mktemp) rm -rf build",
+        "script -q $(mktemp) git reset --hard",
+        "parallel -j$(nproc) rm -rf {} ::: a b",
+    ],
+)
+def test_known_gap_a_wrapper_the_hook_doesnt_know_hides_a_command_after_a_substitution(
+    repo: Path, command: str
+) -> None:
+    """These exit 2 on main and a shell runs them, but they read like `echo $(date) rm -rf build`: see the record."""
+    result = run_hook("block_forbidden.py", {"command": command}, repo)
+    assert result.returncode == 0, result.stderr
+
+
 def test_a_hung_git_blocks_the_command(tmp_path: Path) -> None:
     """A hung git isn't "not on main": it means the branch is unknown, so the command wasn't checked (T24)."""
     fake_git = tmp_path / "git"

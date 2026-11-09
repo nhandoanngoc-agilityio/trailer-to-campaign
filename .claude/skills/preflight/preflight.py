@@ -144,10 +144,22 @@ def check_remote(ctx: Context) -> Row:
     return Row(PASS, "remote", f"origin fetch and push are {HOST}/{REPO}")
 
 
+def gh_repo_is_this_repo(value: str) -> bool:
+    """GH_REPO is [HOST/]OWNER/REPO, and gh also takes a URL."""
+    if ":" in value:
+        return is_this_repo(value)
+    parts = value.split("/")
+    return is_this_repo(f"https://{HOST}/{value}") if len(parts) == 2 else is_this_repo(f"https://{value}")
+
+
 def check_github_access(ctx: Context) -> Row:
-    # No repo argument: this asks what `gh` would really act on here, which a stray GH_REPO would change.
-    ran = run(["gh", "repo", "view", "--json", "nameWithOwner,url"], ctx.timeout, ctx.root)
     name = "github access"
+    # Read directly, because `gh repo view` ignores GH_REPO and reports this repo while `gh pr` and `gh issue` obey it.
+    gh_repo = os.environ.get("GH_REPO", "").strip()
+    if gh_repo and not gh_repo_is_this_repo(gh_repo):
+        return Row(FAIL, name, f"GH_REPO sends gh pr and gh issue to {gh_repo}, not {HOST}/{REPO}", "unset GH_REPO")
+    # No repo argument: naming it would pass whatever this folder's remotes say.
+    ran = run(["gh", "repo", "view", "--json", "nameWithOwner,url"], ctx.timeout, ctx.root)
     if ran.outcome == "missing":
         return Row(FAIL, name, "gh is not installed", "brew install gh")
     if ran.outcome == "timeout":
@@ -163,7 +175,7 @@ def check_github_access(ctx: Context) -> Row:
             UNKNOWN, name, f"gh's answer couldn't be read: {ran.out}", "Run: gh repo view --json nameWithOwner,url"
         )
     if str(found).lower() != REPO.lower() or host != HOST:
-        fix = "Check GH_REPO and GH_HOST, and the remotes in: git remote -v"
+        fix = "Check GH_HOST, and the remotes in: git remote -v"
         return Row(FAIL, name, f"gh would act on {url}, not {HOST}/{REPO}", fix)
     return Row(PASS, name, f"gh reads {HOST}/{REPO}")
 
@@ -402,7 +414,8 @@ def check_ci(ctx: Context, remote: Row) -> Row:
     if not any(n == "test" and c == "success" for n, _, c in states):
         return Row(UNKNOWN, name, f"{short}: the test job didn't pass or didn't run", wait)
     dirty = run(["git", "status", "--porcelain"], ctx.timeout, ctx.root)
-    note = "; this covers the commit, not your uncommitted changes" if dirty.out.strip() else ""
+    unsure = dirty.outcome != "ok" or dirty.code != 0  # if it can't tell, it keeps the warning
+    note = "; this covers the commit, not your uncommitted changes" if unsure or dirty.out.strip() else ""
     return Row(PASS, name, f"{short}: test passed and no check failed{note}")
 
 

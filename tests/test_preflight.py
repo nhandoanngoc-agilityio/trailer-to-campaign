@@ -258,8 +258,26 @@ def test_gh_on_another_host_fails(project: Project):
     assert project.run().row("github access") == "FAIL"
 
 
-def test_gh_asks_about_the_repo_it_would_really_act_on(project: Project):
-    """Naming the repo would hide a GH_REPO that points somewhere else."""
+@pytest.mark.parametrize(
+    "value", ["cli/cli", "github.com/cli/cli", f"gitlab.com/{SLUG}", "https://github.com/cli/cli", "x"]
+)
+def test_a_gh_repo_that_points_elsewhere_fails(project: Project, value: str):
+    """Tried on real gh: `gh repo view` ignores GH_REPO and reports this repo, while `gh issue` and `gh pr` obey it."""
+    project.env_extra["GH_REPO"] = value
+    result = project.run()
+    assert result.row("github access") == "FAIL"
+    assert "GH_REPO" in result.line("github access")
+    assert result.code == 1
+
+
+@pytest.mark.parametrize("value", [SLUG, SLUG.upper(), f"github.com/{SLUG}", f"https://github.com/{SLUG}.git", ""])
+def test_a_gh_repo_that_points_here_passes(project: Project, value: str):
+    project.env_extra["GH_REPO"] = value
+    assert project.run().row("github access") == "PASS"
+
+
+def test_gh_asks_about_the_repo_this_folder_resolves_to(project: Project):
+    """Naming the repo would pass whatever this folder's remotes say."""
     project.run()
     view = next(line for line in project.calls().splitlines() if line.startswith("gh repo view"))
     assert SLUG not in view
@@ -300,6 +318,19 @@ def test_a_hung_gh_is_unknown_and_does_not_hold_the_run(project: Project):
     assert result.row("github access") == "UNKNOWN"
     assert result.code != 0
     assert result.seconds < 15
+
+
+def test_a_timeout_survives_macos_refusing_to_signal_the_group(monkeypatch: pytest.MonkeyPatch):
+    """macOS can answer PermissionError from killpg for a group that's ending. That must stay a timeout, not a crash."""
+
+    def refuse(*_: object) -> None:
+        raise PermissionError
+
+    module = load_script()
+    monkeypatch.setattr(module.os, "killpg", refuse)
+    started = time.monotonic()
+    assert module.run(["/bin/sleep", "60"], 0.2).outcome == "timeout"
+    assert time.monotonic() - started < 15
 
 
 def test_outside_a_git_repo_fails_with_a_plain_message(project: Project, tmp_path: Path):

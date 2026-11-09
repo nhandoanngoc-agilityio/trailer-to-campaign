@@ -23,6 +23,7 @@ This is a macOS and zsh environment. Use `python3` if `python` is not on PATH, d
 - `deploy/`: runs the Slack app from a tagged release under `launchd`. `docs/deploy.md`: how.
 - `.claude/hooks/`: guardrails wired in `.claude/settings.json`, tested in `tests/test_hooks.py`. A hook block or approval prompt is team policy: change the approach (branch, PR, specific files) rather than reaching the same result another way.
 - `.claude/skills/review-checklist/`: this project's own review checks, from its rules and shipped bugs.
+- `.claude/skills/preflight/`: `/preflight` checks the environment before work starts. It reports and never repairs.
 - `.claude/claude-security-guidance.md`: what security review looks for in this project.
 - `evals/`: the Eval Set (from T8). `evals/expected/` is the Answer Key (human-owned): Claude reads it and never edits it.
 - `.github/workflows/`: `ci.yml` (lint and tests), `claude-code-review.yml` (Claude reviews each PR once when it opens, unless it only changes `docs/`), `claude.yml` (`@claude` in issues and PRs).

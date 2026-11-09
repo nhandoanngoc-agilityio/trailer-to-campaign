@@ -6,16 +6,21 @@ Each test runs the script as a subprocess on the machine's python3, as /prefligh
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 from test_hooks import hook_python
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -305,3 +310,544 @@ def test_outside_a_git_repo_fails_with_a_plain_message(project: Project, tmp_pat
     assert done.returncode == 1
     assert "FAIL" in done.stdout
     assert "Traceback" not in done.stderr
+
+
+# --- git hook -----------------------------------------------------------------
+
+
+def test_the_git_hook_set_up_passes(project: Project):
+    assert project.run().row("git hook") == "PASS"
+
+
+def test_a_git_hook_path_that_is_not_set_fails(project: Project):
+    project.git("config", "--unset", "core.hooksPath")
+    result = project.run()
+    assert result.row("git hook") == "FAIL"
+    assert "git config core.hooksPath .githooks" in result.out
+
+
+def test_a_git_hook_path_elsewhere_fails(project: Project):
+    project.git("config", "core.hooksPath", "/tmp/elsewhere")
+    assert project.run().row("git hook") == "FAIL"
+
+
+def test_a_pre_commit_that_cannot_run_fails(project: Project):
+    (project.root / ".githooks" / "pre-commit").chmod(0o644)
+    assert project.run().row("git hook") == "FAIL"
+
+
+# --- claude hooks -------------------------------------------------------------
+
+ALLOWS_ALL = "import sys; sys.exit(0)\n"
+BLOCKS_ALL = "import sys; print('Blocked by team policy: everything', file=sys.stderr); sys.exit(2)\n"
+ASKS_ON_ALL = """import json
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}}))
+"""
+CRASHES = "import sys; print('Blocked: the guardrail hook failed (boom)', file=sys.stderr); sys.exit(2)\n"
+HANGS = "import time; time.sleep(60)\n"
+
+
+def settings(project: Project) -> dict:
+    return json.loads((project.root / ".claude" / "settings.json").read_text())
+
+
+def write_settings(project: Project, data: dict) -> None:
+    (project.root / ".claude" / "settings.json").write_text(json.dumps(data))
+
+
+def test_the_real_hook_passes(project: Project):
+    assert project.run().row("claude hooks") == "PASS"
+
+
+@pytest.mark.parametrize(
+    "hook", [ALLOWS_ALL, BLOCKS_ALL, ASKS_ON_ALL, CRASHES], ids=["allows", "blocks", "asks", "crash"]
+)
+def test_a_hook_that_does_not_tell_the_two_commands_apart_fails(project: Project, hook: str):
+    (project.root / ".claude" / "hooks" / "block_forbidden.py").write_text(hook)
+    result = project.run()
+    assert result.row("claude hooks") == "FAIL"
+    assert result.code == 1
+
+
+def test_a_hung_hook_is_unknown(project: Project):
+    (project.root / ".claude" / "hooks" / "block_forbidden.py").write_text(HANGS)
+    result = project.run(timeout="1")
+    assert result.row("claude hooks") == "UNKNOWN"
+    assert result.seconds < 15
+
+
+def test_the_commands_are_only_sent_never_executed(project: Project):
+    project.git("commit", "-q", "--allow-empty", "-m", "second")
+    head = project.git("rev-parse", "HEAD")
+    marker = project.root / "untracked-marker.txt"
+    marker.write_text("still here")
+    project.run()
+    assert project.git("rev-parse", "HEAD") == head
+    assert marker.read_text() == "still here"
+
+
+def test_a_missing_hook_script_fails(project: Project):
+    (project.root / ".claude" / "hooks" / "format_on_edit.py").unlink()
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_a_hook_that_is_not_wired_fails_even_when_the_script_works(project: Project):
+    data = settings(project)
+    del data["hooks"]["PreToolUse"]
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_the_hook_wired_to_another_tool_fails(project: Project):
+    data = settings(project)
+    data["hooks"]["PreToolUse"][0]["matcher"] = "Edit"
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_bash_in_a_matcher_list_passes(project: Project):
+    data = settings(project)
+    data["hooks"]["PreToolUse"][0]["matcher"] = "Edit|Bash"
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "PASS"
+
+
+@pytest.mark.parametrize("file", ["settings.json", "settings.local.json"])
+def test_hooks_turned_off_fails(project: Project, file: str):
+    path = project.root / ".claude" / file
+    data = json.loads(path.read_text()) if path.exists() else {}
+    path.write_text(json.dumps({**data, "disableAllHooks": True}))
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+@pytest.mark.parametrize("file", ["settings.json", "settings.local.json"])
+def test_settings_that_cannot_be_read_fail(project: Project, file: str):
+    (project.root / ".claude" / file).write_text("{not json")
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_no_local_settings_passes(project: Project):
+    assert not (project.root / ".claude" / "settings.local.json").exists()
+    assert project.run().row("claude hooks") == "PASS"
+
+
+# --- toolchain ----------------------------------------------------------------
+
+
+def set_venv_python(project: Project, version: str) -> None:
+    (project.root / ".venv" / "bin" / "python").write_text(f'#!/bin/sh\necho "Python {version}"\n')
+
+
+def test_the_same_python_as_ci_a_current_lock_and_ffmpeg_pass(project: Project):
+    assert project.run().row("toolchain") == "PASS"
+
+
+def test_another_python_than_ci_fails_and_names_both(project: Project):
+    set_venv_python(project, "3.14.2")
+    result = project.run()
+    assert result.row("toolchain") == "FAIL"
+    assert "3.14" in result.line("toolchain")
+    assert "3.11" in result.line("toolchain")
+    assert "uv sync --python 3.11" in result.out
+
+
+def test_a_python_that_only_starts_the_same_is_a_mismatch(project: Project):
+    set_venv_python(project, "3.1.9")
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_no_venv_fails(project: Project):
+    (project.root / ".venv" / "bin" / "python").unlink()
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_a_stale_lock_fails(project: Project):
+    project.fake("uv", 'echo "hint: To update the lockfile, run uv lock." >&2; exit 1')
+    result = project.run()
+    assert result.row("toolchain") == "FAIL"
+    assert "uv lock" in result.out
+
+
+def test_a_lock_that_could_not_be_checked_is_unknown_not_stale(project: Project):
+    """`uv lock --check` also exits 1 when the network is down, which says nothing about the lock."""
+    project.fake("uv", 'echo "Packages were unavailable because the network was disabled." >&2; exit 1')
+    assert project.run().row("toolchain") == "UNKNOWN"
+
+
+def test_uv_missing_fails(project: Project):
+    project.remove_tool("uv")
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_ffmpeg_missing_fails(project: Project):
+    project.remove_tool("ffmpeg")
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_a_broken_ffmpeg_fails(project: Project):
+    project.fake("ffmpeg", "exit 1")
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_a_hung_uv_is_unknown(project: Project):
+    project.fake("uv", HANG)
+    result = project.run(timeout="1")
+    assert result.row("toolchain") == "UNKNOWN"
+    assert result.seconds < 15
+
+
+def test_a_fail_outranks_an_unknown_in_the_same_row(project: Project):
+    set_venv_python(project, "3.14.2")
+    project.fake("uv", HANG)
+    assert project.run(timeout="1").row("toolchain") == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "jobs: {}\n",
+        '          python-version: "3.11"\n          python-version: "3.12"\n',
+        "          python-version: ${{ matrix.python }}\n",
+        '      # python-version: "3.11"\n',
+    ],
+    ids=["none", "two", "matrix", "comment"],
+)
+def test_a_ci_file_without_exactly_one_clear_python_is_unknown(project: Project, text: str):
+    (project.root / ".github" / "workflows" / "ci.yml").write_text(text)
+    assert project.run().row("toolchain") == "UNKNOWN"
+
+
+def test_a_check_that_crashes_is_unknown_and_the_others_still_run(project: Project):
+    (project.root / ".github" / "workflows" / "ci.yml").write_bytes(b"\xff\xfe not text")
+    result = project.run()
+    assert result.row("toolchain") == "UNKNOWN"
+    assert result.row("skill files") == "PASS"
+    assert "Traceback" not in result.err
+
+
+# --- skill files --------------------------------------------------------------
+
+
+def write_skill(project: Project, name: str, text: str) -> None:
+    folder = project.root / ".claude" / "skills" / name
+    folder.mkdir(exist_ok=True)
+    (folder / "SKILL.md").write_text(text)
+
+
+def test_the_real_skills_pass(project: Project):
+    assert project.run().row("skill files") == "PASS"
+
+
+def test_angle_bracket_words_like_ship_tickets_are_not_placeholders(project: Project):
+    write_skill(project, "fine", "---\nname: fine\ndescription: d\n---\nRun `gh pr view <pr>` for T<t>.\n")
+    assert project.run().row("skill files") == "PASS"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no frontmatter at all\n",
+        "---\nname: bad\ndescription: never closed\n",
+        "---\ndescription: no name\n---\nBody\n",
+        "---\nname: bad\n---\nNo description\n",
+        "---\nname: bad\ndescription:\n---\nEmpty description\n",
+        "---\nname: another-name\ndescription: d\n---\nThe wrong name\n",
+        "---\nname: bad\ndescription: d\n---\nFill in {{ project }}\n",
+        "---\nname: bad\ndescription: d\n---\nSet <your name> here\n",
+        "---\nname: bad\ndescription: d\n---\nTODO write this\n",
+        "---\nname: bad\ndescription: d\n---\nPLACEHOLDER\n",
+        "---\nname: bad\ndescription: d\n---\nREPLACE_ME\n",
+    ],
+)
+def test_a_bad_skill_file_fails_and_is_named(project: Project, text: str):
+    write_skill(project, "bad", text)
+    result = project.run()
+    assert result.row("skill files") == "FAIL"
+    assert "bad" in result.line("skill files")
+
+
+def test_a_skill_folder_without_a_skill_file_fails(project: Project):
+    (project.root / ".claude" / "skills" / "empty").mkdir()
+    assert project.run().row("skill files") == "FAIL"
+
+
+def test_no_skills_at_all_fails(project: Project):
+    shutil.rmtree(project.root / ".claude" / "skills")
+    assert project.run().row("skill files") == "FAIL"
+
+
+# --- ci -----------------------------------------------------------------------
+
+
+def check_runs(*runs: tuple[str, str, str | None], total: int | None = None) -> str:
+    made = [{"name": name, "status": status, "conclusion": conclusion} for name, status, conclusion in runs]
+    return json.dumps({"total_count": len(made) if total is None else total, "check_runs": made})
+
+
+# What `main` really reported on 2026-11-09: a push doesn't run the PR-only checks.
+MAIN_SHAPE = check_runs(
+    ("claude", "completed", "skipped"), ("answer-key", "completed", "skipped"), ("test", "completed", "success")
+)
+
+
+def test_the_real_shape_from_main_passes(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    result = project.run("--ci")
+    assert result.row("ci") == "PASS"
+    assert result.code == 0
+
+
+def test_ci_asks_github_about_this_commit(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    project.run("--ci")
+    api = next(line for line in project.calls().splitlines() if line.startswith("gh api"))
+    assert f"repos/{SLUG}/commits/{project.git('rev-parse', 'HEAD').strip()}/check-runs" in api
+    assert "--hostname github.com" in api
+
+
+@pytest.mark.parametrize(
+    "api",
+    [
+        check_runs(),
+        check_runs(("test", "in_progress", None)),
+        check_runs(("test", "queued", None)),
+        check_runs(("test", "completed", "success"), ("answer-key", "in_progress", None)),
+        check_runs(("test", "completed", "skipped")),
+        check_runs(("answer-key", "completed", "success")),
+        check_runs(("claude", "completed", "skipped")),
+        check_runs(("test", "completed", "success"), total=101),
+        "not json",
+    ],
+    ids=[
+        "none",
+        "running",
+        "queued",
+        "another-pending",
+        "test-skipped",
+        "no-test",
+        "all-skipped",
+        "too-many",
+        "bad-json",
+    ],
+)
+def test_ci_it_cannot_confirm_is_unknown(project: Project, api: str):
+    project.fake_gh(view=GOOD_VIEW, api=api)
+    result = project.run("--ci")
+    assert result.row("ci") == "UNKNOWN"
+    assert result.code == 2
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["failure", "timed_out", "cancelled", "stale", "action_required", "startup_failure"]
+)
+@pytest.mark.parametrize("name", ["test", "answer-key"])
+def test_a_bad_result_on_any_check_fails(project: Project, name: str, conclusion: str):
+    runs = [("test", "completed", "success"), (name, "completed", conclusion)]
+    project.fake_gh(view=GOOD_VIEW, api=check_runs(*runs))
+    result = project.run("--ci")
+    assert result.row("ci") == "FAIL"
+    assert name in result.line("ci")
+    assert result.code == 1
+
+
+def test_a_failed_check_outranks_one_still_running(project: Project):
+    runs = [("test", "in_progress", None), ("answer-key", "completed", "failure")]
+    project.fake_gh(view=GOOD_VIEW, api=check_runs(*runs))
+    assert project.run("--ci").row("ci") == "FAIL"
+
+
+def test_a_commit_github_does_not_have_is_unknown(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api_exit=1)
+    result = project.run("--ci")
+    assert result.row("ci") == "UNKNOWN"
+    assert result.code == 2
+
+
+def test_a_hung_ci_call_is_unknown(project: Project):
+    project.fake(
+        "gh",
+        f"""if [ "$1" = api ]; then {HANG}; fi
+/bin/cat <<'EOF'
+{GOOD_VIEW}
+EOF""",
+    )
+    result = project.run("--ci", timeout="1")
+    assert result.row("ci") == "UNKNOWN"
+    assert result.seconds < 15
+
+
+def test_ci_does_not_ask_when_origin_is_the_wrong_place(project: Project):
+    """The false pass again: a green answer about another repo says nothing about this commit."""
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    project.set_origin(f"https://gitlab.com/{SLUG}.git")
+    result = project.run("--ci")
+    assert result.row("ci") == "UNKNOWN"
+    assert result.code == 1  # the remote's own FAIL
+    assert "gh api" not in project.calls()
+
+
+def test_without_ci_the_check_is_left_out_and_the_report_says_so(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api=check_runs(("test", "completed", "failure")))
+    result = project.run()
+    assert result.row("ci") == "SKIP"
+    assert "--ci" in result.line("ci")
+    assert result.code == 0  # SKIP is left out of the exit code, and the report says so
+    assert "gh api" not in project.calls()
+
+
+def test_ci_says_it_only_covers_the_commit_when_files_have_changed(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    (project.root / "changed.txt").write_text("not committed")
+    result = project.run("--ci")
+    assert result.row("ci") == "PASS"
+    assert "uncommitted" in result.line("ci")
+
+
+# --- the report as a whole ----------------------------------------------------
+
+
+def test_all_healthy_exits_0_with_a_row_for_every_check(project: Project):
+    result = project.run()
+    assert result.code == 0, result.out
+    for name in ("remote", "github access", "git hook", "claude hooks", "toolchain", "skill files"):
+        assert result.row(name) == "PASS"
+
+
+def test_a_fail_exits_1(project: Project):
+    project.git("config", "--unset", "core.hooksPath")
+    assert project.run().code == 1
+
+
+def test_an_unknown_with_no_fail_exits_2(project: Project):
+    project.fake_gh(view="not json")
+    assert project.run().code == 2
+
+
+def test_a_fail_outranks_an_unknown_in_the_exit_code(project: Project):
+    project.fake_gh(view="not json")
+    project.git("config", "--unset", "core.hooksPath")
+    assert project.run().code == 1
+
+
+def test_every_row_that_is_not_a_pass_prints_a_fix(project: Project):
+    project.git("config", "--unset", "core.hooksPath")
+    project.remove_tool("uv")
+    project.fake_gh(view="not json")
+    project.set_origin(f"https://gitlab.com/{SLUG}.git")
+    lines = project.run().out.splitlines()
+    bad = [i for i, line in enumerate(lines) if line.startswith(("FAIL", "UNKNOWN"))]
+    assert len(bad) == 4
+    for i in bad:
+        assert lines[i + 1].strip().startswith("fix: ")
+
+
+def test_a_control_character_from_a_tool_cannot_forge_a_row(project: Project):
+    project.fake_gh(view="nope\nPASS    remote         all good\x1b[2J")
+    result = project.run()
+    assert result.row("github access") == "UNKNOWN"
+    assert "\x1b" not in result.out
+    assert sum(line.startswith("PASS    remote") for line in result.out.splitlines()) == 1
+
+
+# --- changes nothing ----------------------------------------------------------
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+
+
+def test_a_full_run_changes_nothing(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    before = snapshot(project.root)
+    status = project.git("status", "--porcelain", "--ignored")
+    config = (project.root / ".git" / "config").read_bytes()
+    project.run("--ci")
+    assert snapshot(project.root) == before
+    assert project.git("status", "--porcelain", "--ignored") == status
+    assert (project.root / ".git" / "config").read_bytes() == config
+
+
+def test_a_failing_run_changes_nothing_either(project: Project):
+    """The fixes are printed, never applied."""
+    project.git("config", "--unset", "core.hooksPath")
+    set_venv_python(project, "3.14.2")
+    before = snapshot(project.root)
+    config = (project.root / ".git" / "config").read_bytes()
+    project.run()
+    assert snapshot(project.root) == before
+    assert (project.root / ".git" / "config").read_bytes() == config
+    assert "sync" not in project.calls()
+
+
+def test_a_dot_env_is_never_read(project: Project):
+    (project.root / ".env").write_text("SLACK_BOT_TOKEN=sentinel-value-for-the-test\n")
+    project.fake_gh(view=GOOD_VIEW, api=MAIN_SHAPE)
+    result = project.run("--ci")
+    assert "sentinel-value" not in result.out + result.err
+    assert not re.search(r"\.env\b", SCRIPT.read_text())
+
+
+# --- no drift -----------------------------------------------------------------
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("preflight", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["preflight"] = module  # a dataclass-free NamedTuple still looks its module up
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_python_read_from_ci_yml_is_what_yaml_says():
+    """The script can't use PyYAML on the machine's python3, so this is what stops its line match drifting."""
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    found = [
+        step["with"]["python-version"]
+        for job in yaml.safe_load(text)["jobs"].values()
+        for step in job["steps"]
+        if "python-version" in step.get("with", {})
+    ]
+    assert found == [load_script().ci_python(text)]
+
+
+def test_ci_runs_these_tests_on_python_3_9():
+    jobs = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    step = next(step for step in jobs["test"]["steps"] if step.get("name") == "Test the hooks on Python 3.9")
+    assert "tests/test_preflight.py" in step["run"]
+
+
+def test_the_script_is_python_3_9_and_standard_library_only():
+    tree = ast.parse(SCRIPT.read_text(), feature_version=(3, 9))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert imported <= set(sys.stdlib_module_names)
+
+
+def test_the_checks_name_the_commands_the_skill_says_it_runs():
+    skill = (SCRIPT.parent / "SKILL.md").read_text()
+    assert "python3 .claude/skills/preflight/preflight.py" in skill
+    assert "disable-model-invocation: true" in skill
+
+
+def test_the_skill_never_puts_its_arguments_in_a_command():
+    skill = (SCRIPT.parent / "SKILL.md").read_text()
+    commands = re.findall(r"```.*?```", skill, re.DOTALL)
+    assert commands
+    assert not any("$ARGUMENTS" in command or "$1" in command for command in commands)
+    assert "`$ARGUMENTS`" not in skill
+
+
+def test_the_skill_has_the_session_tools_step_and_keeps_it_out_of_the_exit_code():
+    skill = (SCRIPT.parent / "SKILL.md").read_text()
+    assert "## 2. Add the session tools" in skill
+    assert "isn't part of the script's exit code" in skill
+    assert "Don't repair anything" in skill

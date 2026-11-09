@@ -168,7 +168,252 @@ def check_github_access(ctx: Context) -> Row:
     return Row(PASS, name, f"gh reads {HOST}/{REPO}")
 
 
-CHECKS: list = [("remote", check_remote), ("github access", check_github_access)]
+def check_git_hook(ctx: Context) -> Row:
+    name = "git hook"
+    fix = "git config core.hooksPath .githooks"
+    ran = run(["git", "config", "core.hooksPath"], ctx.timeout, ctx.root)
+    if ran.outcome == "timeout":
+        return Row(UNKNOWN, name, "git timed out reading core.hooksPath", f"Check it, or run: {fix}")
+    value = ran.out.strip()
+    if value != ".githooks":
+        return Row(FAIL, name, f"core.hooksPath is {value!r}, not '.githooks', so the commit hook won't run", fix)
+    if not os.access(ctx.root / ".githooks" / "pre-commit", os.X_OK):
+        return Row(FAIL, name, ".githooks/pre-commit is missing or can't run", "chmod +x .githooks/pre-commit")
+    return Row(PASS, name, "core.hooksPath is .githooks and pre-commit can run")
+
+
+def matcher_covers_bash(entry: dict) -> bool:
+    matcher = entry.get("matcher", "")
+    return matcher in ("", "*") or "Bash" in str(matcher).split("|")
+
+
+def hook_commands(settings: dict) -> list:
+    """Every (event, entry, command) in a settings file's hooks."""
+    found = []
+    for event, entries in settings.get("hooks", {}).items():
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                found.append((event, entry, str(hook.get("command", ""))))
+    return found
+
+
+def send_to_hook(hook: Path, command: str, ctx: Context) -> Ran:
+    """Give the hook a Bash call the way Claude Code does. The command is only text in JSON: nothing executes it."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(ctx.root)}
+    return run([sys.executable, str(hook)], ctx.timeout, ctx.root, stdin=json.dumps(payload))
+
+
+def check_claude_hooks(ctx: Context) -> Row:
+    name = "claude hooks"
+    fix = "Restore .claude/settings.json and .claude/hooks/ from main, and remove any disableAllHooks"
+    settings: dict = {}
+    for file in ("settings.json", "settings.local.json"):
+        path = ctx.root / ".claude" / file
+        if not path.exists() and file == "settings.local.json":
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            return Row(FAIL, name, f".claude/{file} can't be read: {type(error).__name__}", fix)
+        if not isinstance(data, dict):
+            return Row(FAIL, name, f".claude/{file} isn't a settings object", fix)
+        if data.get("disableAllHooks"):
+            return Row(FAIL, name, f".claude/{file} sets disableAllHooks, so no guardrail runs", fix)
+        if file == "settings.json":
+            settings = data
+
+    commands = hook_commands(settings)
+    for _, _, command in commands:
+        for script in re.findall(r"\$CLAUDE_PROJECT_DIR/([^\"'\s]+)", command):
+            if not (ctx.root / script).is_file():
+                return Row(FAIL, name, f"settings.json runs {script}, which doesn't exist", fix)
+    guard = ".claude/hooks/block_forbidden.py"
+    wired = any(
+        event == "PreToolUse" and matcher_covers_bash(entry) and guard in text for event, entry, text in commands
+    )
+    if not wired:
+        return Row(FAIL, name, "block_forbidden.py isn't wired to Bash in PreToolUse", fix)
+
+    hook = ctx.root / guard
+    blocked = send_to_hook(hook, "git reset --hard HEAD~1", ctx)
+    allowed = send_to_hook(hook, "git status", ctx)
+    if "timeout" in (blocked.outcome, allowed.outcome):
+        return Row(UNKNOWN, name, f"block_forbidden.py gave no answer in {ctx.timeout:g}s", "Run tests/test_hooks.py")
+    # Exit 2 alone isn't a block: the hook also exits 2 when it crashes. Only the wording tells them apart.
+    if blocked.code != 2 or "Blocked by team policy" not in blocked.err:
+        return Row(FAIL, name, f"block_forbidden.py didn't block a forbidden command (exit {blocked.code})", fix)
+    if allowed.code != 0 or allowed.out.strip():
+        return Row(
+            FAIL, name, f"block_forbidden.py stopped or questioned a harmless command (exit {allowed.code})", fix
+        )
+    return Row(PASS, name, "block_forbidden.py is wired, blocks a forbidden command and allows a harmless one")
+
+
+def ci_python(text: str) -> str | None:
+    """The one Python version in ci.yml, or None unless there's exactly one, written plainly.
+
+    An exact line match, because the machine's python3 has no YAML parser. tests/test_preflight.py compares this with
+    PyYAML's reading of the real file, so the two can't drift apart.
+    """
+    lines = re.findall(r"^[ \t]*python-version:.*$", text, re.MULTILINE)
+    if len(lines) != 1:
+        return None
+    match = re.fullmatch(r"[ \t]*python-version:[ \t]*\"(\d+\.\d+)\"[ \t]*", lines[0])
+    return match.group(1) if match else None
+
+
+def toolchain_python(ctx: Context) -> Row:
+    name = "toolchain"
+    wanted = ci_python((ctx.root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    if wanted is None:
+        return Row(
+            UNKNOWN, name, "ci.yml doesn't name exactly one plain python-version", "Read .github/workflows/ci.yml"
+        )
+    ran = run([str(ctx.root / ".venv" / "bin" / "python"), "--version"], ctx.timeout, ctx.root)
+    fix = f"uv sync --python {wanted}"
+    if ran.outcome == "timeout":
+        return Row(UNKNOWN, name, ".venv's Python gave no answer", fix)
+    if ran.outcome == "missing" or ran.code != 0:
+        return Row(FAIL, name, ".venv has no working Python", fix)
+    match = re.search(r"Python (\d+\.\d+)(?!\d)", ran.out + ran.err)
+    if not match:
+        return Row(UNKNOWN, name, f".venv's Python version couldn't be read: {ran.out}", fix)
+    if match.group(1) != wanted:
+        return Row(FAIL, name, f".venv is Python {match.group(1)} and CI is {wanted}, so a local pass isn't CI's", fix)
+    return Row(PASS, name, f"Python {wanted} matches CI")
+
+
+def toolchain_lock(ctx: Context) -> Row:
+    name = "toolchain"
+    ran = run(["uv", "lock", "--check"], ctx.timeout, ctx.root)
+    if ran.outcome == "missing":
+        return Row(FAIL, name, "uv is not installed", "brew install uv")
+    if ran.outcome == "timeout":
+        return Row(UNKNOWN, name, f"uv lock --check gave no answer in {ctx.timeout:g}s", "Check the network")
+    if ran.code == 0:
+        return Row(PASS, name, "uv.lock is current")
+    # It exits 1 for a stale lock and also when it can't resolve offline, so only the wording says which.
+    text = ran.err + ran.out
+    if "update the lockfile" in text or "needs to be updated" in text:
+        return Row(FAIL, name, "uv.lock is out of date", "uv lock")
+    last = text.strip().splitlines()[-1] if text.strip() else f"exit {ran.code}"
+    return Row(UNKNOWN, name, f"uv lock --check couldn't tell: {last}", "Check the network, then run: uv lock --check")
+
+
+def toolchain_ffmpeg(ctx: Context) -> Row:
+    name = "toolchain"
+    ran = run(["ffmpeg", "-version"], ctx.timeout, ctx.root)
+    if ran.outcome == "timeout":
+        return Row(UNKNOWN, name, "ffmpeg gave no answer", "Run: ffmpeg -version")
+    if ran.outcome == "missing" or ran.code != 0:
+        return Row(FAIL, name, "ffmpeg isn't installed or doesn't run", "brew install ffmpeg")
+    return Row(PASS, name, "ffmpeg runs")
+
+
+def check_toolchain(ctx: Context) -> Row:
+    parts = [toolchain_python(ctx), toolchain_lock(ctx), toolchain_ffmpeg(ctx)]
+    for status in (FAIL, UNKNOWN):  # a FAIL outranks an UNKNOWN, and both name everything that isn't a pass
+        if any(part.status == status for part in parts):
+            bad = [part for part in parts if part.status != PASS]
+            return Row(status, "toolchain", "; ".join(p.evidence for p in bad), "; ".join(p.fix for p in bad))
+    return Row(PASS, "toolchain", "; ".join(part.evidence for part in parts))
+
+
+PLACEHOLDERS = ("{{", "<your", "TODO", "PLACEHOLDER", "REPLACE_ME")
+
+
+def skill_problem(folder: Path) -> str | None:
+    """What's wrong with one skill's SKILL.md, or None."""
+    path = folder / "SKILL.md"
+    if not path.is_file():
+        return "no SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---" or "---" not in [line.strip() for line in lines[1:]]:
+        return "no frontmatter"
+    closing = [line.strip() for line in lines[1:]].index("---") + 1
+    fields = dict(
+        match.groups()
+        for match in (re.fullmatch(r"([A-Za-z-]+):[ \t]*(.*)", line) for line in lines[1:closing])
+        if match
+    )
+    if fields.get("name", "").strip() != folder.name:
+        return f"name is {fields.get('name', 'missing')!r}, not its folder's"
+    if not fields.get("description", "").strip():
+        return "no description"
+    for placeholder in PLACEHOLDERS:
+        if placeholder in text:
+            return f"still has the placeholder {placeholder}"
+    return None
+
+
+def check_skill_files(ctx: Context) -> Row:
+    name = "skill files"
+    skills = ctx.root / ".claude" / "skills"
+    folders = sorted(path for path in skills.iterdir() if path.is_dir()) if skills.is_dir() else []
+    if not folders:
+        return Row(FAIL, name, "no skills found in .claude/skills", "Restore .claude/skills from main")
+    problems = [(folder.name, skill_problem(folder)) for folder in folders]
+    bad = [f"{skill}: {problem}" for skill, problem in problems if problem]
+    if bad:
+        return Row(FAIL, name, "; ".join(bad), "Fix each SKILL.md named here")
+    return Row(PASS, name, f"{len(folders)} skills have valid frontmatter and no placeholders")
+
+
+def check_ci(ctx: Context, remote: Row) -> Row:
+    name = "ci"
+    if remote.status != PASS:  # a green answer about another repo would say nothing about this commit
+        return Row(UNKNOWN, name, "not asked, because origin isn't confirmed as this repo", "Fix the remote row first")
+    head = run(["git", "rev-parse", "HEAD"], ctx.timeout, ctx.root)
+    sha = head.out.strip()
+    if head.outcome != "ok" or head.code != 0 or not sha:
+        return Row(UNKNOWN, name, "couldn't read HEAD", "Run: git rev-parse HEAD")
+    path = f"repos/{REPO}/commits/{sha}/check-runs?per_page=100"
+    ran = run(["gh", "api", "--hostname", HOST, path], ctx.timeout, ctx.root)
+    short = sha[:7]
+    if ran.outcome == "missing":
+        return Row(UNKNOWN, name, "gh is not installed", "brew install gh")
+    if ran.outcome == "timeout":
+        return Row(UNKNOWN, name, f"gh gave no answer in {ctx.timeout:g}s", "Check the network and run --ci again")
+    if ran.code != 0:
+        fix = "Push the commit if it's only local, then run --ci again"
+        return Row(UNKNOWN, name, f"GitHub has no answer for {short}: {ran.err or ran.out}", fix)
+    try:
+        data = json.loads(ran.out)
+        total, runs = data["total_count"], data["check_runs"]
+        states = [(str(item["name"]), item["status"], item["conclusion"]) for item in runs]
+    except (ValueError, KeyError, TypeError) as error:
+        return Row(UNKNOWN, name, f"GitHub's answer couldn't be read: {type(error).__name__}", "Run --ci again")
+
+    wait = "Wait for CI, then run --ci again"
+    failed = [f"{n} ({c})" for n, s, c in states if s == "completed" and c not in ("success", "skipped", "neutral")]
+    if failed:
+        return Row(FAIL, name, f"{short}: {', '.join(failed)}", f"Read the log: gh run list --commit {sha}")
+    if not states:
+        return Row(UNKNOWN, name, f"{short} has no check runs, so nothing has tested it", "Push it, then wait for CI")
+    pending = [n for n, s, _ in states if s != "completed"]
+    if pending:
+        return Row(UNKNOWN, name, f"{short}: still running: {', '.join(pending)}", wait)
+    if total > len(states):
+        return Row(
+            UNKNOWN, name, f"{short} has {total} check runs and only {len(states)} were read", "Read them on GitHub"
+        )
+    # `test` has to have really passed: on main the PR-only checks are skipped, which is fine, but all-skipped isn't.
+    if not any(n == "test" and c == "success" for n, _, c in states):
+        return Row(UNKNOWN, name, f"{short}: the test job didn't pass or didn't run", wait)
+    dirty = run(["git", "status", "--porcelain"], ctx.timeout, ctx.root)
+    note = "; this covers the commit, not your uncommitted changes" if dirty.out.strip() else ""
+    return Row(PASS, name, f"{short}: test passed and no check failed{note}")
+
+
+CHECKS: list = [
+    ("remote", check_remote),
+    ("github access", check_github_access),
+    ("git hook", check_git_hook),
+    ("claude hooks", check_claude_hooks),
+    ("toolchain", check_toolchain),
+    ("skill files", check_skill_files),
+]
 
 
 def guarded(name: str, check: Callable[[Context], Row], ctx: Context) -> Row:
@@ -194,6 +439,7 @@ def exit_code(rows: list) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check this repo's environment. Read-only.")
+    parser.add_argument("--ci", action="store_true", help="also check CI on HEAD")
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds to allow each external call")
     args = parser.parse_args()
 
@@ -207,6 +453,11 @@ def main() -> int:
     for name, check in CHECKS:
         rows.append(guarded(name, check, ctx))
         print_row(rows[-1])
+    if args.ci:
+        rows.append(guarded("ci", lambda c: check_ci(c, rows[0]), ctx))
+    else:  # a new local commit has no runs yet, so this would be UNKNOWN on most runs. The report says it's left out.
+        rows.append(Row(SKIP, "ci", "not checked: pass --ci to check HEAD"))
+    print_row(rows[-1])
     return exit_code(rows)
 
 

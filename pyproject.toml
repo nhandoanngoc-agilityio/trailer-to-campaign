@@ -39,6 +39,7 @@ target-version = "py311"
 [tool.ruff.per-file-target-version]
 # The hooks run on the machine's python3, and macOS ships 3.9 (T24).
 ".claude/hooks/*.py" = "py39"
+".claude/skills/preflight/*.py" = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

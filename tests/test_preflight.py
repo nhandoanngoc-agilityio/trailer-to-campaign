@@ -1006,9 +1006,13 @@ def test_the_guard_wired_twice_is_unknown(project: Project):
     assert project.run().row("claude hooks") == "UNKNOWN"
 
 
-def test_an_empty_push_url_is_not_a_pass(project: Project):
-    project.git("config", "remote.origin.pushurl", "")
-    assert project.run().row("remote") != "PASS"
+@pytest.mark.parametrize("call", ["remote get-url --all --push", "remote get-url --all origin"], ids=["push", "fetch"])
+def test_git_reporting_no_url_is_not_a_pass(project: Project, call: str):
+    """A wrapper, not an empty pushurl: git 2.42 reports no URL for that, and CI's git reports the fetch URL."""
+    real_git = (project.bin_dir / "git").resolve()
+    project.remove_tool("git")
+    project.fake("git", f'[ "$1 $2 $3 $4" = "{call}" ] && exit 0\nexec "{real_git}" "$@"')
+    assert project.run().row("remote") == "FAIL"
 
 
 def test_the_skill_says_it_runs_the_checkouts_hook_command():

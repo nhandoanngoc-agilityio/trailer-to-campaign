@@ -138,7 +138,11 @@ def check_remote(ctx: Context) -> Row:
             return Row(UNKNOWN, "remote", "git timed out reading origin", "Run: git remote -v")
         if ran.outcome != "ok" or ran.code != 0:
             return Row(FAIL, "remote", "this repo has no origin remote", f"git remote add origin {good}")
-        urls.extend((kind, url) for url in ran.out.split())
+        found = ran.out.split()
+        if not found:  # nothing seen isn't the same as nothing wrong
+            fix = "git config --unset-all remote.origin.pushurl" if flags else f"git remote set-url origin {good}"
+            return Row(FAIL, "remote", f"origin has no {kind} URL", fix)
+        urls.extend((kind, url) for url in found)
     wrong = [(kind, url) for kind, url in urls if not is_this_repo(url)]
     if wrong:
         fixes = []
@@ -215,17 +219,17 @@ def matcher_covers_bash(entry: dict) -> bool:
 
 
 def hook_commands(settings: dict) -> list:
-    """Every (event, entry, command) in a settings file's hooks. Only a command hook runs a command."""
+    """Every (event, entry, hook) in a settings file's hooks. Only a command hook runs a command."""
     found = []
     for event, entries in settings.get("hooks", {}).items():
         for entry in entries:
             for hook in entry.get("hooks", []):
                 if hook.get("type") == "command":
-                    found.append((event, entry, str(hook.get("command", ""))))
+                    found.append((event, entry, hook))
     return found
 
 
-def send_to_hook(wired: str, command: str, ctx: Context) -> Ran:
+def send_to_hook(wired: str, command: str, limit: float, ctx: Context) -> Ran:
     """Give the wired hook a Bash call the way Claude Code does: the settings' own command, with the call on stdin.
 
     That command is what really stands between Claude and the shell, so a `|| true` on it counts. `command` is only
@@ -233,7 +237,7 @@ def send_to_hook(wired: str, command: str, ctx: Context) -> Ran:
     """
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(ctx.root)}
     env = {"CLAUDE_PROJECT_DIR": str(ctx.root)}
-    return run(["/bin/sh", "-c", wired], ctx.timeout, ctx.root, stdin=json.dumps(payload), env_extra=env)
+    return run(["/bin/sh", "-c", wired], limit, ctx.root, stdin=json.dumps(payload), env_extra=env)
 
 
 def user_settings_problem() -> str | None:
@@ -277,23 +281,37 @@ def check_claude_hooks(ctx: Context) -> Row:
         return Row(FAIL, name, "~/.claude/settings.json sets disableAllHooks, so no guardrail runs", fix)
 
     commands = hook_commands(settings)
-    for _, _, command in commands:
-        for script in re.findall(r"\$CLAUDE_PROJECT_DIR/([^\"'\s]+)", command):
+    for _, _, hook in commands:
+        for script in re.findall(r"\$CLAUDE_PROJECT_DIR/([^\"'\s]+)", str(hook.get("command", ""))):
             if not (ctx.root / script).is_file():
                 return Row(FAIL, name, f"settings.json runs {script}, which doesn't exist", fix)
     guard = ".claude/hooks/block_forbidden.py"
     wired = [
-        text
-        for event, entry, text in commands
-        if event == "PreToolUse" and matcher_covers_bash(entry) and guard in text
+        hook
+        for event, entry, hook in commands
+        if event == "PreToolUse" and matcher_covers_bash(entry) and guard in str(hook.get("command", ""))
     ]
     if not wired:
         return Row(FAIL, name, "block_forbidden.py isn't wired to Bash in PreToolUse", fix)
+    if len(wired) > 1:
+        return Row(UNKNOWN, name, f"block_forbidden.py is wired {len(wired)} times, and only one could be tried", fix)
+    hook = wired[0]
+    if hook.get("async"):
+        return Row(FAIL, name, "block_forbidden.py is wired as async, so it can't block anything", fix)
+    if "if" in hook:  # running the command directly can't show whether this would stop it running at all
+        return Row(UNKNOWN, name, f"the wired hook has a condition, so it may not always run: {hook['if']}", fix)
 
-    blocked = send_to_hook(wired[0], "git reset --hard HEAD~1", ctx)
-    allowed = send_to_hook(wired[0], "git status", ctx)
+    # The settings' own limit is the one that applies in Claude Code, so a hook has to answer inside it.
+    declared = hook.get("timeout")
+    has_limit = isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0
+    limit = min(ctx.timeout, declared) if has_limit else ctx.timeout
+    wired_command = str(hook.get("command", ""))
+    blocked = send_to_hook(wired_command, "git reset --hard HEAD~1", limit, ctx)
+    allowed = send_to_hook(wired_command, "git status", limit, ctx)
     if "timeout" in (blocked.outcome, allowed.outcome):
-        return Row(UNKNOWN, name, f"the wired hook gave no answer in {ctx.timeout:g}s", "Run tests/test_hooks.py")
+        if has_limit and declared <= ctx.timeout:
+            return Row(FAIL, name, f"the wired hook went past its own {declared:g}s limit in settings.json", fix)
+        return Row(UNKNOWN, name, f"the wired hook gave no answer in {limit:g}s", "Run tests/test_hooks.py")
     # Exit 2 alone isn't a block: the hook also exits 2 when it crashes. Only the wording tells them apart.
     if blocked.code != 2 or "Blocked by team policy" not in blocked.err:
         return Row(FAIL, name, f"the wired hook didn't block a forbidden command (exit {blocked.code})", fix)

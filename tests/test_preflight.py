@@ -940,6 +940,81 @@ def test_a_hook_entry_that_is_not_a_command_is_not_wired(project: Project):
     assert project.run().row("claude hooks") == "FAIL"
 
 
+def hook_entry(project: Project, **fields: object) -> None:
+    data = settings(project)
+    data["hooks"]["PreToolUse"][0]["hooks"][0].update(fields)
+    write_settings(project, data)
+
+
+def test_a_hook_past_its_own_declared_limit_fails(project: Project):
+    """It's the settings' limit that applies in Claude Code, not this script's longer one."""
+    (project.root / ".claude" / "hooks" / "block_forbidden.py").write_text(HANGS)
+    hook_entry(project, timeout=1)
+    result = project.run()
+    assert result.row("claude hooks") == "FAIL"
+    assert "limit" in result.line("claude hooks")
+    assert result.seconds < 15
+
+
+def test_a_hook_slower_than_its_limit_but_not_hung_fails(project: Project):
+    """Right answers, too late: it tells the commands apart, so only the limit can fail it."""
+    (project.root / ".claude" / "hooks" / "block_forbidden.py").write_text(
+        """import sys, time
+call = sys.stdin.read()
+time.sleep(3)
+if "reset" in call:
+    print("Blocked by team policy: x", file=sys.stderr)
+    sys.exit(2)
+"""
+    )
+    hook_entry(project, timeout=1)
+    result = project.run()
+    assert result.row("claude hooks") == "FAIL"
+    assert "limit" in result.line("claude hooks")
+
+
+def test_a_hook_inside_its_declared_limit_passes(project: Project):
+    hook_entry(project, timeout=15)
+    assert project.run().row("claude hooks") == "PASS"
+
+
+def test_an_async_hook_cannot_block_so_fails(project: Project):
+    hook_entry(project, **{"async": True})
+    result = project.run()
+    assert result.row("claude hooks") == "FAIL"
+    assert "async" in result.line("claude hooks")
+
+
+def test_a_hook_that_is_explicitly_not_async_passes(project: Project):
+    hook_entry(project, **{"async": False})
+    assert project.run().row("claude hooks") == "PASS"
+
+
+def test_a_hook_with_a_condition_is_unknown(project: Project):
+    """Running the command directly can't show whether a condition would stop it running for a forbidden command."""
+    hook_entry(project, **{"if": "Bash(rm *)"})
+    result = project.run()
+    assert result.row("claude hooks") == "UNKNOWN"
+    assert result.code == 2
+
+
+def test_the_guard_wired_twice_is_unknown(project: Project):
+    """Only one would be tried, and Claude Code runs them all."""
+    data = settings(project)
+    data["hooks"]["PreToolUse"].append(data["hooks"]["PreToolUse"][0])
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "UNKNOWN"
+
+
+def test_an_empty_push_url_is_not_a_pass(project: Project):
+    project.git("config", "remote.origin.pushurl", "")
+    assert project.run().row("remote") != "PASS"
+
+
+def test_the_skill_says_it_runs_the_checkouts_hook_command():
+    assert "don't run it on a checkout you don't trust" in (SCRIPT.parent / "SKILL.md").read_text()
+
+
 def test_hooks_turned_off_for_this_user_fails(project: Project):
     (project.home / ".claude").mkdir()
     (project.home / ".claude" / "settings.json").write_text(json.dumps({"disableAllHooks": True}))

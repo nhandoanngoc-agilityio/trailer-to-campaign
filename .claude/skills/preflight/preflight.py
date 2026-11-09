@@ -298,12 +298,17 @@ def check_claude_hooks(ctx: Context) -> Row:
     hook = wired[0]
     if hook.get("async"):
         return Row(FAIL, name, "block_forbidden.py is wired as async, so it can't block anything", fix)
-    if "if" in hook:  # running the command directly can't show whether this would stop it running at all
-        return Row(UNKNOWN, name, f"the wired hook has a condition, so it may not always run: {hook['if']}", fix)
+    # Only fields this check understands. Another could stop the hook running or blocking, like an `if`, and running
+    # the command directly can't show that. A named list, so a new field is a question rather than a silent pass.
+    unjudged = sorted(set(hook) - {"type", "command", "timeout", "async"})
+    if unjudged:
+        return Row(UNKNOWN, name, f"the wired hook has fields this check can't judge: {', '.join(unjudged)}", fix)
 
     # The settings' own limit is the one that applies in Claude Code, so a hook has to answer inside it.
     declared = hook.get("timeout")
-    has_limit = isinstance(declared, (int, float)) and not isinstance(declared, bool) and declared > 0
+    has_limit = "timeout" in hook
+    if has_limit and (isinstance(declared, bool) or not isinstance(declared, (int, float)) or declared <= 0):
+        return Row(UNKNOWN, name, f"the wired hook's timeout isn't a positive number: {declared!r}", fix)
     limit = min(ctx.timeout, declared) if has_limit else ctx.timeout
     wired_command = str(hook.get("command", ""))
     blocked = send_to_hook(wired_command, "git reset --hard HEAD~1", limit, ctx)

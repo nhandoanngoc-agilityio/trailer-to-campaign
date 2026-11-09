@@ -998,6 +998,31 @@ def test_a_hook_with_a_condition_is_unknown(project: Project):
     assert result.code == 2
 
 
+@pytest.mark.parametrize("field", ["asyncRewake", "once", "somethingNew"])
+def test_a_hook_field_this_check_cannot_judge_is_unknown_and_named(project: Project, field: str):
+    """Any of these might change whether the hook runs or blocks, and running it directly can't show that."""
+    hook_entry(project, **{field: True})
+    result = project.run()
+    assert result.row("claude hooks") == "UNKNOWN"
+    assert field in result.line("claude hooks")
+
+
+@pytest.mark.parametrize("value", ["10", 0, -1, True, None], ids=["string", "zero", "negative", "bool", "null"])
+def test_a_declared_limit_that_makes_no_sense_is_unknown(project: Project, value: object):
+    """Claude Code may read it differently, so this script's own limit says nothing about it."""
+    hook_entry(project, timeout=value)
+    result = project.run()
+    assert result.row("claude hooks") == "UNKNOWN"
+    assert "timeout" in result.line("claude hooks")
+
+
+def test_the_hook_reads_only_what_the_check_sends():
+    """The check's stdin is smaller than Claude Code's, which is only safe while the hook needs no more than this."""
+    source = (ROOT / ".claude" / "hooks" / "block_forbidden.py").read_text()
+    used = set(re.findall(r"payload(?:\.get\(|\[)\"(\w+)\"", source))
+    assert used == {"tool_input", "cwd"}
+
+
 def test_the_guard_wired_twice_is_unknown(project: Project):
     """Only one would be tried, and Claude Code runs them all."""
     data = settings(project)

@@ -88,8 +88,8 @@ def run(args: list, ctx_timeout: float, cwd: Path | None = None, stdin: str | No
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        except (ProcessLookupError, PermissionError):  # macOS can answer PermissionError for a group that's ending
+            process.kill()
         try:  # something that left the group could still hold the pipe, so this wait has a limit too
             process.communicate(timeout=2)
         except subprocess.TimeoutExpired:

@@ -115,7 +115,8 @@ exit 64""",
 
     def set_origin(self, url: str, push: str | None = None) -> None:
         self.git("remote", "set-url", "origin", url)
-        self.git("config", "--unset-all", "remote.origin.pushurl") if self.has_push_url() else None
+        if self.has_push_url():
+            self.git("config", "--unset-all", "remote.origin.pushurl")
         if push:
             self.git("remote", "set-url", "--push", "origin", push)
 
@@ -798,7 +799,7 @@ def load_script():
     spec = importlib.util.spec_from_file_location("preflight", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules["preflight"] = module  # a dataclass-free NamedTuple still looks its module up
+    sys.modules["preflight"] = module  # NamedTuple looks its module up here while the file loads
     spec.loader.exec_module(module)
     return module
 

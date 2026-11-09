@@ -164,6 +164,9 @@ def project(tmp_path: Path) -> Project:
     git = shutil.which("git")
     assert git, "these tests need git"
     (bin_dir / "git").symlink_to(git)
+    python3 = bin_dir / "python3"  # the wired hook command finds python3 on PATH, as it does in Claude Code
+    python3.write_text(f'#!/bin/sh\nexec "{hook_python()}" "$@"\n')
+    python3.chmod(0o755)
     home = tmp_path / "home"
     home.mkdir()
 
@@ -883,3 +886,180 @@ def test_the_skill_has_the_session_tools_step_and_keeps_it_out_of_the_exit_code(
     assert "## 2. Add the session tools" in skill
     assert "isn't part of the script's exit code" in skill
     assert "Don't repair anything" in skill
+
+
+# --- found in review ----------------------------------------------------------
+
+
+def test_an_extra_push_url_on_another_host_fails_even_when_the_first_is_good(project: Project):
+    """`git push` sends to every push URL, and `get-url --push` without `--all` shows only the first."""
+    project.git("remote", "set-url", "--add", "--push", "origin", GOOD_URL)
+    project.git("remote", "set-url", "--add", "--push", "origin", "https://gitlab.com/someone/copy.git")
+    result = project.run()
+    assert result.row("remote") == "FAIL"
+    assert "gitlab.com/someone/copy" in result.line("remote")
+
+
+def test_several_push_urls_all_on_this_repo_pass(project: Project):
+    project.git("remote", "set-url", "--add", "--push", "origin", GOOD_URL)
+    project.git("remote", "set-url", "--add", "--push", "origin", f"git@github.com:{SLUG}.git")
+    assert project.run().row("remote") == "PASS"
+
+
+def test_a_wrong_push_url_prints_the_fix_for_the_push_url(project: Project):
+    project.set_origin(GOOD_URL, push=f"https://gitlab.com/{SLUG}.git")
+    assert f"git remote set-url --push origin {GOOD_URL}" in project.run().out
+
+
+def test_no_origin_prints_the_fix_that_adds_it(project: Project):
+    project.git("remote", "remove", "origin")
+    assert f"git remote add origin https://github.com/{SLUG}.git" in project.run().out
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/block_forbidden.py" || true',
+        "true # .claude/hooks/block_forbidden.py",
+        'echo "$CLAUDE_PROJECT_DIR/.claude/hooks/block_forbidden.py"',
+    ],
+    ids=["or-true", "comment", "echo"],
+)
+def test_a_wired_command_that_cannot_block_fails_even_when_the_script_works(project: Project, command: str):
+    """What Claude Code runs is the wired command, not the file, so that's what has to block."""
+    data = settings(project)
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = command
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_a_hook_entry_that_is_not_a_command_is_not_wired(project: Project):
+    data = settings(project)
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+    write_settings(project, data)
+    assert project.run().row("claude hooks") == "FAIL"
+
+
+def test_hooks_turned_off_for_this_user_fails(project: Project):
+    (project.home / ".claude").mkdir()
+    (project.home / ".claude" / "settings.json").write_text(json.dumps({"disableAllHooks": True}))
+    result = project.run()
+    assert result.row("claude hooks") == "FAIL"
+    assert "disableAllHooks" in result.line("claude hooks")
+
+
+def test_user_settings_that_cannot_be_read_are_unknown(project: Project):
+    (project.home / ".claude").mkdir()
+    (project.home / ".claude" / "settings.json").write_text("{not json")
+    assert project.run().row("claude hooks") == "UNKNOWN"
+
+
+def test_user_settings_with_hooks_on_pass(project: Project):
+    (project.home / ".claude").mkdir()
+    (project.home / ".claude" / "settings.json").write_text(json.dumps({"disableAllHooks": False, "model": "x"}))
+    assert project.run().row("claude hooks") == "PASS"
+
+
+def test_a_git_that_times_out_finding_the_repo_is_unknown(project: Project):
+    project.remove_tool("git")
+    project.fake("git", HANG)
+    result = project.run(timeout="1")
+    assert result.code == 2
+    assert result.out.startswith("UNKNOWN")
+    assert "not inside a git repo" not in result.out
+    assert result.seconds < 15
+
+
+def test_no_git_says_so(project: Project):
+    project.remove_tool("git")
+    result = project.run()
+    assert result.code == 1
+    assert "git is not installed" in result.out
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "error connecting to api.github.com",
+        "dial tcp: lookup api.github.com: no such host",
+        "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+    ],
+)
+def test_gh_failing_on_the_network_is_unknown_and_does_not_blame_auth(project: Project, message: str):
+    project.fake("gh", f'echo "{message}" >&2; exit 1')
+    result = project.run()
+    assert result.row("github access") == "UNKNOWN"
+    assert "gh auth login" not in result.out
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["HTTP 401: Bad credentials", "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)"],
+)
+def test_gh_refused_is_still_a_fail(project: Project, message: str):
+    project.fake("gh", f'''echo "{message}" >&2; exit 1''')
+    assert project.run().row("github access") == "FAIL"
+
+
+def test_a_crash_in_one_toolchain_part_does_not_hide_the_others(project: Project):
+    (project.root / ".github" / "workflows" / "ci.yml").write_bytes(b"\xff\xfe not text")
+    project.remove_tool("ffmpeg")
+    result = project.run()
+    assert result.row("toolchain") == "FAIL"
+    assert "ffmpeg" in result.line("toolchain")
+    assert result.code == 1
+
+
+def test_a_venv_python_that_cannot_execute_fails(project: Project):
+    (project.root / ".venv" / "bin" / "python").write_bytes(b"\x00\x01 not a program")
+    assert project.run().row("toolchain") == "FAIL"
+
+
+def test_no_lockfile_is_a_fail_and_does_not_blame_the_network(project: Project):
+    project.fake("uv", 'echo "error: Unable to find lockfile at uv.lock, but --check was provided." >&2; exit 1')
+    result = project.run()
+    assert result.row("toolchain") == "FAIL"
+    assert "Check the network" not in result.out
+
+
+def test_no_check_runs_says_a_branch_needs_a_pr(project: Project):
+    """ci.yml runs on pull requests and pushes to main, so pushing a branch alone never starts it."""
+    project.fake_gh(view=GOOD_VIEW, api=check_runs())
+    assert "open a PR" in project.run("--ci").out
+
+
+def test_a_commit_github_does_not_have_says_a_branch_needs_a_pr(project: Project):
+    project.fake_gh(view=GOOD_VIEW, api_exit=1)
+    assert "open a PR" in project.run("--ci").out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '---\nname: "fine"\ndescription: d\n---\nBody\n',
+        "---\nname: 'fine'\ndescription: 'd'\n---\nBody\n",
+        "---\nname: fine\ndescription: d\n---\nThe workflow reads ${{ github.base_ref }}.\n",
+        "---\nname: fine\ndescription: d\n---\nThe AUTODOC and METHODOLOGY words.\n",
+        "---\nname: fine\ndescription: >\n  Folded text\n---\nBody\n",
+        "---\nname: fine\ndescription: |-\n  Block text\n---\nBody\n",
+    ],
+    ids=["double-quoted", "single-quoted", "actions-expression", "words-containing-todo", "folded", "block"],
+)
+def test_valid_skill_files_are_not_refused(project: Project, text: str):
+    write_skill(project, "fine", text)
+    assert project.run().row("skill files") == "PASS"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\nname: bad\ndescription: >\n---\nNothing under the marker\n",
+        "---\nname: bad\ndescription: |\n---\nNothing under the marker\n",
+        '---\nname: bad\ndescription: ""\n---\nEmpty quotes\n',
+        "---\nname: bad\ndescription: >\nnot_indented: x\n---\nBody\n",
+    ],
+    ids=["folded", "block", "empty-quotes", "not-indented"],
+)
+def test_a_description_with_nothing_in_it_fails(project: Project, text: str):
+    write_skill(project, "bad", text)
+    assert project.run().row("skill files") == "FAIL"

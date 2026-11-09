@@ -53,7 +53,9 @@ def tell(text: str) -> str:
     return text[:300]
 
 
-def run(args: list, ctx_timeout: float, cwd: Path | None = None, stdin: str | None = None) -> Ran:
+def run(
+    args: list, ctx_timeout: float, cwd: Path | None = None, stdin: str | None = None, env_extra: dict | None = None
+) -> Ran:
     """Run one command and never hang: it gets its own process group, and all of it dies at the timeout.
 
     subprocess.run(timeout=...) kills only the child, then waits for the pipe, which a grandchild can hold open.
@@ -66,6 +68,7 @@ def run(args: list, ctx_timeout: float, cwd: Path | None = None, stdin: str | No
         GIT_OPTIONAL_LOCKS="0",  # or `git status` may refresh the index, and this script changes nothing
         PYTHONDONTWRITEBYTECODE="1",
         NO_COLOR="1",
+        **(env_extra or {}),
     )
     try:
         process = subprocess.Popen(
@@ -79,10 +82,8 @@ def run(args: list, ctx_timeout: float, cwd: Path | None = None, stdin: str | No
             errors="replace",
             start_new_session=True,
         )
-    except (FileNotFoundError, NotADirectoryError):
-        return Ran("missing")
-    except PermissionError:
-        return Ran("missing", err="not executable")
+    except OSError as error:  # not there, not executable, or not a program at all: it can't run, whichever
+        return Ran("missing", err=type(error).__name__)
     try:
         out, err = process.communicate(stdin, timeout=ctx_timeout)
     except subprocess.TimeoutExpired:
@@ -128,19 +129,30 @@ def shown_remote(url: str) -> str:
 
 
 def check_remote(ctx: Context) -> Row:
-    fix = f"git remote set-url origin https://{HOST}/{REPO}.git"
+    good = f"https://{HOST}/{REPO}.git"
     urls = []
+    # --all, because `git push` sends to every push URL and without it git shows only the first.
     for kind, flags in (("fetch", []), ("push", ["--push"])):
-        ran = run(["git", "remote", "get-url", *flags, "origin"], ctx.timeout, ctx.root)
+        ran = run(["git", "remote", "get-url", "--all", *flags, "origin"], ctx.timeout, ctx.root)
         if ran.outcome == "timeout":
             return Row(UNKNOWN, "remote", "git timed out reading origin", "Run: git remote -v")
         if ran.outcome != "ok" or ran.code != 0:
-            return Row(FAIL, "remote", "this repo has no origin remote", fix)
-        urls.append((kind, ran.out.strip()))
+            return Row(FAIL, "remote", "this repo has no origin remote", f"git remote add origin {good}")
+        urls.extend((kind, url) for url in ran.out.split())
     wrong = [(kind, url) for kind, url in urls if not is_this_repo(url)]
     if wrong:
+        fixes = []
+        if any(kind == "fetch" for kind, _ in wrong):
+            fixes.append(f"git remote set-url origin {good}")
+        if any(kind == "push" for kind, _ in wrong):
+            several = sum(kind == "push" for kind, _ in urls) > 1
+            fixes.append(
+                "git config --unset-all remote.origin.pushurl"
+                if several
+                else f"git remote set-url --push origin {good}"
+            )
         shown = ", ".join(f"{kind} is {shown_remote(url)}" for kind, url in wrong)
-        return Row(FAIL, "remote", f"origin {shown}; expected {HOST}/{REPO}", fix)
+        return Row(FAIL, "remote", f"origin {shown}; expected {HOST}/{REPO}", "; ".join(fixes))
     return Row(PASS, "remote", f"origin fetch and push are {HOST}/{REPO}")
 
 
@@ -165,7 +177,10 @@ def check_github_access(ctx: Context) -> Row:
     if ran.outcome == "timeout":
         return Row(UNKNOWN, name, f"gh gave no answer in {ctx.timeout:g}s", "Check the network, then run: gh repo view")
     if ran.code != 0:
-        return Row(FAIL, name, f"gh repo view failed: {ran.err or ran.out}", "Run: gh auth status, then gh auth login")
+        text = ran.err or ran.out
+        if re.search(r"error connecting|dial tcp|no such host|connection (refused|reset)|timed? ?out|HTTP 5\d\d", text):
+            return Row(UNKNOWN, name, f"gh couldn't reach GitHub: {text}", "Check the network, then run: gh repo view")
+        return Row(FAIL, name, f"gh repo view failed: {text}", "Run: gh auth status, then gh auth login")
     try:
         data = json.loads(ran.out)
         found, url = data["nameWithOwner"], data["url"]
@@ -200,19 +215,42 @@ def matcher_covers_bash(entry: dict) -> bool:
 
 
 def hook_commands(settings: dict) -> list:
-    """Every (event, entry, command) in a settings file's hooks."""
+    """Every (event, entry, command) in a settings file's hooks. Only a command hook runs a command."""
     found = []
     for event, entries in settings.get("hooks", {}).items():
         for entry in entries:
             for hook in entry.get("hooks", []):
-                found.append((event, entry, str(hook.get("command", ""))))
+                if hook.get("type") == "command":
+                    found.append((event, entry, str(hook.get("command", ""))))
     return found
 
 
-def send_to_hook(hook: Path, command: str, ctx: Context) -> Ran:
-    """Give the hook a Bash call the way Claude Code does. The command is only text in JSON: nothing executes it."""
+def send_to_hook(wired: str, command: str, ctx: Context) -> Ran:
+    """Give the wired hook a Bash call the way Claude Code does: the settings' own command, with the call on stdin.
+
+    That command is what really stands between Claude and the shell, so a `|| true` on it counts. `command` is only
+    text in JSON: nothing executes it.
+    """
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(ctx.root)}
-    return run([sys.executable, str(hook)], ctx.timeout, ctx.root, stdin=json.dumps(payload))
+    env = {"CLAUDE_PROJECT_DIR": str(ctx.root)}
+    return run(["/bin/sh", "-c", wired], ctx.timeout, ctx.root, stdin=json.dumps(payload), env_extra=env)
+
+
+def user_settings_problem() -> str | None:
+    """Read one setting from the user's own settings, which also apply here. Nothing else in the file is used.
+
+    Returns "off" if they turn hooks off, "unreadable" if that can't be told, and None otherwise.
+    """
+    path = Path.home() / ".claude" / "settings.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(data, dict):
+        return "unreadable"
+    return "off" if data.get("disableAllHooks") else None
 
 
 def check_claude_hooks(ctx: Context) -> Row:
@@ -233,6 +271,10 @@ def check_claude_hooks(ctx: Context) -> Row:
             return Row(FAIL, name, f".claude/{file} sets disableAllHooks, so no guardrail runs", fix)
         if file == "settings.json":
             settings = data
+    user = user_settings_problem()
+    if user == "off":
+        fix = "Remove disableAllHooks from ~/.claude/settings.json"
+        return Row(FAIL, name, "~/.claude/settings.json sets disableAllHooks, so no guardrail runs", fix)
 
     commands = hook_commands(settings)
     for _, _, command in commands:
@@ -240,25 +282,27 @@ def check_claude_hooks(ctx: Context) -> Row:
             if not (ctx.root / script).is_file():
                 return Row(FAIL, name, f"settings.json runs {script}, which doesn't exist", fix)
     guard = ".claude/hooks/block_forbidden.py"
-    wired = any(
-        event == "PreToolUse" and matcher_covers_bash(entry) and guard in text for event, entry, text in commands
-    )
+    wired = [
+        text
+        for event, entry, text in commands
+        if event == "PreToolUse" and matcher_covers_bash(entry) and guard in text
+    ]
     if not wired:
         return Row(FAIL, name, "block_forbidden.py isn't wired to Bash in PreToolUse", fix)
 
-    hook = ctx.root / guard
-    blocked = send_to_hook(hook, "git reset --hard HEAD~1", ctx)
-    allowed = send_to_hook(hook, "git status", ctx)
+    blocked = send_to_hook(wired[0], "git reset --hard HEAD~1", ctx)
+    allowed = send_to_hook(wired[0], "git status", ctx)
     if "timeout" in (blocked.outcome, allowed.outcome):
-        return Row(UNKNOWN, name, f"block_forbidden.py gave no answer in {ctx.timeout:g}s", "Run tests/test_hooks.py")
+        return Row(UNKNOWN, name, f"the wired hook gave no answer in {ctx.timeout:g}s", "Run tests/test_hooks.py")
     # Exit 2 alone isn't a block: the hook also exits 2 when it crashes. Only the wording tells them apart.
     if blocked.code != 2 or "Blocked by team policy" not in blocked.err:
-        return Row(FAIL, name, f"block_forbidden.py didn't block a forbidden command (exit {blocked.code})", fix)
+        return Row(FAIL, name, f"the wired hook didn't block a forbidden command (exit {blocked.code})", fix)
     if allowed.code != 0 or allowed.out.strip():
-        return Row(
-            FAIL, name, f"block_forbidden.py stopped or questioned a harmless command (exit {allowed.code})", fix
-        )
-    return Row(PASS, name, "block_forbidden.py is wired, blocks a forbidden command and allows a harmless one")
+        return Row(FAIL, name, f"the wired hook stopped or questioned a harmless command (exit {allowed.code})", fix)
+    if user == "unreadable":
+        fix = "Fix the JSON in ~/.claude/settings.json"
+        return Row(UNKNOWN, name, "~/.claude/settings.json can't be read, and it could turn hooks off", fix)
+    return Row(PASS, name, "the wired block_forbidden.py blocks a forbidden command and allows a harmless one")
 
 
 def ci_python(text: str) -> str | None:
@@ -306,6 +350,8 @@ def toolchain_lock(ctx: Context) -> Row:
         return Row(PASS, name, "uv.lock is current")
     # It exits 1 for a stale lock and also when it can't resolve offline, so only the wording says which.
     text = ran.err + ran.out
+    if "Unable to find lockfile" in text:
+        return Row(FAIL, name, "uv.lock is missing", "uv lock")
     if "update the lockfile" in text or "needs to be updated" in text:
         return Row(FAIL, name, "uv.lock is out of date", "uv lock")
     last = text.strip().splitlines()[-1] if text.strip() else f"exit {ran.code}"
@@ -323,7 +369,8 @@ def toolchain_ffmpeg(ctx: Context) -> Row:
 
 
 def check_toolchain(ctx: Context) -> Row:
-    parts = [toolchain_python(ctx), toolchain_lock(ctx), toolchain_ffmpeg(ctx)]
+    # Each guarded on its own, so a crash in one can't hide a definite failure in another.
+    parts = [guarded("toolchain", part, ctx) for part in (toolchain_python, toolchain_lock, toolchain_ffmpeg)]
     for status in (FAIL, UNKNOWN):  # a FAIL outranks an UNKNOWN, and both name everything that isn't a pass
         if any(part.status == status for part in parts):
             bad = [part for part in parts if part.status != PASS]
@@ -331,7 +378,27 @@ def check_toolchain(ctx: Context) -> Row:
     return Row(PASS, "toolchain", "; ".join(part.evidence for part in parts))
 
 
-PLACEHOLDERS = ("{{", "<your", "TODO", "PLACEHOLDER", "REPLACE_ME")
+# Not `${{`, which is a GitHub Actions expression, and whole words only, so AUTODOC isn't a TODO.
+PLACEHOLDERS = re.compile(r"(?<!\$)\{\{|<your\b|\bTODO\b|\bPLACEHOLDER\b|\bREPLACE_ME\b")
+
+
+def unquoted(value: str) -> str:
+    value = value.strip()
+    return value[1:-1].strip() if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'" else value
+
+
+def description_is_empty(lines: list) -> bool:
+    """`lines` is the frontmatter. A `>` or `|` marker holds nothing itself: its text is on the indented line after."""
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"description:[ \t]*(.*)", line)
+        if not match:
+            continue
+        value = unquoted(match.group(1))
+        if not re.fullmatch(r"[>|][+-]?\d*", value):
+            return not value
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        return not (following[:1] in (" ", "\t") and following.strip())
+    return True
 
 
 def skill_problem(folder: Path) -> str | None:
@@ -349,14 +416,12 @@ def skill_problem(folder: Path) -> str | None:
         for match in (re.fullmatch(r"([A-Za-z-]+):[ \t]*(.*)", line) for line in lines[1:closing])
         if match
     )
-    if fields.get("name", "").strip() != folder.name:
+    if unquoted(fields.get("name", "")) != folder.name:
         return f"name is {fields.get('name', 'missing')!r}, not its folder's"
-    if not fields.get("description", "").strip():
+    if description_is_empty(lines[1:closing]):
         return "no description"
-    for placeholder in PLACEHOLDERS:
-        if placeholder in text:
-            return f"still has the placeholder {placeholder}"
-    return None
+    placeholder = PLACEHOLDERS.search(text)
+    return f"still has the placeholder {placeholder.group()}" if placeholder else None
 
 
 def check_skill_files(ctx: Context) -> Row:
@@ -383,13 +448,14 @@ def check_ci(ctx: Context, remote: Row) -> Row:
     path = f"repos/{REPO}/commits/{sha}/check-runs?per_page=100"
     ran = run(["gh", "api", "--hostname", HOST, path], ctx.timeout, ctx.root)
     short = sha[:7]
+    # ci.yml runs on pull requests and pushes to main, so pushing a branch alone never starts it.
+    start_ci = "Push the commit and open a PR, then wait for CI and run --ci again"
     if ran.outcome == "missing":
         return Row(UNKNOWN, name, "gh is not installed", "brew install gh")
     if ran.outcome == "timeout":
         return Row(UNKNOWN, name, f"gh gave no answer in {ctx.timeout:g}s", "Check the network and run --ci again")
     if ran.code != 0:
-        fix = "Push the commit if it's only local, then run --ci again"
-        return Row(UNKNOWN, name, f"GitHub has no answer for {short}: {ran.err or ran.out}", fix)
+        return Row(UNKNOWN, name, f"GitHub has no answer for {short}: {ran.err or ran.out}", start_ci)
     try:
         data = json.loads(ran.out)
         total, runs = data["total_count"], data["check_runs"]
@@ -402,7 +468,7 @@ def check_ci(ctx: Context, remote: Row) -> Row:
     if failed:
         return Row(FAIL, name, f"{short}: {', '.join(failed)}", f"Read the log: gh run list --commit {sha}")
     if not states:
-        return Row(UNKNOWN, name, f"{short} has no check runs, so nothing has tested it", "Push it, then wait for CI")
+        return Row(UNKNOWN, name, f"{short} has no check runs, so nothing has tested it", start_ci)
     pending = [n for n, s, _ in states if s != "completed"]
     if pending:
         return Row(UNKNOWN, name, f"{short}: still running: {', '.join(pending)}", wait)
@@ -457,7 +523,15 @@ def main() -> int:
     args = parser.parse_args()
 
     ran = run(["git", "rev-parse", "--show-toplevel"], args.timeout)
-    if ran.outcome != "ok" or ran.code != 0:
+    if ran.outcome == "timeout":
+        print_row(
+            Row(UNKNOWN, "remote", f"git gave no answer in {args.timeout:g}s", "Run: git rev-parse --show-toplevel")
+        )
+        return 2
+    if ran.outcome == "missing":
+        print_row(Row(FAIL, "remote", "git is not installed", "xcode-select --install"))
+        return 1
+    if ran.code != 0:
         print_row(Row(FAIL, "remote", "not inside a git repo", "Run /preflight from the repo"))
         return 1
     ctx = Context(Path(ran.out.strip()), args.timeout)

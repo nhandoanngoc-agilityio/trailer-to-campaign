@@ -8,11 +8,11 @@ unfinished files, since git can't tell who changed what; CI still lints everythi
 Only this project and its worktrees: another repo the session cd'd into is left alone.
 
 Exit 2 sends ruff's output back to Claude once. If lint still fails when Claude next
-tries to stop (`stop_hook_active`), the turn ends with the failing files named: the file
+tries to stop (`stop_hook_active`), the turn ends and the person is told which files: the file
 may be one Claude must not or can't fix, and looping on it only spends tokens.
 
 A lint gate, not a guard: when it can't judge (no ruff yet, a timeout, no git, bad
-input) it lets the turn end and says so on stderr, rather than trapping every turn of a
+input) it lets the turn end and says so in a systemMessage the person sees, rather than trapping every turn of a
 session whose setup is broken. It never changes a file: `format --check`, never `format`.
 
 Runs on the machine's python3, which is 3.9 on macOS, so it stays 3.9-compatible and
@@ -30,9 +30,14 @@ DEFAULT_TIMEOUT = 30.0  # seconds per ruff call
 GIT_TIMEOUT = 5.0  # seconds per git call; worst case 6 git + 2 ruff = 90s, inside settings.json's 100
 
 
-def note(reason: str) -> int:
-    print(f"lint_on_stop: lint not checked: {reason}", file=sys.stderr)
+def tell_person(message: str) -> int:
+    """Let the turn end with a note the person sees. On exit 0, stderr reaches no one: Claude Code only logs it."""
+    print(json.dumps({"systemMessage": f"lint_on_stop: {message}"}))
     return 0
+
+
+def note(reason: str) -> int:
+    return tell_person(f"lint not checked: {reason}")
 
 
 def timeout() -> float:
@@ -129,14 +134,12 @@ def main() -> int:
 
     if not failures:
         return 0
-    print("\n\n".join(failures), file=sys.stderr)
     if payload.get("stop_hook_active"):  # already sent back once: don't loop on a file that has to stay
-        print(
-            f"\nlint_on_stop: lint still fails (changed files: {', '.join(files)}). Ending the turn anyway; "
-            "tell the person which files fail and why they were left.",
-            file=sys.stderr,
+        return tell_person(
+            f"lint still fails after one round of fixes (changed files: {', '.join(files)}). "
+            "Run `uv run ruff check` on them before you commit; CI will fail otherwise."
         )
-        return 0
+    print("\n\n".join(failures), file=sys.stderr)
     print(
         "\nLint fails on changed files. Fix them (`uv run ruff check --fix` and `uv run ruff format` "
         "on those files). If a file isn't yours to fix, leave it: the next stop ends the turn, "

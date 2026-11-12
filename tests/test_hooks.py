@@ -1258,6 +1258,13 @@ def run_stop_hook(cwd: Path, env: dict[str, str] | None = None, active: bool = F
     )
 
 
+def user_note(result: subprocess.CompletedProcess) -> str:
+    """The systemMessage a hook shows the person. On exit 0, stderr reaches no one: Claude Code only logs it."""
+    assert result.returncode == 0
+    assert result.stdout.strip(), f"no note for the person; stderr was: {result.stderr!r}"
+    return json.loads(result.stdout)["systemMessage"]
+
+
 def test_stop_blocks_when_a_changed_file_fails_lint(lint_repo: Path) -> None:
     (lint_repo / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(lint_repo)
@@ -1311,14 +1318,14 @@ def test_stop_passes_with_a_note_when_ruff_is_missing(lint_repo: Path) -> None:
     (lint_repo / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(lint_repo)
     assert result.returncode == 0
-    assert "lint not checked" in result.stderr
+    assert "lint not checked" in user_note(result)
 
 
 def test_stop_passes_with_a_note_when_ruff_times_out(lint_repo: Path) -> None:
     (lint_repo / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(lint_repo, {"STUB_SLEEP": "5", "T2C_LINT_TIMEOUT": "1"})
     assert result.returncode == 0
-    assert "lint not checked" in result.stderr
+    assert "lint not checked" in user_note(result)
 
 
 @pytest.mark.parametrize("stdin", ["not json", "{}", '{"cwd": "/nonexistent/t31"}'])
@@ -1327,7 +1334,7 @@ def test_stop_passes_with_a_note_on_input_it_cant_use(stdin: str) -> None:
         [hook_python(), str(HOOKS / "lint_on_stop.py")], input=stdin, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0
-    assert "lint not checked" in result.stderr
+    assert "lint not checked" in user_note(result)
 
 
 def test_stop_passes_outside_a_git_repo(tmp_path: Path) -> None:
@@ -1403,6 +1410,7 @@ def test_stop_leaves_another_repo_alone(lint_repo: Path, tmp_path_factory: pytes
     (other / "bad.py").write_text("BAD = 1\n")
     result = run_stop_hook(other, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
     assert result.returncode == 0
+    assert result.stdout == ""  # skipped on purpose, not "lint not checked"
     assert not (other / ".venv" / "bin" / "ruff.log").exists()  # its ruff never ran
 
 
@@ -1420,7 +1428,7 @@ def test_stop_blocks_once_then_lets_the_turn_end_naming_the_files(lint_repo: Pat
     (lint_repo / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(lint_repo, active=True)
     assert result.returncode == 0
-    assert "still fails" in result.stderr and "a.py" in result.stderr
+    assert "still fails" in user_note(result) and "a.py" in user_note(result)
 
 
 def test_stop_says_so_when_it_cant_tell_the_project(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
@@ -1428,7 +1436,7 @@ def test_stop_says_so_when_it_cant_tell_the_project(lint_repo: Path, tmp_path_fa
     (lint_repo / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(lint_repo, {"CLAUDE_PROJECT_DIR": str(not_a_repo)})
     assert result.returncode == 0
-    assert "lint not checked" in result.stderr
+    assert "couldn't tell" in user_note(result)
 
 
 def test_format_hook_leaves_another_repos_ruff_alone(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
@@ -1447,6 +1455,17 @@ def test_format_hook_leaves_another_repos_ruff_alone(lint_repo: Path, tmp_path_f
     )
     assert result.returncode == 0
     assert not (other / ".venv" / "bin" / "ruff.log").exists()
+    # The same call on a file inside the project does run its ruff, so the skip above is the check, not a failure.
+    (lint_repo / "c.py").write_text("y = 2\n")
+    subprocess.run(
+        [hook_python(), str(HOOKS / "format_on_edit.py")],
+        input=json.dumps({"tool_input": {"file_path": str(lint_repo / "c.py")}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**env, "CLAUDE_PROJECT_DIR": str(lint_repo)},
+    )
+    assert "c.py" in (lint_repo / ".venv" / "bin" / "ruff.log").read_text()
 
 
 def test_settings_give_the_format_hook_its_worst_case_time() -> None:
@@ -1456,3 +1475,9 @@ def test_settings_give_the_format_hook_its_worst_case_time() -> None:
     assert next(h["timeout"] for h in hooks if "format_on_edit.py" in h["command"]) >= 55
     source = (HOOKS / "format_on_edit.py").read_text()
     assert "timeout=40" in source and "timeout=5" in source
+
+
+def test_format_hook_keeps_pyproject_excludes(lint_repo: Path) -> None:
+    (lint_repo / "b.py").write_text("y = 2\n")
+    run_hook("format_on_edit.py", {"file_path": str(lint_repo / "b.py")})
+    assert "--force-exclude" in (lint_repo / ".venv" / "bin" / "ruff.log").read_text()

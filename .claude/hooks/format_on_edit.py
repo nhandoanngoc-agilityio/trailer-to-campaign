@@ -50,9 +50,8 @@ def main() -> int:
     if not ruff:
         return 0
     try:
-        subprocess.run(
-            [ruff, "format", "--quiet", path], capture_output=True, timeout=40
-        )  # 3 git calls at 5s + 40s: inside the 60s limit
+        # 3 git calls at 5s + 40s: inside the 60s limit. --force-exclude: pyproject excludes hold, as in lint_on_stop.
+        subprocess.run([ruff, "format", "--quiet", "--force-exclude", path], capture_output=True, timeout=40)
     except (OSError, subprocess.TimeoutExpired):
         pass
     return 0

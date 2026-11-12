@@ -53,6 +53,24 @@ def tracked_files() -> list[str]:
     ).stdout.split()
 
 
+GITHUB_REPO = "nhandoanngoc-agilityio/trailer-to-campaign"  # named in CLAUDE.md, but not a path
+
+
+def missing_paths(text: str) -> list[str]:
+    """Named paths that exist nowhere. A bare file name (`loop.py`) counts when some file in the repo has that name."""
+    names = {Path(f).name for f in tracked_files()}
+    return sorted(
+        p
+        for p in named_paths(text)
+        if p != GITHUB_REPO and not (ROOT / p).exists() and not ("/" not in p and p in names)
+    )
+
+
+def test_missing_paths_catches_a_typo_but_not_a_bare_file_name() -> None:
+    assert missing_paths("`loop.py`, `CLAUDE.md`, `src/` and `nhandoanngoc-agilityio/trailer-to-campaign`") == []
+    assert missing_paths("`lop.py` and `src/nowhere.py`") == ["lop.py", "src/nowhere.py"]
+
+
 # --- CLAUDE.md ---------------------------------------------------------------------
 
 
@@ -73,7 +91,7 @@ def test_claude_md_stays_short() -> None:
 
 
 def test_every_path_claude_md_names_exists() -> None:
-    missing = sorted(p for p in named_paths(CLAUDE_MD.read_text()) if not (ROOT / p).exists())
+    missing = missing_paths(CLAUDE_MD.read_text())
     assert not missing, f"CLAUDE.md names paths that don't exist: {missing}"
 
 
@@ -111,7 +129,7 @@ def test_the_ticket_loop_skill_keeps_the_checks_that_moved_with_it(words: str) -
 
 
 def test_every_path_the_ticket_loop_skill_names_exists() -> None:
-    missing = sorted(p for p in named_paths(TICKET_LOOP.read_text()) if not (ROOT / p).exists())
+    missing = missing_paths(TICKET_LOOP.read_text())
     assert not missing, f"the skill names paths that don't exist: {missing}"
 
 
@@ -161,7 +179,7 @@ def test_every_rule_is_scoped_and_each_pattern_matches_a_file(rule: Path) -> Non
 @pytest.mark.parametrize("rule", rule_files(), ids=lambda p: p.stem)
 def test_every_path_a_rule_names_exists(rule: Path) -> None:
     body = rule.read_text().split("---\n", 2)[2]
-    missing = sorted(p for p in named_paths(body) if not (ROOT / p).exists())
+    missing = missing_paths(body)
     assert not missing, f"{rule.name} names paths that don't exist: {missing}"
 
 

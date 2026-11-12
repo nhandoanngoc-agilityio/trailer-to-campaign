@@ -1,6 +1,6 @@
 # How we work: the ticket loop
 
-One ticket, one branch, one PR. Claude Code does the heavy lifting; the human decides at two gates (the plan and the merge). The exact steps Claude follows, with what "done" means for each, live in [`CLAUDE.md`](../CLAUDE.md#the-ticket-loop). This page explains the loop for people and why it looks the way it does.
+One ticket, one branch, one PR. Claude Code does the heavy lifting; the human decides at two gates (the plan and the merge). The exact steps Claude follows, with what "done" means for each, live in the [`ticket-loop` skill](../.claude/skills/ticket-loop/SKILL.md). This page explains the loop for people and why it looks the way it does.
 
 ```
 Analyze → Plan 🧑 → Build → Verify → Ship → Review 🧑 → Close the loop
@@ -33,7 +33,8 @@ Instructions in `CLAUDE.md` guide Claude; these make the important ones determin
 | New dependencies are a human decision | `block_forbidden.py` asks before `uv add` / `pip install` |
 | The Answer Key can't be gamed | Settings deny Claude edits to `evals/expected/` |
 | A prompt change runs the Eval Set | `prompt_changed.py` reminds Claude after any edit under `prompts/` |
-| Code is formatted the same way | `format_on_edit.py` runs ruff on every Python edit; CI checks it |
+| Code is formatted the same way | `format_on_edit.py` runs the project's ruff on every Python edit; CI checks it |
+| Lint passes before Claude finishes | `lint_on_stop.py` (a `Stop` hook) runs `ruff check` and `ruff format --check` on the changed `.py` files, and sends Claude back while they fail |
 | Security issues specific to this product get caught | Security plugins + `.claude/claude-security-guidance.md` |
 | Every PR is tested, and reviewed once when it opens unless it only changes `docs/` (`@claude` re-reviews) | `ci.yml` (lint, tests, hook tests), `claude-code-review.yml` |
 | You know when Claude is waiting | `notify_on_finish.py` desktop notification |

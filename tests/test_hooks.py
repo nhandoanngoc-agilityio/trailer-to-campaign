@@ -1345,7 +1345,9 @@ def test_settings_wire_the_lint_hook_on_stop_with_a_time_limit() -> None:
 # --- format_on_edit.py (T31): the project's own ruff, never uvx ----------------------
 
 
-def test_format_hook_uses_the_projects_ruff_and_not_uvx(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+def test_format_hook_uses_the_projects_ruff_and_not_uvx(
+    lint_repo: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     bin_dir = tmp_path_factory.mktemp("bin")
     uvx = bin_dir / "uvx"
     uvx.write_text(f'#!/bin/sh\ntouch "{bin_dir}/uvx-ran"\n')

@@ -1204,3 +1204,280 @@ def test_pre_commit_lets_everything_else_through(hooked: Path) -> None:
 def test_the_answer_key_override_is_for_people_only(repo: Path, command: str) -> None:
     result = run_hook("block_forbidden.py", {"command": command}, repo)
     assert result.returncode == 2 and "T2C_ANSWER_KEY_EDIT" in result.stderr
+
+
+# --- lint_on_stop.py (T31): lint passes before Claude finishes -------------------
+
+STUB_RUFF = """#!/bin/sh
+# A stand-in for ruff: logs its arguments, and fails on any .py file that holds BAD.
+echo "$@" >> "$(dirname "$0")/ruff.log"
+[ -n "$STUB_SLEEP" ] && sleep "$STUB_SLEEP"
+for a in "$@"; do
+  case "$a" in *.py) if grep -q BAD "$a"; then echo "$a: E999 stub failure"; exit 1; fi ;; esac
+done
+exit 0
+"""
+
+
+def stub_ruff(repo: Path) -> Path:
+    ruff = repo / ".venv" / "bin" / "ruff"
+    ruff.parent.mkdir(parents=True)
+    ruff.write_text(STUB_RUFF)
+    ruff.chmod(0o755)
+    return ruff
+
+
+def git_commit_all(repo: Path) -> None:
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x"],
+        check=True,
+    )
+
+
+@pytest.fixture
+def lint_repo(repo: Path) -> Path:
+    """A repo with one clean, committed .py file and a stub ruff; .venv is ignored like the real one."""
+    (repo / ".gitignore").write_text(".venv/\n")
+    (repo / "a.py").write_text("x = 1\n")
+    stub_ruff(repo)
+    git_commit_all(repo)
+    return repo
+
+
+def run_stop_hook(cwd: Path, env: dict[str, str] | None = None, active: bool = False) -> subprocess.CompletedProcess:
+    payload = {"hook_event_name": "Stop", "stop_hook_active": active, "cwd": str(cwd)}
+    inherited = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}  # a Claude Code shell exports it
+    return subprocess.run(
+        [hook_python(), str(HOOKS / "lint_on_stop.py")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**inherited, **(env or {})},
+    )
+
+
+def user_note(result: subprocess.CompletedProcess) -> str:
+    """The systemMessage a hook shows the person. On exit 0, stderr reaches no one: Claude Code only logs it."""
+    assert result.returncode == 0
+    assert result.stdout.strip(), f"no note for the person; stderr was: {result.stderr!r}"
+    return json.loads(result.stdout)["systemMessage"]
+
+
+def test_stop_blocks_when_a_changed_file_fails_lint(lint_repo: Path) -> None:
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 2
+    assert "a.py" in result.stderr
+
+
+def test_stop_blocks_when_a_new_untracked_file_fails_lint(lint_repo: Path) -> None:
+    (lint_repo / "pkg").mkdir()
+    (lint_repo / "pkg" / "new.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 2
+    assert "pkg/new.py" in result.stderr
+
+
+def test_stop_runs_both_the_linter_and_the_format_check(lint_repo: Path) -> None:
+    (lint_repo / "a.py").write_text("y = 2\n")
+    assert run_stop_hook(lint_repo).returncode == 0
+    log = (lint_repo / ".venv" / "bin" / "ruff.log").read_text().splitlines()
+    assert any(line.startswith("check") and "a.py" in line for line in log)
+    assert any(line.startswith("format --check") and "a.py" in line for line in log)
+
+
+def test_stop_finds_the_repo_from_a_subfolder(lint_repo: Path) -> None:
+    (lint_repo / "sub").mkdir()
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    assert run_stop_hook(lint_repo / "sub").returncode == 2
+
+
+@pytest.mark.parametrize("change", ["clean", "none", "markdown", "deleted"])
+def test_stop_passes_when_nothing_changed_fails_lint(lint_repo: Path, change: str) -> None:
+    if change == "clean":
+        (lint_repo / "a.py").write_text("y = 2\n")
+    elif change == "markdown":
+        (lint_repo / "notes.md").write_text("BAD\n")
+    elif change == "deleted":
+        (lint_repo / "a.py").unlink()
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_stop_never_changes_a_file(lint_repo: Path) -> None:
+    bad = b"BAD   =   1\n"
+    (lint_repo / "a.py").write_bytes(bad)
+    run_stop_hook(lint_repo)
+    assert (lint_repo / "a.py").read_bytes() == bad
+
+
+def test_stop_passes_with_a_note_when_ruff_is_missing(lint_repo: Path) -> None:
+    (lint_repo / ".venv" / "bin" / "ruff").unlink()
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 0
+    assert "lint not checked" in user_note(result)
+
+
+def test_stop_passes_with_a_note_when_ruff_times_out(lint_repo: Path) -> None:
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo, {"STUB_SLEEP": "5", "T2C_LINT_TIMEOUT": "1"})
+    assert result.returncode == 0
+    assert "lint not checked" in user_note(result)
+
+
+@pytest.mark.parametrize("stdin", ["not json", "{}", '{"cwd": "/nonexistent/t31"}'])
+def test_stop_passes_with_a_note_on_input_it_cant_use(stdin: str) -> None:
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "lint_on_stop.py")], input=stdin, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0
+    assert "lint not checked" in user_note(result)
+
+
+def test_stop_passes_outside_a_git_repo(tmp_path: Path) -> None:
+    result = run_stop_hook(tmp_path)
+    assert result.returncode == 0
+
+
+def test_settings_wire_the_lint_hook_on_stop_with_a_time_limit() -> None:
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    hooks = [hook for entry in settings["hooks"]["Stop"] for hook in entry["hooks"]]
+    lint = [hook for hook in hooks if "lint_on_stop.py" in hook["command"]]
+    assert len(lint) == 1
+    assert 0 < lint[0]["timeout"] <= 120
+
+
+# --- format_on_edit.py (T31): the project's own ruff, never uvx ----------------------
+
+
+def test_format_hook_uses_the_projects_ruff_and_not_uvx(
+    lint_repo: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    bin_dir = tmp_path_factory.mktemp("bin")
+    uvx = bin_dir / "uvx"
+    uvx.write_text(f'#!/bin/sh\ntouch "{bin_dir}/uvx-ran"\n')
+    uvx.chmod(0o755)
+    (lint_repo / "b.py").write_text("y = 2\n")
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "format_on_edit.py")],
+        input=json.dumps({"tool_input": {"file_path": str(lint_repo / "b.py")}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0
+    log = (lint_repo / ".venv" / "bin" / "ruff.log").read_text()
+    assert log.startswith("format") and "b.py" in log
+    assert not (bin_dir / "uvx-ran").exists()
+
+
+def test_format_hook_skips_quietly_without_the_projects_ruff(repo: Path) -> None:
+    (repo / "b.py").write_text("y = 2\n")
+    result = run_hook("format_on_edit.py", {"file_path": str(repo / "b.py")})
+    assert result.returncode == 0
+
+
+def test_stop_reads_a_file_name_git_would_quote(lint_repo: Path) -> None:
+    (lint_repo / "café plan.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 2
+    assert "café plan.py" in result.stderr
+
+
+def test_stop_keeps_pyproject_excludes_for_files_it_names(lint_repo: Path) -> None:
+    (lint_repo / "a.py").write_text("y = 2\n")
+    run_stop_hook(lint_repo)
+    log = (lint_repo / ".venv" / "bin" / "ruff.log").read_text().splitlines()
+    assert log and all("--force-exclude" in line for line in log)
+
+
+def test_settings_give_the_lint_hook_its_worst_case_time() -> None:
+    """6 git calls at 5s and 2 ruff calls at 30s (90s): a shorter limit would kill a slow run halfway."""
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    hooks = [hook for entry in settings["hooks"]["Stop"] for hook in entry["hooks"]]
+    assert next(h["timeout"] for h in hooks if "lint_on_stop.py" in h["command"]) >= 100
+
+
+def test_stop_leaves_another_repo_alone(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """A session can cd into another working folder; that repo's lint isn't this project's to hold."""
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    stub_ruff(other)
+    (other / "bad.py").write_text("BAD = 1\n")
+    result = run_stop_hook(other, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
+    assert result.returncode == 0
+    assert result.stdout == ""  # skipped on purpose, not "lint not checked"
+    assert not (other / ".venv" / "bin" / "ruff.log").exists()  # its ruff never ran
+
+
+def test_stop_still_lints_a_worktree_of_the_project(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    tree = tmp_path_factory.mktemp("trees") / "t99"
+    subprocess.run(["git", "-C", str(lint_repo), "worktree", "add", "-q", "-b", "t99-x", str(tree)], check=True)
+    stub_ruff(tree)
+    (tree / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(tree, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
+    assert result.returncode == 2
+
+
+def test_stop_blocks_once_then_lets_the_turn_end_naming_the_files(lint_repo: Path) -> None:
+    """After one block, a file that still fails may be one Claude must not or can't fix: say so, don't loop."""
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo, active=True)
+    assert result.returncode == 0
+    assert "still fails" in user_note(result) and "a.py" in user_note(result)
+
+
+def test_stop_says_so_when_it_cant_tell_the_project(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    not_a_repo = tmp_path_factory.mktemp("plain")
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo, {"CLAUDE_PROJECT_DIR": str(not_a_repo)})
+    assert result.returncode == 0
+    assert "couldn't tell" in user_note(result)
+
+
+def test_format_hook_leaves_another_repos_ruff_alone(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    stub_ruff(other)
+    (other / "b.py").write_text("y = 2\n")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "format_on_edit.py")],
+        input=json.dumps({"tool_input": {"file_path": str(other / "b.py")}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**env, "CLAUDE_PROJECT_DIR": str(lint_repo)},
+    )
+    assert result.returncode == 0
+    assert not (other / ".venv" / "bin" / "ruff.log").exists()
+    # The same call on a file inside the project does run its ruff, so the skip above is the check, not a failure.
+    (lint_repo / "c.py").write_text("y = 2\n")
+    subprocess.run(
+        [hook_python(), str(HOOKS / "format_on_edit.py")],
+        input=json.dumps({"tool_input": {"file_path": str(lint_repo / "c.py")}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**env, "CLAUDE_PROJECT_DIR": str(lint_repo)},
+    )
+    assert "c.py" in (lint_repo / ".venv" / "bin" / "ruff.log").read_text()
+
+
+def test_settings_give_the_format_hook_its_worst_case_time() -> None:
+    """Three git calls at 5s and ruff format at 40s (55s) must finish inside the hook's limit."""
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    hooks = [hook for entry in settings["hooks"]["PostToolUse"] for hook in entry["hooks"]]
+    assert next(h["timeout"] for h in hooks if "format_on_edit.py" in h["command"]) >= 55
+    source = (HOOKS / "format_on_edit.py").read_text()
+    assert "timeout=40" in source and "timeout=5" in source
+
+
+def test_format_hook_keeps_pyproject_excludes(lint_repo: Path) -> None:
+    (lint_repo / "b.py").write_text("y = 2\n")
+    run_hook("format_on_edit.py", {"file_path": str(lint_repo / "b.py")})
+    assert "--force-exclude" in (lint_repo / ".venv" / "bin" / "ruff.log").read_text()

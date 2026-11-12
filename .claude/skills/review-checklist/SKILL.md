@@ -83,6 +83,7 @@ Report these only if the diff changes why they're fine:
 - The "Not findings here" list in `.claude/claude-security-guidance.md`.
 - The hook in `.claude/hooks/block_forbidden.py` is a tripwire for accidents, not a sandbox, and its known gaps are listed in `docs/tickets/T27.md`.
 - Local models (faster-whisper) skip the meter.
+- `.claude/hooks/lint_on_stop.py` lets the turn end when it can't run ruff, unlike the fail-closed guards (T24): it's a lint gate, not a guard, and CI lints everything (T31).
 - `t2c run` takes Approval from the person's keystrokes: it's the single-user terminal path, and the guidance's "Slack action" means the Slack path.
 
 ## 3. Report

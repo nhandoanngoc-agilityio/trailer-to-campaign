@@ -19,3 +19,6 @@ evals/films/*/frames/
 evals/films/song-lang/
 evals/expected/song-lang.toml
 evals/drafts/
+
+# Personal Claude Code notes (CLAUDE.md best practices, T31)
+CLAUDE.local.md

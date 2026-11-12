@@ -7,9 +7,9 @@ disable-model-invocation: true
 
 Ticket to ship: $ARGUMENTS
 
-Run the ticket loop in `CLAUDE.md` for that ticket, one step at a time. Each step there keeps its own requirements and **Done when**; below is only what this skill adds.
+Run the ticket loop in the `ticket-loop` skill for that ticket, one step at a time. Each step there keeps its own requirements and **Done when**; below is only what this skill adds.
 
-`CLAUDE.md` writes every number as `<n>`, but they differ: T26 is issue #73, and its PRs are #74 and #75. Keep them apart here:
+The `ticket-loop` skill writes every number as `<n>`, but they differ: T26 is issue #73, and its PRs are #74 and #75. Keep them apart here:
 
 - `<t>`: the ticket number, from the issue title `T<t>: ...`. It names the branch and `docs/tickets/T<t>.md`.
 - `<issue>`: the GitHub issue, for `gh issue view` and `Closes #<issue>`.
@@ -32,7 +32,7 @@ Find the ticket from what you were given:
 2. **Plan 🧑.** Use plan mode and stop until the human approves. Tests and code start after approval.
 3. **Build.** Integrate main first (see **Integrate main**), since the plan may have waited a while.
 4. **Verify.** Run every check the loop names for what changed. A paid run needs the key, which a worktree session can't load, and the Slack flow needs a person: give the human the exact command or steps, why it's needed and the expected cost, then wait for them to say it's done. `films/` and `runs/` stay in the main checkout, so a command that reads footage sets `T2C_FILMS_DIR` to that `films/` folder. A check nobody ran goes in the PR as not run.
-5. **Ship.** Do the **Pre-PR checks** in `CLAUDE.md`, integrate main, and run `git push -u origin t<t>-<slug>`. Then open the PR with `gh pr create --base main --title "T<t>: <what changed>" --body-file <file>`, from `.github/pull_request_template.md`: `Closes #<issue>`, one evidence row per **Done when**, **Risky** ticked if it applies, and Human review left blank. Wait for CI.
+5. **Ship.** Do the **Pre-PR checks** in the `ticket-loop` skill, integrate main, and run `git push -u origin t<t>-<slug>`. Then open the PR with `gh pr create --base main --title "T<t>: <what changed>" --body-file <file>`, from `.github/pull_request_template.md`: `Closes #<issue>`, one evidence row per **Done when**, **Risky** ticked if it applies, and Human review left blank. Wait for CI.
 6. **Review.** Run `review-checklist` and `/code-review` against `main`, then fix or answer those findings and the CI review's. After pushing a batch of code fixes, wait for CI and ask `@claude` to review it (see **Ask `@claude`**). If findings are still open after three batches, stop and report them. If **Risky** is ticked, ask the human for an ultrareview, and wait for its findings before step 7.
 7. **Close the loop.** In the PR, finish `docs/tickets/T<t>.md` with its provenance block left blank, add the lesson, update `CONTEXT.md`, offer an ADR if one meets the bar, and tick the template's boxes. Integrate main if it has moved, push, and wait for CI.
 8. **Merge gate 🧑.** This is the loop's Review gate too: the human reviews here, once the record is in the PR. Stop once `gh pr view <pr> --json headRefOid,statusCheckRollup` shows `headRefOid` is your local `HEAD`, and that every check passed, including `test` and `answer-key`. An empty list means CI hasn't run, not that it passed. Another check may be skipped, but `test` and `answer-key` may not. If the SHA differs or a check is pending, wait for CI again. The only red checks you may stop on are `answer-key` and `claude-review`, once `test` has passed (see **Wait for CI**), and you name them in the report. Report the PR link, that SHA, the evidence, anything not run, the caveats, and what's left for the human: Human review, the provenance block and the merge.

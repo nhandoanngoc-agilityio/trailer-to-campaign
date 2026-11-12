@@ -48,9 +48,9 @@ def frontmatter(path: Path) -> dict[str, str]:
 
 
 def tracked_files() -> list[str]:
-    return subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True
-    ).stdout.split()
+    """NUL-separated, so a name with a space or non-ASCII letters arrives whole and unquoted."""
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True, check=True).stdout
+    return [name for name in out.split("\0") if name]
 
 
 GITHUB_REPO = "nhandoanngoc-agilityio/trailer-to-campaign"  # named in CLAUDE.md, but not a path
@@ -72,6 +72,15 @@ def test_missing_paths_catches_a_typo_but_not_a_bare_file_name() -> None:
 
 
 # --- CLAUDE.md ---------------------------------------------------------------------
+
+
+def test_the_prompt_file_rule_loads_everywhere() -> None:
+    """An agent .py that inlines a prompt touches no prompts/ file, so a path-scoped rule would never load."""
+    assert "Prompts live in their own files next to the agent" in CLAUDE_MD.read_text()
+
+
+def test_a_rule_covers_the_spoiler_list_code() -> None:
+    assert any("tools/spoilers.py" in frontmatter(r).get("paths", "") for r in rule_files())
 
 
 @pytest.mark.parametrize("line", NEVER_DO)

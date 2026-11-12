@@ -1245,15 +1245,16 @@ def lint_repo(repo: Path) -> Path:
     return repo
 
 
-def run_stop_hook(cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    payload = {"hook_event_name": "Stop", "stop_hook_active": False, "cwd": str(cwd)}
+def run_stop_hook(cwd: Path, env: dict[str, str] | None = None, active: bool = False) -> subprocess.CompletedProcess:
+    payload = {"hook_event_name": "Stop", "stop_hook_active": active, "cwd": str(cwd)}
+    inherited = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}  # a Claude Code shell exports it
     return subprocess.run(
         [hook_python(), str(HOOKS / "lint_on_stop.py")],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, **(env or {})},
+        env={**inherited, **(env or {})},
     )
 
 
@@ -1412,3 +1413,46 @@ def test_stop_still_lints_a_worktree_of_the_project(lint_repo: Path, tmp_path_fa
     (tree / "a.py").write_text("BAD = 1\n")
     result = run_stop_hook(tree, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
     assert result.returncode == 2
+
+
+def test_stop_blocks_once_then_lets_the_turn_end_naming_the_files(lint_repo: Path) -> None:
+    """After one block, a file that still fails may be one Claude must not or can't fix: say so, don't loop."""
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo, active=True)
+    assert result.returncode == 0
+    assert "still fails" in result.stderr and "a.py" in result.stderr
+
+
+def test_stop_says_so_when_it_cant_tell_the_project(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    not_a_repo = tmp_path_factory.mktemp("plain")
+    (lint_repo / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo, {"CLAUDE_PROJECT_DIR": str(not_a_repo)})
+    assert result.returncode == 0
+    assert "lint not checked" in result.stderr
+
+
+def test_format_hook_leaves_another_repos_ruff_alone(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    stub_ruff(other)
+    (other / "b.py").write_text("y = 2\n")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    result = subprocess.run(
+        [hook_python(), str(HOOKS / "format_on_edit.py")],
+        input=json.dumps({"tool_input": {"file_path": str(other / "b.py")}}),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**env, "CLAUDE_PROJECT_DIR": str(lint_repo)},
+    )
+    assert result.returncode == 0
+    assert not (other / ".venv" / "bin" / "ruff.log").exists()
+
+
+def test_settings_give_the_format_hook_its_worst_case_time() -> None:
+    """Three git calls at 5s and ruff format at 40s (55s) must finish inside the hook's limit."""
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    hooks = [hook for entry in settings["hooks"]["PostToolUse"] for hook in entry["hooks"]]
+    assert next(h["timeout"] for h in hooks if "format_on_edit.py" in h["command"]) >= 55
+    source = (HOOKS / "format_on_edit.py").read_text()
+    assert "timeout=40" in source and "timeout=5" in source

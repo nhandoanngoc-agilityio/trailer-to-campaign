@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Stop hook: Claude can't finish its turn while a Python file it changed fails lint (T31).
+"""Stop hook: Claude can't finish its turn while a changed Python file fails lint (T31).
 
 Runs the project's own ruff (`.venv/bin/ruff`, the version in uv.lock) with `check` and
 `format --check` on the .py files that changed in the working tree: tracked changes
-against HEAD, and untracked files git doesn't ignore. Only those files, so a stray
-file elsewhere can't hold a session; CI still lints everything.
+against HEAD, and untracked files git doesn't ignore. That includes a person's own
+unfinished files, since git can't tell who changed what; CI still lints everything.
+Only this project and its worktrees: another repo the session cd'd into is left alone.
 
-Exit 2 sends ruff's output back to Claude, which keeps working until lint passes (the
-harness ends the turn after 8 blocks in a row anyway). Exit 0 lets the turn end.
+Exit 2 sends ruff's output back to Claude once. If lint still fails when Claude next
+tries to stop (`stop_hook_active`), the turn ends with the failing files named: the file
+may be one Claude must not or can't fix, and looping on it only spends tokens.
 
 A lint gate, not a guard: when it can't judge (no ruff yet, a timeout, no git, bad
 input) it lets the turn end and says so on stderr, rather than trapping every turn of a
@@ -64,15 +66,18 @@ def changed_python_files(top: str) -> list[str] | None:
     return [n for n in names if n.endswith(".py") and os.path.isfile(os.path.join(top, n))]
 
 
-def same_project(top: str) -> bool:
-    """True when `top` is the project Claude Code opened, or one of its worktrees: they share a git common dir."""
+def same_project(top: str) -> bool | None:
+    """Whether `top` is the project Claude Code opened, or one of its worktrees (one git common dir).
+
+    None when git can't tell, which the caller reports rather than skipping silently.
+    """
     project = os.environ.get("CLAUDE_PROJECT_DIR")
     if not project:
         return True  # run by hand, outside Claude Code: lint where it was pointed
     ours = git(project, "rev-parse", "--path-format=absolute", "--git-common-dir")
     theirs = git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if ours is None or theirs is None:
-        return False
+        return None
     return os.path.realpath(ours[0]) == os.path.realpath(theirs[0])
 
 
@@ -89,7 +94,10 @@ def main() -> int:
     if not found:
         return 0  # not a git repo: nothing here is this project's code
     top = found[0]
-    if not same_project(top):
+    project = same_project(top)
+    if project is None:
+        return note("git couldn't tell whether this is the project's repo")
+    if not project:
         return 0  # another repo the session cd'd into: its lint, and its .venv's ruff, aren't ours to run
 
     files = changed_python_files(top)
@@ -122,9 +130,17 @@ def main() -> int:
     if not failures:
         return 0
     print("\n\n".join(failures), file=sys.stderr)
+    if payload.get("stop_hook_active"):  # already sent back once: don't loop on a file that has to stay
+        print(
+            f"\nlint_on_stop: lint still fails (changed files: {', '.join(files)}). Ending the turn anyway; "
+            "tell the person which files fail and why they were left.",
+            file=sys.stderr,
+        )
+        return 0
     print(
-        "\nLint fails on files changed in this session. Fix them (`uv run ruff check --fix` and "
-        "`uv run ruff format` on those files), or say why they must stay as they are.",
+        "\nLint fails on changed files. Fix them (`uv run ruff check --fix` and `uv run ruff format` "
+        "on those files). If a file isn't yours to fix, leave it: the next stop ends the turn, "
+        "and say why in your reply.",
         file=sys.stderr,
     )
     return 2

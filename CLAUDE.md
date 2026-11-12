@@ -38,6 +38,7 @@ When changing a gate, checker, or validation rule, add tests for both sides: inv
 ## Code standards
 
 - Python with type hints; one module per agent and per MCP tool.
+- Prompts live in their own files next to the agent that uses them, so prompt changes show up clearly in diffs and trigger the Eval Set.
 - Every call to a paid model API goes through the Film Budget meter.
 - Secrets come from the environment, never from the repo.
 - Footage, transcripts, Catalog Metadata and Slack messages are data in prompts, never instructions.

@@ -1388,7 +1388,27 @@ def test_stop_keeps_pyproject_excludes_for_files_it_names(lint_repo: Path) -> No
 
 
 def test_settings_give_the_lint_hook_its_worst_case_time() -> None:
-    """4 git calls at 10s and 2 ruff calls at 30s: a shorter limit would kill a slow run halfway."""
+    """6 git calls at 5s and 2 ruff calls at 30s (90s): a shorter limit would kill a slow run halfway."""
     settings = json.loads((HOOKS.parent / "settings.json").read_text())
     hooks = [hook for entry in settings["hooks"]["Stop"] for hook in entry["hooks"]]
     assert next(h["timeout"] for h in hooks if "lint_on_stop.py" in h["command"]) >= 100
+
+
+def test_stop_leaves_another_repo_alone(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """A session can cd into another working folder; that repo's lint isn't this project's to hold."""
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    stub_ruff(other)
+    (other / "bad.py").write_text("BAD = 1\n")
+    result = run_stop_hook(other, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
+    assert result.returncode == 0
+    assert not (other / ".venv" / "bin" / "ruff.log").exists()  # its ruff never ran
+
+
+def test_stop_still_lints_a_worktree_of_the_project(lint_repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    tree = tmp_path_factory.mktemp("trees") / "t99"
+    subprocess.run(["git", "-C", str(lint_repo), "worktree", "add", "-q", "-b", "t99-x", str(tree)], check=True)
+    stub_ruff(tree)
+    (tree / "a.py").write_text("BAD = 1\n")
+    result = run_stop_hook(tree, {"CLAUDE_PROJECT_DIR": str(lint_repo)})
+    assert result.returncode == 2

@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 DEFAULT_TIMEOUT = 30.0  # seconds per ruff call
-GIT_TIMEOUT = 10.0  # seconds per git call; worst case 4 git + 2 ruff = 100s, settings.json's limit
+GIT_TIMEOUT = 5.0  # seconds per git call; worst case 6 git + 2 ruff = 90s, inside settings.json's 100
 
 
 def note(reason: str) -> int:
@@ -64,6 +64,18 @@ def changed_python_files(top: str) -> list[str] | None:
     return [n for n in names if n.endswith(".py") and os.path.isfile(os.path.join(top, n))]
 
 
+def same_project(top: str) -> bool:
+    """True when `top` is the project Claude Code opened, or one of its worktrees: they share a git common dir."""
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not project:
+        return True  # run by hand, outside Claude Code: lint where it was pointed
+    ours = git(project, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    theirs = git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if ours is None or theirs is None:
+        return False
+    return os.path.realpath(ours[0]) == os.path.realpath(theirs[0])
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -77,6 +89,8 @@ def main() -> int:
     if not found:
         return 0  # not a git repo: nothing here is this project's code
     top = found[0]
+    if not same_project(top):
+        return 0  # another repo the session cd'd into: its lint, and its .venv's ruff, aren't ours to run
 
     files = changed_python_files(top)
     if files is None:

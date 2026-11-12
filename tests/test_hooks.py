@@ -1371,3 +1371,24 @@ def test_format_hook_skips_quietly_without_the_projects_ruff(repo: Path) -> None
     (repo / "b.py").write_text("y = 2\n")
     result = run_hook("format_on_edit.py", {"file_path": str(repo / "b.py")})
     assert result.returncode == 0
+
+
+def test_stop_reads_a_file_name_git_would_quote(lint_repo: Path) -> None:
+    (lint_repo / "café plan.py").write_text("BAD = 1\n")
+    result = run_stop_hook(lint_repo)
+    assert result.returncode == 2
+    assert "café plan.py" in result.stderr
+
+
+def test_stop_keeps_pyproject_excludes_for_files_it_names(lint_repo: Path) -> None:
+    (lint_repo / "a.py").write_text("y = 2\n")
+    run_stop_hook(lint_repo)
+    log = (lint_repo / ".venv" / "bin" / "ruff.log").read_text().splitlines()
+    assert log and all("--force-exclude" in line for line in log)
+
+
+def test_settings_give_the_lint_hook_its_worst_case_time() -> None:
+    """4 git calls at 10s and 2 ruff calls at 30s: a shorter limit would kill a slow run halfway."""
+    settings = json.loads((HOOKS.parent / "settings.json").read_text())
+    hooks = [hook for entry in settings["hooks"]["Stop"] for hook in entry["hooks"]]
+    assert next(h["timeout"] for h in hooks if "lint_on_stop.py" in h["command"]) >= 100

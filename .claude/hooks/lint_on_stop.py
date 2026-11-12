@@ -24,7 +24,8 @@ import os
 import subprocess
 import sys
 
-DEFAULT_TIMEOUT = 30.0  # seconds per ruff call; settings.json gives the whole hook 70
+DEFAULT_TIMEOUT = 30.0  # seconds per ruff call
+GIT_TIMEOUT = 10.0  # seconds per git call; worst case 4 git + 2 ruff = 100s, settings.json's limit
 
 
 def note(reason: str) -> int:
@@ -41,20 +42,22 @@ def timeout() -> float:
 
 def git(top: str, *args: str) -> list[str] | None:
     try:
-        result = subprocess.run(["git", "-C", top, *args], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["git", "-C", top, *args], capture_output=True, text=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
-    return [line for line in result.stdout.splitlines() if line]
+    # -z output splits on NUL, so a name with spaces, quotes or non-ASCII letters arrives as it is
+    separator = "\0" if "-z" in args else "\n"
+    return [name for name in result.stdout.split(separator) if name]
 
 
 def changed_python_files(top: str) -> list[str] | None:
     if git(top, "rev-parse", "--verify", "-q", "HEAD") is not None:
-        tracked = git(top, "diff", "--name-only", "--diff-filter=d", "HEAD")
+        tracked = git(top, "diff", "-z", "--name-only", "--diff-filter=d", "HEAD")
     else:  # no commit yet: only what's staged can be compared
-        tracked = git(top, "diff", "--name-only", "--diff-filter=d", "--cached")
-    untracked = git(top, "ls-files", "--others", "--exclude-standard")
+        tracked = git(top, "diff", "-z", "--name-only", "--diff-filter=d", "--cached")
+    untracked = git(top, "ls-files", "-z", "--others", "--exclude-standard")
     if tracked is None or untracked is None:
         return None
     names = sorted(set(tracked) | set(untracked))
@@ -86,10 +89,14 @@ def main() -> int:
         return note(f"{ruff} not found; run `uv sync`")
 
     failures = []
-    for command in (["check"], ["format", "--check"]):
+    for command in (["check"], ["format", "--check"]):  # --force-exclude: pyproject excludes hold, as in CI
         try:
             result = subprocess.run(
-                [ruff, *command, "--", *files], cwd=top, capture_output=True, text=True, timeout=timeout()
+                [ruff, *command, "--force-exclude", "--", *files],
+                cwd=top,
+                capture_output=True,
+                text=True,
+                timeout=timeout(),
             )
         except subprocess.TimeoutExpired:
             return note(f"`ruff {' '.join(command)}` took longer than {timeout():g}s")

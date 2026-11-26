@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -91,6 +93,62 @@ def test_t2c_is_installed_as_a_command(tmp_path: Path) -> None:
     )
     assert result.returncode == EXIT_FILM_BUDGET_REACHED
     assert "Film Budget reached" in result.stderr
+
+
+# T32: t2c --version prints the package version from its metadata, never a hard-coded one.
+
+PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
+
+
+def installed_version() -> str:
+    return importlib.metadata.version("trailer-to-campaign")
+
+
+def test_version_prints_the_package_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={})
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == f"trailer-to-campaign {installed_version()}\n"
+
+
+def test_version_matches_pyproject(capsys: pytest.CaptureFixture[str]) -> None:
+    declared = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
+    with pytest.raises(SystemExit):
+        main(["--version"], env={})
+    assert capsys.readouterr().out.split() == ["trailer-to-campaign", declared]
+
+
+def test_version_needs_no_settings(capsys: pytest.CaptureFixture[str]) -> None:
+    # A subcommand with this env is a usage error (test_bad_budget_in_environment_is_a_usage_error).
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={"FILM_BUDGET_USD": "not-a-number"})
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == f"trailer-to-campaign {installed_version()}\n"
+
+
+def test_help_lists_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--help"])
+    assert shown.value.code == 0
+    assert "--version" in capsys.readouterr().out
+
+
+def test_t2c_version_through_the_installed_command() -> None:
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    result = subprocess.run(["t2c", "--version"], capture_output=True, text=True, env=env, timeout=30)
+    assert result.returncode == 0
+    assert result.stdout == f"trailer-to-campaign {installed_version()}\n"
+
+
+def test_version_without_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trailer_to_campaign import cli
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    assert cli.package_version() == "unknown"
+    assert cli.build_parser().prog == "t2c"  # every other command still works when run from source
 
 
 def test_serve_footage_runs_the_footage_server_on_stdio(monkeypatch: pytest.MonkeyPatch) -> None:

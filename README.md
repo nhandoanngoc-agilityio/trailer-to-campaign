@@ -35,6 +35,7 @@ uv run t2c run --film agent-327         # one whole Run, with your Approval at e
 uv run t2c watch --film agent-327       # or one stage at a time: the Watcher on the trailer
 uv run t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
 uv run t2c eval                         # the Eval Set: how many Traps the Checker caught
+uv run t2c --version                    # the installed version
 ```
 
 `t2c watch` downloads the trailer from the Film's catalog link (or reads the Film's `trailer_file`, or uses `--source`), samples frames and transcribes it locally, then has the Watcher pick 5–10 Key Moments. Each one is checked against what the Watcher was shown: frames it looked at, words heard in the transcript, cast from the Catalog Metadata. The Key Moments are written to `runs/<film>/<time>/key_moments.json`, next to the Run Log, and the Run stops if the Film Budget (`--budget`, or `FILM_BUDGET_USD`, default $2.00) is reached. A model call that doesn't answer within 10 minutes is cut off and charged what it might have cost; the agent then fails as if it gave up (the Watcher or the first writing ends the Run in an error, while a Checker review or a rewrite flags the posts it couldn't finish). `t2c dummy-run` checks the Film Budget meter without an API key.

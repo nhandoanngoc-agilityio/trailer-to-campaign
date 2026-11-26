@@ -5,6 +5,7 @@
     t2c watch --film agent-327 [--source trailer.mp4]
     t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
     t2c eval [--eval-dir evals]
+    t2c --version
 
 run is one Run for a Film: the Watcher, the Approval of its Key Moments, the
 Copywriter and the Checker, then the Approval of the Social Posts, in this
@@ -28,6 +29,7 @@ marketers' times, and the Approval Rate and cost per Film from its Run Logs.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import os
@@ -52,6 +54,7 @@ from trailer_to_campaign.config import (
 from trailer_to_campaign.pricing import Usage
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
+DISTRIBUTION = "trailer-to-campaign"
 OLD_WAY_SOURCES = ("stopwatch", "memory")  # result.py's: importing it here would load the pipeline for every command
 DUMMY_MODEL = "claude-opus-5-5"
 DUMMY_INPUT_TOKENS = 2_000
@@ -67,6 +70,14 @@ def configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+
+
+def package_version() -> str:
+    """The installed version, from package metadata; "unknown" when run from source, never a made-up number."""
+    try:
+        return importlib.metadata.version(DISTRIBUTION)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _budget_arg(value: str) -> Decimal:
@@ -92,6 +103,9 @@ def _film_arg(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t2c", description="Turn a Film's trailer into Social Posts.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--version", action="version", version=f"{DISTRIBUTION} {package_version()}", help="print the version and exit"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     dummy = commands.add_parser("dummy-run", help="send fake model calls through the Film Budget meter")

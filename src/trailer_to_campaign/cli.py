@@ -23,6 +23,7 @@ default) or on the Claude Agent SDK (T11).
 result writes a real Film's side-by-side page (T12): Time Saved from the two
 marketers' times, and the Approval Rate and cost per Film from its Run Logs.
 --old-way-source says whether the old way's time came from a stopwatch or from memory (T28).
+t2c --version prints `trailer-to-campaign <version>` from the installed package (T32).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, replace
 from decimal import Decimal
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,7 @@ from trailer_to_campaign.config import (
 from trailer_to_campaign.pricing import Usage
 from trailer_to_campaign.run_log import EXIT_AGENT_FAILED, EXIT_FILM_BUDGET_REACHED, RunLog, check_film_slug
 
+DISTRIBUTION = "trailer-to-campaign"  # [project] name in pyproject.toml
 OLD_WAY_SOURCES = ("stopwatch", "memory")  # result.py's: importing it here would load the pipeline for every command
 DUMMY_MODEL = "claude-opus-5-5"
 DUMMY_INPUT_TOKENS = 2_000
@@ -67,6 +70,14 @@ def configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+
+
+def package_version() -> str:
+    """The installed package's version; "unknown" if it isn't installed, so no command fails on it."""
+    try:
+        return metadata.version(DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _budget_arg(value: str) -> Decimal:
@@ -92,6 +103,12 @@ def _film_arg(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t2c", description="Turn a Film's trailer into Social Posts.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{DISTRIBUTION} {package_version()}",
+        help="print the package version and exit",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     dummy = commands.add_parser("dummy-run", help="send fake model calls through the Film Budget meter")

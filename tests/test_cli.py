@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -1158,3 +1159,53 @@ def test_the_protocol_says_memory_makes_time_saved_an_estimate() -> None:
     sentences = " ".join(text.split()).split(". ")
     # One sentence has to pair them: "from memory" and "estimate" also appear apart elsewhere on the page.
     assert any("use `memory`" in s and "from memory" in s and "Time Saved as an estimate" in s for s in sentences)
+
+
+def test_version_prints_the_package_version_and_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={})  # no API key and no settings
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == f"trailer-to-campaign {importlib.metadata.version('trailer-to-campaign')}\n"
+
+
+def test_version_follows_the_package_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign import cli
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "9.9.9")
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={})
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == "trailer-to-campaign 9.9.9\n"
+
+
+def test_version_works_with_bad_settings_in_the_environment(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={"FILM_BUDGET_USD": "abc", "T2C_WATCHER": "nope"})
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == f"trailer-to-campaign {importlib.metadata.version('trailer-to-campaign')}\n"
+
+
+def test_version_without_installed_metadata_says_unknown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign import cli
+
+    def not_installed(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.metadata, "version", not_installed)
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={})
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == "trailer-to-campaign unknown\n"
+    assert cli.build_parser().parse_args(["dummy-run"]).command == "dummy-run"  # other commands still build
+
+
+def test_the_help_lists_the_version_flag(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as shown:
+        main(["--help"])
+    assert shown.value.code == 0
+    assert "--version" in capsys.readouterr().out

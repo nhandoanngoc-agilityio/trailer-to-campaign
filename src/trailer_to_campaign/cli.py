@@ -5,6 +5,7 @@
     t2c watch --film agent-327 [--source trailer.mp4]
     t2c write --film agent-327 --key-moments runs/agent-327/<time>/key_moments.json
     t2c eval [--eval-dir evals]
+    t2c --version
 
 run is one Run for a Film: the Watcher, the Approval of its Key Moments, the
 Copywriter and the Checker, then the Approval of the Social Posts, in this
@@ -28,6 +29,7 @@ marketers' times, and the Approval Rate and cost per Film from its Run Logs.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import os
@@ -89,9 +91,23 @@ def _film_arg(value: str) -> str:
         raise argparse.ArgumentTypeError(str(err)) from err
 
 
+def _package_version() -> str:
+    """The installed package's version; "unknown" from a source tree that was never installed."""
+    try:
+        return importlib.metadata.version("trailer-to-campaign")
+    except importlib.metadata.PackageNotFoundError:  # failing here would break every command, not just --version
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="t2c", description="Turn a Film's trailer into Social Posts.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"trailer-to-campaign {_package_version()}",
+        help="print the package version and exit",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     dummy = commands.add_parser("dummy-run", help="send fake model calls through the Film Budget meter")

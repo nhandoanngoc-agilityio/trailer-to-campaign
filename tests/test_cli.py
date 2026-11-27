@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -91,6 +93,70 @@ def test_t2c_is_installed_as_a_command(tmp_path: Path) -> None:
     )
     assert result.returncode == EXIT_FILM_BUDGET_REACHED
     assert "Film Budget reached" in result.stderr
+
+
+def installed_version_line() -> str:
+    return f"trailer-to-campaign {importlib.metadata.version('trailer-to-campaign')}\n"
+
+
+def test_version_prints_the_package_name_and_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env={})
+    assert shown.value.code == 0
+    out = capsys.readouterr()
+    assert out.out == installed_version_line()
+    assert out.err == ""
+
+
+def test_version_matches_pyproject(capsys: pytest.CaptureFixture[str]) -> None:
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    with pytest.raises(SystemExit):
+        main(["--version"], env={})
+    # A stale install fails here too: run `uv sync` after bumping pyproject.toml.
+    assert capsys.readouterr().out == f"trailer-to-campaign {version}\n"
+
+
+def test_version_needs_no_settings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    bad = {"FILM_BUDGET_USD": "not-a-number"}
+    with pytest.raises(SystemExit) as shown:
+        main(["--version"], env=bad)
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == installed_version_line()
+    with pytest.raises(SystemExit) as refused:  # the other side: the same setting still stops a real command
+        main(["dummy-run", "--runs-dir", str(tmp_path)], env=bad)
+    assert refused.value.code == 2
+    assert "FILM_BUDGET_USD" in capsys.readouterr().err
+
+
+def test_version_without_package_metadata_says_unknown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trailer_to_campaign import cli
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.importlib.metadata, "version", missing)
+    parser = cli.build_parser()  # every other command still builds
+    with pytest.raises(SystemExit) as shown:
+        parser.parse_args(["--version"])
+    assert shown.value.code == 0
+    assert capsys.readouterr().out == "trailer-to-campaign unknown\n"
+
+
+def test_the_help_lists_the_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as shown:
+        main(["--help"])
+    assert shown.value.code == 0
+    assert "--version" in capsys.readouterr().out
+
+
+def test_t2c_version_runs_as_an_installed_command() -> None:
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    result = subprocess.run(["t2c", "--version"], capture_output=True, text=True, env=env, timeout=30)
+    assert result.returncode == 0
+    assert result.stdout == installed_version_line()
 
 
 def test_serve_footage_runs_the_footage_server_on_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
